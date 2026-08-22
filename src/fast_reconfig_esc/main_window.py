@@ -1,0 +1,371 @@
+"""Main application window: top bar, config picker, ESC status grid, log panel."""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional
+
+from PyQt6.QtCore import QSize, pyqtSignal
+from PyQt6.QtGui import QCloseEvent
+from PyQt6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QPlainTextEdit,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
+)
+
+from . import i18n
+from .connection_worker import ConnectionWorker
+from .esc_manager import (
+    DEFAULT_ESC_CONNECT_RETRIES,
+    MAX_ESC_CONNECT_RETRIES,
+    MIN_ESC_CONNECT_RETRIES,
+)
+from .esc_status_widget import EscStatusWidget
+from .flag_icons import FLAG_ICON_BUILDERS
+from .serial_transport import list_fc_ports
+from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
+
+BAUD_RATES = [1000000, 500000, 256000, 115200, 57600, 38400, 19200, 14400, 9600]
+GRID_COLUMNS = 4
+
+_LOG_COLORS = {
+    "info": TEXT_MUTED,
+    "warning": ACCENT_AMBER,
+    "error": ACCENT_ERROR,
+    "success": ACCENT_GREEN,
+}
+
+
+class MainWindow(QMainWindow):
+    # GUI -> worker thread. Connecting these to EscManager's plain methods is
+    # enough to get a queued cross-thread call: Qt looks at the RECEIVER's
+    # thread affinity (the EscManager lives on the worker QThread), not the
+    # sender's, so this dispatch is automatically queued onto its event loop.
+    request_connect = pyqtSignal(str, int)
+    request_disconnect = pyqtSignal()
+    request_discover = pyqtSignal()
+    request_flash = pyqtSignal(str, object)  # config_path, target_indices (list | None)
+    request_set_esc_retries = pyqtSignal(int)
+    request_set_config_path = pyqtSignal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.resize(920, 720)
+
+        self.worker = ConnectionWorker()
+        self.esc_manager = self.worker.manager
+
+        self._esc_widgets: dict[int, EscStatusWidget] = {}
+        self._connected = False
+
+        self._build_ui()
+        self._wire_signals()
+        self._refresh_ports()
+        self._retranslate_ui()
+        i18n.signals.language_changed.connect(self._retranslate_ui)
+
+    # ---- UI construction ------------------------------------------------
+
+    def _build_ui(self) -> None:
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+
+        root.addWidget(self._build_top_bar())
+        root.addWidget(self._build_config_row())
+
+        self._grid_container = QFrame()
+        self._grid_layout = QGridLayout(self._grid_container)
+        root.addWidget(self._grid_container, 1)
+
+        root.addWidget(self._build_log_panel())
+
+    def _build_top_bar(self) -> QFrame:
+        bar = QFrame()
+        bar.setObjectName("topBar")
+        layout = QHBoxLayout(bar)
+
+        logo = QLabel("AM32 FLASHER")
+        logo.setStyleSheet("font-weight: 700; font-size: 15px; color: #c0392b;")
+        layout.addWidget(logo)
+        layout.addStretch(1)
+
+        self._port_label = QLabel()
+        layout.addWidget(self._port_label)
+        self._port_combo = QComboBox()
+        self._port_combo.setMinimumWidth(220)
+        layout.addWidget(self._port_combo)
+
+        refresh_btn = QPushButton("↻")
+        refresh_btn.setObjectName("refreshButton")
+        refresh_btn.setFixedSize(36, 30)
+        refresh_btn.setStyleSheet("font-size: 16px; padding: 0px;")
+        refresh_btn.clicked.connect(self._refresh_ports)
+        self._refresh_btn = refresh_btn
+        layout.addWidget(refresh_btn)
+
+        self._baud_label = QLabel()
+        layout.addWidget(self._baud_label)
+        self._baud_combo = QComboBox()
+        for rate in BAUD_RATES:
+            self._baud_combo.addItem(str(rate))
+        self._baud_combo.setCurrentText("115200")
+        layout.addWidget(self._baud_combo)
+
+        self._connect_toggle_btn = QPushButton()
+        self._connect_toggle_btn.setObjectName("connectButton")
+        self._connect_toggle_btn.setMinimumWidth(110)
+        self._connect_toggle_btn.clicked.connect(self._on_connect_toggle_clicked)
+        layout.addWidget(self._connect_toggle_btn)
+
+        self._lang_combo = QComboBox()
+        self._lang_combo.setIconSize(QSize(22, 15))
+        for code, _flag, label, _name in i18n.LANGUAGES:
+            icon = FLAG_ICON_BUILDERS[code]()
+            self._lang_combo.addItem(icon, label, code)
+        current_idx = [c for c, *_ in i18n.LANGUAGES].index(i18n.current_language())
+        self._lang_combo.setCurrentIndex(current_idx)
+        self._lang_combo.setFixedWidth(96)
+        self._lang_combo.currentIndexChanged.connect(self._on_language_selected)
+        layout.addWidget(self._lang_combo)
+
+        return bar
+
+    def _build_config_row(self) -> QFrame:
+        row = QFrame()
+        row.setObjectName("configRow")
+        layout = QHBoxLayout(row)
+
+        self._config_label = QLabel()
+        layout.addWidget(self._config_label)
+        self._config_path_edit = QLineEdit()
+        self._config_path_edit.setReadOnly(True)
+        layout.addWidget(self._config_path_edit, 1)
+
+        self._browse_btn = QPushButton()
+        self._browse_btn.clicked.connect(self._on_browse_clicked)
+        layout.addWidget(self._browse_btn)
+
+        self._auto_flash_check = QCheckBox()
+        layout.addWidget(self._auto_flash_check)
+
+        self._esc_retries_label = QLabel()
+        layout.addWidget(self._esc_retries_label)
+        self._retries_spin = QSpinBox()
+        self._retries_spin.setRange(MIN_ESC_CONNECT_RETRIES, MAX_ESC_CONNECT_RETRIES)
+        self._retries_spin.setValue(DEFAULT_ESC_CONNECT_RETRIES)
+        self._retries_spin.valueChanged.connect(self.request_set_esc_retries.emit)
+        layout.addWidget(self._retries_spin)
+
+        self._rescan_btn = QPushButton()
+        self._rescan_btn.setEnabled(False)
+        self._rescan_btn.clicked.connect(self._on_rescan_clicked)
+        layout.addWidget(self._rescan_btn)
+
+        self._flash_all_btn = QPushButton()
+        self._flash_all_btn.setEnabled(False)
+        self._flash_all_btn.clicked.connect(self._on_flash_all_clicked)
+        layout.addWidget(self._flash_all_btn)
+
+        return row
+
+    def _build_log_panel(self) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("logPanel")
+        layout = QVBoxLayout(panel)
+        self._log_view = QPlainTextEdit()
+        self._log_view.setReadOnly(True)
+        self._log_view.setMaximumBlockCount(2000)
+        self._log_view.setStyleSheet("font-family: Consolas, monospace;")
+        layout.addWidget(self._log_view)
+        panel.setMaximumHeight(220)
+        return panel
+
+    # ---- signal wiring ------------------------------------------------
+
+    def _wire_signals(self) -> None:
+        self.request_connect.connect(self.esc_manager.connect)
+        self.request_disconnect.connect(self.esc_manager.disconnect)
+        self.request_discover.connect(self.esc_manager.discover_all)
+        self.request_flash.connect(self.esc_manager.flash_all)
+        self.request_set_esc_retries.connect(self.esc_manager.set_esc_connect_retries)
+        self.request_set_config_path.connect(self.esc_manager.set_config_path)
+
+        self.esc_manager.connection_state_changed.connect(self._on_connection_state_changed)
+        self.esc_manager.esc_status_changed.connect(self._on_esc_status_changed)
+        self.esc_manager.log_message.connect(self._on_log_message)
+        self.esc_manager.discovery_finished.connect(self._on_discovery_finished)
+        self.esc_manager.flash_finished.connect(self._on_flash_finished)
+
+    # ---- i18n ------------------------------------------------
+
+    def _on_language_selected(self, index: int) -> None:
+        code = self._lang_combo.itemData(index)
+        if code:
+            i18n.set_language(code)
+
+    def _sync_lang_combo(self) -> None:
+        idx = [c for c, *_ in i18n.LANGUAGES].index(i18n.current_language())
+        if self._lang_combo.currentIndex() != idx:
+            self._lang_combo.blockSignals(True)
+            self._lang_combo.setCurrentIndex(idx)
+            self._lang_combo.blockSignals(False)
+
+    def _update_connect_toggle_button(self) -> None:
+        if self._connected:
+            self._connect_toggle_btn.setText(i18n.tr("disconnect"))
+            self._connect_toggle_btn.setObjectName("")
+        else:
+            self._connect_toggle_btn.setText(i18n.tr("connect"))
+            self._connect_toggle_btn.setObjectName("connectButton")
+        # objectName-based QSS doesn't auto-refresh at runtime - force it to.
+        self._connect_toggle_btn.style().unpolish(self._connect_toggle_btn)
+        self._connect_toggle_btn.style().polish(self._connect_toggle_btn)
+
+    def _retranslate_ui(self, *_args) -> None:
+        self._sync_lang_combo()
+        self.setWindowTitle(i18n.tr("window_title"))
+        self._port_label.setText(i18n.tr("port_label"))
+        self._refresh_btn.setToolTip(i18n.tr("refresh_tooltip"))
+        self._baud_label.setText(i18n.tr("baud_label"))
+        self._update_connect_toggle_button()
+
+        self._config_label.setText(i18n.tr("config_label"))
+        self._config_path_edit.setPlaceholderText(i18n.tr("config_placeholder"))
+        self._browse_btn.setText(i18n.tr("browse"))
+        self._auto_flash_check.setText(i18n.tr("auto_flash_mode"))
+        self._auto_flash_check.setToolTip(i18n.tr("auto_flash_tooltip"))
+        self._esc_retries_label.setText(i18n.tr("esc_retries_label"))
+        self._retries_spin.setToolTip(i18n.tr("esc_retries_tooltip"))
+        self._rescan_btn.setText(i18n.tr("rescan"))
+        self._flash_all_btn.setText(i18n.tr("flash_all"))
+
+    # ---- port list ------------------------------------------------
+
+    def _refresh_ports(self) -> None:
+        current = self._port_combo.currentData()
+        self._port_combo.clear()
+        for info in list_fc_ports():
+            label = f"{info.device} - {info.description}"
+            if info.likely_fc:
+                label += "  ★"
+            self._port_combo.addItem(label, info.device)
+        if current:
+            idx = self._port_combo.findData(current)
+            if idx >= 0:
+                self._port_combo.setCurrentIndex(idx)
+
+    def _selected_port(self) -> Optional[str]:
+        data = self._port_combo.currentData()
+        return str(data) if data else None
+
+    # ---- button handlers ------------------------------------------------
+
+    def _on_connect_toggle_clicked(self) -> None:
+        if self._connected:
+            self._on_disconnect_clicked()
+        else:
+            self._on_connect_clicked()
+
+    def _on_connect_clicked(self) -> None:
+        port = self._selected_port()
+        if not port:
+            self._append_log("error", i18n.tr("no_port_selected"))
+            return
+        baud = int(self._baud_combo.currentText())
+        self._connect_toggle_btn.setEnabled(False)
+        self._append_log("info", i18n.tr("connecting", port=port, baud=baud))
+        self.request_connect.emit(port, baud)
+
+    def _on_disconnect_clicked(self) -> None:
+        self._connect_toggle_btn.setEnabled(False)
+        self.request_disconnect.emit()
+
+    def _on_rescan_clicked(self) -> None:
+        self._rescan_btn.setEnabled(False)
+        self.request_discover.emit()
+
+    def _on_flash_all_clicked(self) -> None:
+        path = self._config_path_edit.text()
+        if not path:
+            self._append_log("error", i18n.tr("no_config_selected"))
+            return
+        self._flash_all_btn.setEnabled(False)
+        self.request_flash.emit(path, None)
+
+    def _on_browse_clicked(self) -> None:
+        downloads = str(Path.home() / "Downloads")
+        path, _ = QFileDialog.getOpenFileName(
+            self, i18n.tr("select_config_dialog_title"), downloads, i18n.tr("binary_config_filter")
+        )
+        if path:
+            self._config_path_edit.setText(path)
+            self._flash_all_btn.setEnabled(self._connected)
+            self.request_set_config_path.emit(path)
+
+    # ---- worker signal handlers ------------------------------------------------
+
+    def _on_connection_state_changed(self, connected: bool, expected_count: int) -> None:
+        self._connected = connected
+        self._connect_toggle_btn.setEnabled(True)
+        self._update_connect_toggle_button()
+        self._rescan_btn.setEnabled(connected)
+        self._flash_all_btn.setEnabled(connected and bool(self._config_path_edit.text()))
+
+        self._rebuild_grid(expected_count if connected else 0)
+        if connected:
+            self.request_discover.emit()
+
+    def _rebuild_grid(self, count: int) -> None:
+        while self._grid_layout.count():
+            item = self._grid_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._esc_widgets.clear()
+
+        for i in range(count):
+            widget = EscStatusWidget(i)
+            self._esc_widgets[i] = widget
+            self._grid_layout.addWidget(widget, i // GRID_COLUMNS, i % GRID_COLUMNS)
+
+    def _on_esc_status_changed(self, index: int, state: str, detail: str) -> None:
+        widget = self._esc_widgets.get(index)
+        if widget is not None:
+            widget.set_state(state, detail)
+
+    def _on_log_message(self, level: str, text: str) -> None:
+        self._append_log(level, text)
+
+    def _append_log(self, level: str, text: str) -> None:
+        color = _LOG_COLORS.get(level, "#e6e6e6")
+        self._log_view.appendHtml(f'<span style="color:{color};">{text}</span>')
+
+    def _on_discovery_finished(self, found: int, expected: int) -> None:
+        self._rescan_btn.setEnabled(self._connected)
+        if self._auto_flash_check.isChecked() and self._config_path_edit.text():
+            self._flash_all_btn.setEnabled(False)
+            self.request_flash.emit(self._config_path_edit.text(), None)
+        else:
+            self._flash_all_btn.setEnabled(self._connected and bool(self._config_path_edit.text()))
+
+    def _on_flash_finished(self, success: int, attempted: int) -> None:
+        self._flash_all_btn.setEnabled(self._connected and bool(self._config_path_edit.text()))
+
+    # ---- window lifecycle ------------------------------------------------
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self._connected:
+            self.esc_manager.disconnect()
+        self.worker.stop()
+        super().closeEvent(event)
