@@ -1,0 +1,56 @@
+"""Persistent technical log file, independent of (and a superset of) the
+GUI's log panel.
+
+Every line shown in the GUI also lands here, plus a lot of low-level
+protocol detail that would be too noisy for the GUI panel: raw MSP
+responses, full hex dumps of each ESC's settings block before/after a
+write, per-command ACK/timeout detail. Kept on disk specifically so
+"something weird happened" can be diagnosed after the fact - see
+`LOG_FILE` below.
+"""
+from __future__ import annotations
+
+import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from typing import Optional
+
+LOG_DIR = Path.home() / ".fast_reconfig_esc" / "logs"
+LOG_FILE = LOG_DIR / "fast_reconfig_esc.log"
+
+_LEVEL_MAP = {
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+    "success": logging.INFO,
+}
+
+_logger: Optional[logging.Logger] = None
+
+
+def get_logger() -> logging.Logger:
+    global _logger
+    if _logger is not None:
+        return _logger
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("fast_reconfig_esc")
+    logger.setLevel(logging.DEBUG)
+
+    if not logger.handlers:
+        handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        logger.addHandler(handler)
+        logger.info("=" * 70)
+        logger.info("Session started - log file: %s", LOG_FILE)
+
+    _logger = logger
+    return logger
+
+
+def log_at(logger: logging.Logger, level: str, text: str) -> None:
+    logger.log(_LEVEL_MAP.get(level, logging.INFO), text)
+
+
+def hex_dump(data: bytes) -> str:
+    return data.hex(" ")

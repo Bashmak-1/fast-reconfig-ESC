@@ -4,6 +4,13 @@ Runs on a worker thread (see connection_worker.py). Every ESC index is
 handled in its own try/except so one missing/unresponsive ESC can never
 abort or crash a batch covering the rest - this is the tool's core
 reliability requirement.
+
+Every user-visible log line also goes to the persistent technical log file
+(file_logger.py), plus a lot of extra low-level protocol detail (raw MSP
+payloads, full hex dumps of settings before/after a write) that would be
+too noisy for the GUI panel but is exactly what you want when something
+confusing happens and you need to reconstruct what actually went over the
+wire - see `~/.fast_reconfig_esc/logs/fast_reconfig_esc.log`.
 """
 from __future__ import annotations
 
@@ -14,11 +21,12 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from .eeprom_config import ConfigFileError, load_config_file
 from .eeprom_layout import EEPROM_LAYOUT, FILENAME_BLOCK_SIZE, parse_boot_loader_pin, parse_name_block
+from .file_logger import get_logger, hex_dump, log_at
 from .fourway import FourWayClient
 from .i18n import tr
 from .mcu_profiles import LAYOUT_SIZE, MCU_VARIANTS
 from .models import EscInfo, EscState, ProbeResult
-from .msp import MspClient, MspCommand, MspError
+from .msp import MspClient, MspCommand, MspError, MspResponse
 from .serial_transport import SerialTransport
 
 MAX_ESC_COUNT = 12
@@ -53,6 +61,12 @@ class EscManager(QObject):
         self._esc_connect_retries = DEFAULT_ESC_CONNECT_RETRIES
         self._loaded_config_bytes: Optional[bytes] = None
         self._consecutive_empty_scans = 0
+        self._flog = get_logger()
+
+    def _log(self, level: str, text: str) -> None:
+        """Emit to the GUI panel and the technical log file at once."""
+        self.log_message.emit(level, text)
+        log_at(self._flog, level, text)
 
     def set_config_path(self, path: str) -> None:
         """Keep a copy of the currently-loaded config so discovery can show,
@@ -66,8 +80,9 @@ class EscManager(QObject):
             self._loaded_config_bytes = load_config_file(path)
         except ConfigFileError as e:
             self._loaded_config_bytes = None
-            self.log_message.emit("error", tr("config_file_error", error=e))
+            self._log("error", tr("config_file_error", error=e))
             return
+        self._flog.info("Config file loaded: %s (%d bytes, %s)", path, len(self._loaded_config_bytes), hex_dump(self._loaded_config_bytes))
         self._reevaluate_against_loaded_config()
 
     def _reevaluate_against_loaded_config(self) -> None:
@@ -107,25 +122,28 @@ class EscManager(QObject):
         """
         clamped = max(MIN_ESC_CONNECT_RETRIES, min(int(value), MAX_ESC_CONNECT_RETRIES))
         self._esc_connect_retries = clamped
-        self.log_message.emit("info", tr("retries_set", value=clamped))
+        self._log("info", tr("retries_set", value=clamped))
 
     # ---- lifecycle ----------------------------------------------------
 
     def connect(self, port: str, baud: int) -> None:
+        self._flog.info("Connect requested: port=%s baud=%d", port, baud)
         try:
             transport = SerialTransport(port, baud)
         except Exception as e:
-            self.log_message.emit("error", tr("could_not_open_port", port=port, error=e))
+            self._log("error", tr("could_not_open_port", port=port, error=e))
             self.connection_state_changed.emit(False, 0)
             return
+        self._flog.info("Serial port opened: %s @ %d", port, baud)
 
         self._transport = transport
         msp = MspClient(transport)
         try:
-            self._handshake(msp)
+            api_version, fc_variant = self._handshake(msp)
             expected = self._enter_passthrough(msp)
         except Exception as e:
-            self.log_message.emit("error", tr("connect_failed", error=e))
+            self._log("error", tr("connect_failed", error=e))
+            self._flog.exception("Connect failed during handshake/passthrough")
             transport.close()
             self._transport = None
             self.connection_state_changed.emit(False, 0)
@@ -136,34 +154,75 @@ class EscManager(QObject):
         self._probe_results = {}
         self._consecutive_empty_scans = 0
         cap = tr("capped_suffix", max=MAX_ESC_COUNT) if expected > MAX_ESC_COUNT else ""
-        self.log_message.emit("info", tr("connected_report", count=expected, cap=cap))
+        self._log("info", tr("connected_report", count=expected, cap=cap))
+        if api_version or fc_variant:
+            self._log("info", tr("connected_fc_info", api=api_version or "?", variant=fc_variant or "?"))
         self.connection_state_changed.emit(True, self._expected_count)
 
-    def _handshake(self, msp: MspClient) -> None:
+    def _handshake(self, msp: MspClient) -> tuple[Optional[str], Optional[str]]:
         try:
-            msp.send(MspCommand.MSP_API_VERSION)
+            response = msp.send(MspCommand.MSP_API_VERSION)
         except MspError as e:
             # Mirrors the reference site's own recovery: if a previous session
             # left the FC latched in FourWay mode, explicitly exit it and retry once.
-            self.log_message.emit("warning", tr("fourway_exit_retry", error=e))
+            self._log("warning", tr("fourway_exit_retry", error=e))
             assert self._transport is not None
             FourWayClient(self._transport).exit_interface()
             time.sleep(1.0)
-            msp.send(MspCommand.MSP_API_VERSION)
+            response = msp.send(MspCommand.MSP_API_VERSION)
 
-        msp.send(MspCommand.MSP_FC_VARIANT)
-        msp.send(MspCommand.MSP_BATTERY_STATE)
-        msp.send(MspCommand.MSP_MOTOR)
+        api_version = self._log_msp_api_version(response)
+        fc_variant = self._log_msp_fc_variant(msp.send(MspCommand.MSP_FC_VARIANT))
+        self._log_msp_battery_state(msp.send(MspCommand.MSP_BATTERY_STATE))
+        self._log_msp_raw("MSP_MOTOR", msp.send(MspCommand.MSP_MOTOR))
+        return api_version, fc_variant
+
+    def _log_msp_api_version(self, response: MspResponse) -> Optional[str]:
+        # Payload is [mspProtocolVersion, apiVersionMajor, apiVersionMinor],
+        # but displayed as "major.minor.protocol" (e.g. raw 00 02 05 -> "2.5.0")
+        # - confirmed against a real INAV FC session, not just guessed.
+        if len(response.payload) >= 3:
+            protocol, major, minor = response.payload[0], response.payload[1], response.payload[2]
+            version = f"{major}.{minor}.{protocol}"
+            self._flog.info("MSP_API_VERSION: %s (raw=%s)", version, hex_dump(response.payload))
+            return version
+        self._log_msp_raw("MSP_API_VERSION", response)
+        return None
+
+    def _log_msp_fc_variant(self, response: MspResponse) -> Optional[str]:
+        variant = response.payload.decode("ascii", errors="replace").strip("\x00").strip()
+        self._flog.info("MSP_FC_VARIANT: %s (raw=%s)", variant or "?", hex_dump(response.payload))
+        return variant or None
+
+    def _log_msp_battery_state(self, response: MspResponse) -> None:
+        # Best-effort field parse (both a legacy 0.1V byte at offset 3 and an
+        # extended 0.01V uint16 at offset 9-10, when present) - confirmed
+        # against a real FC reading 25.3V both ways, not just guessed.
+        payload = response.payload
+        voltage = None
+        if len(payload) >= 11:
+            voltage = int.from_bytes(payload[9:11], "little") / 100.0
+        elif len(payload) >= 4:
+            voltage = payload[3] / 10.0
+        if voltage is not None:
+            self._flog.info("MSP_BATTERY_STATE: voltage=%.2fV (raw=%s)", voltage, hex_dump(payload))
+        else:
+            self._log_msp_raw("MSP_BATTERY_STATE", response)
+
+    def _log_msp_raw(self, name: str, response: MspResponse) -> None:
+        self._flog.info("%s: raw=%s", name, hex_dump(response.payload))
 
     def _enter_passthrough(self, msp: MspClient) -> int:
         response = msp.send(MspCommand.MSP_SET_PASSTHROUGH, payload=b"")
         if not response.payload:
             raise MspError("MSP_SET_PASSTHROUGH returned no data")
         expected_count = response.payload[0]
+        self._flog.info("MSP_SET_PASSTHROUGH: FC reports %d ESC output(s) (raw=%s)", expected_count, hex_dump(response.payload))
         time.sleep(POST_PASSTHROUGH_DELAY_S)
         return expected_count
 
     def disconnect(self) -> None:
+        self._flog.info("Disconnect requested")
         if self._fourway is not None:
             self._fourway.exit_interface()
         if self._transport is not None:
@@ -173,32 +232,40 @@ class EscManager(QObject):
         self._expected_count = 0
         self._probe_results = {}
         self.connection_state_changed.emit(False, 0)
-        self.log_message.emit("info", tr("disconnected_log"))
+        self._log("info", tr("disconnected_log"))
 
     # ---- discovery ----------------------------------------------------
 
     def discover_all(self) -> None:
         if self._fourway is None:
-            self.log_message.emit("error", tr("not_connected_log"))
+            self._log("error", tr("not_connected_log"))
             return
 
+        self._flog.info("--- Discovery started: probing %d ESC index(es) ---", self._expected_count)
         found = 0
         for i in range(self._expected_count):
+            self._flog.info("ESC #%d: probing (cmd_DeviceInitFlash, retries=%d)...", i + 1, self._esc_connect_retries)
             self.esc_status_changed.emit(i, EscState.PROBING.value, "", None)
             try:
                 result = self._probe_one(i)
             except Exception as e:  # noqa: BLE001 - deliberately broad: never abort the batch
                 self._probe_results[i] = ProbeResult(ok=False, error=str(e))
-                self.log_message.emit("error", tr("esc_probe_error", n=i + 1, error=e))
+                self._log("error", tr("esc_probe_error", n=i + 1, error=e))
+                self._flog.info("ESC #%d: not found/no response (%s)", i + 1, e)
                 self.esc_status_changed.emit(i, EscState.ERROR.value, str(e), None)
                 continue
 
             self._probe_results[i] = result
             found += 1
             state, detail = self._classify(result)
+            self._flog.info(
+                "ESC #%d: found - %s | settings (%d bytes): %s",
+                i + 1, self._describe_esc_info(result.esc_info), len(result.settings or b""), hex_dump(result.settings or b""),
+            )
             self.esc_status_changed.emit(i, state.value, detail, result.esc_info)
 
-        self.log_message.emit("info", tr("discovery_summary", found=found, expected=self._expected_count))
+        self._log("info", tr("discovery_summary", found=found, expected=self._expected_count))
+        self._flog.info("--- Discovery finished: %d/%d found ---", found, self._expected_count)
         self.discovery_finished.emit(found, self._expected_count)
 
         if found == 0 and self._expected_count > 0:
@@ -206,7 +273,28 @@ class EscManager(QObject):
         else:
             self._consecutive_empty_scans = 0
         if self._consecutive_empty_scans >= EMPTY_SCANS_BEFORE_POWER_CYCLE_HINT:
-            self.log_message.emit("warning", tr("power_cycle_hint"))
+            self._log("warning", tr("power_cycle_hint"))
+
+    @staticmethod
+    def _describe_esc_info(info: Optional[EscInfo]) -> str:
+        if info is None:
+            return "no identity info"
+        parts = [f"MCU={info.mcu_family}"]
+        if info.mcu_type:
+            parts.append(f"type={info.mcu_type}")
+        if info.firmware_name:
+            parts.append(f"firmware={info.firmware_name}")
+        if info.firmware_version:
+            parts.append(f"fw_version={info.firmware_version}")
+        if info.boot_pin:
+            parts.append(f"boot_pin={info.boot_pin}")
+        if info.boot_version is not None:
+            parts.append(f"boot_version={info.boot_version}")
+        if info.eeprom_version is not None:
+            parts.append(f"eeprom_version={info.eeprom_version}")
+        parts.append(f"reversed={info.reversed}")
+        parts.append(f"3d_mode={info.bidirectional}")
+        return ", ".join(parts)
 
     def _probe_one(self, index: int) -> ProbeResult:
         assert self._fourway is not None
@@ -227,8 +315,8 @@ class EscManager(QObject):
                 mcu.eeprom_offset - FILENAME_BLOCK_SIZE, FILENAME_BLOCK_SIZE, retries=self._esc_connect_retries
             )
             file_name, mcu_type = parse_name_block(name_block)
-        except Exception:
-            pass
+        except Exception as e:
+            self._flog.info("ESC #%d: name-block read failed (non-fatal): %s", index + 1, e)
 
         esc_info = self._build_esc_info(mcu.name, info.input_pin, settings, file_name, mcu_type)
         return ProbeResult(ok=True, mcu_name=mcu.name, settings=settings, esc_info=esc_info)
@@ -261,26 +349,31 @@ class EscManager(QObject):
 
     def flash_all(self, config_path: str, target_indices: Optional[list] = None) -> None:
         if self._fourway is None:
-            self.log_message.emit("error", tr("not_connected_log"))
+            self._log("error", tr("not_connected_log"))
             return
 
         try:
             config_bytes = load_config_file(config_path)
         except ConfigFileError as e:
-            self.log_message.emit("error", tr("config_file_error", error=e))
+            self._log("error", tr("config_file_error", error=e))
             return
 
         if target_indices is None:
             ok_indices = [i for i, r in self._probe_results.items() if r.ok]
             target_indices = ok_indices if ok_indices else list(range(self._expected_count))
 
+        self._flog.info(
+            "--- Flash started: %s (%d bytes, %s) -> ESC index(es) %s ---",
+            config_path, len(config_bytes), hex_dump(config_bytes), target_indices,
+        )
         success = 0
         for i in target_indices:
             self.esc_status_changed.emit(i, EscState.PROBING.value, tr("writing"), None)
             try:
                 self._flash_one(i, config_bytes)
             except Exception as e:  # noqa: BLE001 - one ESC's failure must never block the rest
-                self.log_message.emit("error", tr("esc_flash_error", n=i + 1, error=e))
+                self._log("error", tr("esc_flash_error", n=i + 1, error=e))
+                self._flog.info("ESC #%d: flash failed (%s)", i + 1, e)
                 self.esc_status_changed.emit(i, EscState.ERROR.value, str(e), None)
                 continue
             self.esc_status_changed.emit(
@@ -288,25 +381,35 @@ class EscManager(QObject):
             )
             success += 1
 
-        self.log_message.emit("info", tr("flash_summary", success=success, attempted=len(target_indices)))
+        self._log("info", tr("flash_summary", success=success, attempted=len(target_indices)))
+        self._flog.info("--- Flash finished: %d/%d succeeded ---", success, len(target_indices))
         self.flash_finished.emit(success, len(target_indices))
 
     def _flash_one(self, index: int, config_bytes: bytes) -> None:
         assert self._fourway is not None
+        previous = self._probe_results.get(index)
+        before = previous.settings if previous is not None else None
+        self._flog.info(
+            "ESC #%d: before write: %s",
+            index + 1, hex_dump(before) if before is not None else "(not previously read)",
+        )
+
         # re-select defensively even if already probed
         info = self._fourway.init_flash(index, retries=self._esc_connect_retries)
         mcu = MCU_VARIANTS.get(info.signature)
         if mcu is None:
             raise KeyError(f"unrecognized MCU signature 0x{info.signature:04X}")
 
+        self._flog.info("ESC #%d: writing %d bytes to eeprom_offset=0x%X: %s", index + 1, len(config_bytes), mcu.eeprom_offset, hex_dump(config_bytes))
         self._fourway.write(mcu.eeprom_offset, config_bytes)  # cmd_DeviceWrite, NOT DeviceWriteEEprom
         readback = self._fourway.read(mcu.eeprom_offset, LAYOUT_SIZE)
+        self._flog.info("ESC #%d: readback after write: %s", index + 1, hex_dump(readback))
         if readback != config_bytes:
             raise VerificationError("readback mismatch after write")
+        self._flog.info("ESC #%d: write verified OK (readback matches what was written)", index + 1)
 
         # A config write doesn't change the ESC's bootloader/hardware identity,
         # only its settings - carry forward the name/firmware info from the
         # last probe rather than doing another name-block read.
-        previous = self._probe_results.get(index)
         esc_info = previous.esc_info if previous is not None else None
         self._probe_results[index] = ProbeResult(ok=True, mcu_name=mcu.name, settings=readback, esc_info=esc_info)

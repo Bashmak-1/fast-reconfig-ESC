@@ -41,17 +41,31 @@ be re-derived from scratch later.
 - Last-used config file path now persists across restarts, in a real `.ini`
   file (`~/.fast_reconfig_esc/settings.ini`, `settings_store.py`) — not the
   registry, not inside the git-tracked project directory.
-
-**Not yet done — blocked on having a real ESC physically wired to this
-tool (the am32.ca session above used the reference site, not this app):**
-- Confirm a genuinely present ESC shows green with a correct MCU name and
-  the new firmware/bootloader detail fields populated (currently only
-  verified via mocked `FourWayClient` in `tests/test_esc_manager.py`,
-  using field values transcribed from the real am32.ca session log)
-- Confirm a real `Flash All` write + readback-verify round-trip on one ESC
-- Confirm the fallback behavior with a *mixed* real batch (some ESCs wired,
-  one deliberately unplugged) rather than the all-missing case already
-  tested
+- Persistent technical log file (`~/.fast_reconfig_esc/logs/fast_reconfig_esc.log`,
+  `file_logger.py`, rotating 5×5MB): every MSP response value, full hex
+  dumps of each ESC's settings before/after a write, per-ESC identity
+  breakdown - a superset of what the GUI panel shows, for after-the-fact
+  debugging. Reviewing this log against real captures also caught and fixed
+  a real bug: `MSP_API_VERSION` was displayed as `"{protocol}.{major}.{minor}"`
+  when it should be `"{major}.{minor}.{protocol}"` (raw `00 02 05` is
+  `"2.5.0"`, not `"0.2.5"`) - confirmed against the real FC's own bytes.
+  Also added a confirmed-correct `MSP_BATTERY_STATE` voltage decode
+  (0.01V uint16 at payload offset 9-10, matching a real 25.31V reading).
+- **Real-hardware end-to-end validation (2026-08-22, same FC on COM16,
+  this time with ESCs actually wired) - all three previously-open items
+  below are now confirmed:**
+  - Discovery found 4 real ESCs (of 12 outputs) repeatably across multiple
+    rescans, each correctly identified: `MCU=ARM64K`, `type=12S33mV`,
+    `firmware=ESCV_12S33mV`, `fw_version=2.16`, `boot_pin=PB4`,
+    `boot_version=7`, `eeprom_version=1` - exact match to the reference
+    am32.ca session log captured earlier on the same hardware.
+  - `Flash All` targeted at just the 4 found ESCs (auto-selected, indices
+    `[0,1,2,7]`) wrote and read back all 4 successfully (`4/4 succeeded`);
+    per-ESC log shows the correct MCU-specific `eeprom_offset=0xF800`
+    (ARM64K) was used, not a hardcoded/wrong address.
+  - The mixed-batch fallback (4 responsive + 8 returning
+    `ACK_D_GENERAL_ERROR`) ran cleanly with no crash, matching the
+    mocked-hardware tests' behavior exactly.
 
 **Explicitly out of scope for now:** full `.hex` firmware flashing (only the
 184-byte EEPROM/settings block is read/written). The architecture leaves
@@ -181,10 +195,15 @@ tests/
 
 ## Next steps
 
-1. Get a real ESC wired to the FC and re-run the plan's hardware
-   verification steps 3–5 (single-ESC discovery, single-ESC flash+verify,
-   mixed-batch fallback) — including checking that the new firmware/
-   bootloader detail fields populate correctly against a real device, not
-   just against the am32.ca session log values used in tests.
+All of the original plan's hardware verification steps are now done (see
+Status above - real discovery, real flash+verify, real mixed-batch fallback,
+all confirmed 2026-08-22). Remaining open items:
+
+1. Investigate why the other 8/12 outputs return `ACK_D_GENERAL_ERROR` on
+   this FC - likely just nothing physically wired to those outputs, but
+   worth a deliberate check (e.g. wire one of them and confirm it then
+   shows up) rather than assuming.
 2. If the power-cycle hint theory holds up in practice, consider surfacing
    it more prominently (not just a log line).
+3. Full `.hex` firmware flashing remains explicitly out of scope; revisit
+   only if asked for.

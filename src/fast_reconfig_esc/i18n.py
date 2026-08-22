@@ -81,6 +81,7 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "en": "Connected. FC reports {count} ESC output(s){cap}.",
         "uk": "Підключено. FC повідомляє про {count} вихід(ів) ESC{cap}.",
     },
+    "connected_fc_info": {"en": "FC: MSP API {api}, {variant}", "uk": "FC: MSP API {api}, {variant}"},
     "capped_suffix": {"en": " (capped to {max})", "uk": " (обмежено до {max})"},
     "fourway_exit_retry": {
         "en": "{error}, trying to exit fourway and try again.",
@@ -109,6 +110,7 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "en": "Remembered config file no longer exists: {path}",
         "uk": "Запам'ятований файл конфігу більше не існує: {path}",
     },
+    "log_file_location": {"en": "Technical log file: {path}", "uk": "Файл технічних логів: {path}"},
 }
 
 _current_language = "uk"

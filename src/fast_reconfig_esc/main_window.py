@@ -31,6 +31,7 @@ from .esc_manager import (
     MIN_ESC_CONNECT_RETRIES,
 )
 from .esc_status_widget import EscStatusWidget
+from .file_logger import LOG_FILE
 from .flag_icons import FLAG_ICON_BUILDERS
 from .serial_transport import list_fc_ports
 from .settings_store import load_last_config_path, save_last_config_path
@@ -73,6 +74,7 @@ class MainWindow(QMainWindow):
         self._wire_signals()
         self._refresh_ports()
         self._retranslate_ui()
+        self._append_log("info", i18n.tr("log_file_location", path=str(LOG_FILE)))
         self._restore_last_config_path()
         i18n.signals.language_changed.connect(self._retranslate_ui)
 
