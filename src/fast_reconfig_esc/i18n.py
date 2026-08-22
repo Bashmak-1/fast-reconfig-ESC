@@ -97,6 +97,18 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
     "writing": {"en": "writing...", "uk": "запис..."},
     "config_file_error": {"en": "Config file error: {error}", "uk": "Помилка файлу конфігу: {error}"},
     "retries_set": {"en": "ESC connect retries set to {value}", "uk": "Кількість спроб ESC встановлено на {value}"},
+    "info_mcu": {"en": "MCU: {value}", "uk": "MCU: {value}"},
+    "info_firmware": {"en": "Firmware: {value}", "uk": "Прошивка: {value}"},
+    "info_bootloader": {"en": "Bootloader: {value}", "uk": "Бутлоадер: {value}"},
+    "info_eeprom": {"en": "EEPROM layout: v{value}", "uk": "Версія EEPROM: v{value}"},
+    "info_reversed": {"en": "Reversed: {value}", "uk": "Реверс: {value}"},
+    "info_3d_mode": {"en": "3D mode: {value}", "uk": "3D-режим: {value}"},
+    "yes": {"en": "Yes", "uk": "Так"},
+    "no": {"en": "No", "uk": "Ні"},
+    "remembered_config_missing": {
+        "en": "Remembered config file no longer exists: {path}",
+        "uk": "Запам'ятований файл конфігу більше не існує: {path}",
+    },
 }
 
 _current_language = "uk"

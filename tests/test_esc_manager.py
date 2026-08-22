@@ -10,6 +10,7 @@ import pytest
 from PyQt6.QtWidgets import QApplication
 
 from fast_reconfig_esc import esc_manager as esc_manager_module
+from fast_reconfig_esc.eeprom_layout import FILENAME_BLOCK_SIZE
 from fast_reconfig_esc.fourway import DeviceInfo, FourWayAckError, FourWayAck
 from fast_reconfig_esc.i18n import tr
 from fast_reconfig_esc.mcu_profiles import LAYOUT_SIZE
@@ -19,6 +20,17 @@ from fast_reconfig_esc.mcu_profiles import LAYOUT_SIZE
 def qapp():
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+def _settings_bytes(fill: int) -> bytes:
+    """184-byte settings buffer filled with `fill`, but with MAIN_REVISION/
+    SUB_REVISION forced to 0xFF ("unset") so tests that don't care about the
+    firmware-version display don't get a synthetic version string leaking
+    into the detail text just because of the fill byte they picked."""
+    buf = bytearray([fill]) * LAYOUT_SIZE
+    buf[0x03] = 0xFF
+    buf[0x04] = 0xFF
+    return bytes(buf)
 
 
 class FakeFourWay:
@@ -37,11 +49,13 @@ class FakeFourWay:
         return DeviceInfo(signature=self.STM32_SIG, input_pin=4, interface_mode=0)
 
     def read(self, address: int, length: int, retries: int = 10, timeout_s: float = 0.2) -> bytes:
-        # returns whatever was last "written", or a valid (non-blank) default
         idx = self._last_index
+        if length == FILENAME_BLOCK_SIZE:
+            return b"\xff" * length  # blank name block by default (no synthetic firmware name)
+        # returns whatever was last "written", or a valid (non-blank) default
         if idx in self.written:
             return self.written[idx]
-        return self.settings_by_index.get(idx, bytes([0x01]) * length)
+        return self.settings_by_index.get(idx, _settings_bytes(0x01))
 
     def write(self, address: int, data: bytes, retries: int = 10, timeout_s: float = 0.3):
         self.written[self._last_index] = data
@@ -73,7 +87,7 @@ def _make_manager_with_fake(monkeypatch, bad_indices, expected_count, settings_b
 def test_discover_all_continues_past_missing_esc(monkeypatch):
     events = []
     mgr, _fake = _make_manager_with_fake(monkeypatch, bad_indices={2}, expected_count=5)
-    mgr.esc_status_changed.connect(lambda i, s, d: events.append((i, s)))
+    mgr.esc_status_changed.connect(lambda i, s, d, info: events.append((i, s)))
 
     finished = []
     mgr.discovery_finished.connect(lambda found, expected: finished.append((found, expected)))
@@ -96,7 +110,7 @@ def test_flash_all_continues_past_failing_esc(monkeypatch, tmp_path):
     mgr, fake = _make_manager_with_fake(monkeypatch, bad_indices={1}, expected_count=3)
 
     events = []
-    mgr.esc_status_changed.connect(lambda i, s, d: events.append((i, s)))
+    mgr.esc_status_changed.connect(lambda i, s, d, info: events.append((i, s)))
     finished = []
     mgr.flash_finished.connect(lambda success, attempted: finished.append((success, attempted)))
 
@@ -122,7 +136,7 @@ def test_flash_all_detects_readback_mismatch(monkeypatch, tmp_path):
     monkeypatch.setattr(fake, "read", lambda *a, **k: bytes([0x99]) * LAYOUT_SIZE)
 
     events = []
-    mgr.esc_status_changed.connect(lambda i, s, d: events.append((i, s, d)))
+    mgr.esc_status_changed.connect(lambda i, s, d, info: events.append((i, s, d)))
 
     mgr.flash_all(str(config_path), target_indices=[0])
 
@@ -132,8 +146,8 @@ def test_flash_all_detects_readback_mismatch(monkeypatch, tmp_path):
 
 
 def test_discover_all_flags_config_match_vs_diff(monkeypatch, tmp_path):
-    matching = bytes([0x11]) * LAYOUT_SIZE
-    different = bytes([0x22]) * LAYOUT_SIZE
+    matching = _settings_bytes(0x11)
+    different = _settings_bytes(0x22)
     config_path = tmp_path / "cfg.bin"
     config_path.write_bytes(matching)
 
@@ -146,7 +160,7 @@ def test_discover_all_flags_config_match_vs_diff(monkeypatch, tmp_path):
     mgr.set_config_path(str(config_path))
 
     events = []
-    mgr.esc_status_changed.connect(lambda i, s, d: events.append((i, s, d)))
+    mgr.esc_status_changed.connect(lambda i, s, d, info: events.append((i, s, d)))
     mgr.discover_all()
 
     final = {i: (s, d) for i, s, d in events if s != "probing"}
@@ -155,8 +169,8 @@ def test_discover_all_flags_config_match_vs_diff(monkeypatch, tmp_path):
 
 
 def test_set_config_path_reevaluates_without_a_new_scan(monkeypatch, tmp_path):
-    matching = bytes([0x11]) * LAYOUT_SIZE
-    other = bytes([0x33]) * LAYOUT_SIZE
+    matching = _settings_bytes(0x11)
+    other = _settings_bytes(0x33)
 
     mgr, _fake = _make_manager_with_fake(
         monkeypatch, bad_indices=set(), expected_count=1, settings_by_index={0: matching}
@@ -164,7 +178,7 @@ def test_set_config_path_reevaluates_without_a_new_scan(monkeypatch, tmp_path):
     mgr.discover_all()  # no config loaded yet -> plain "ok"
 
     events = []
-    mgr.esc_status_changed.connect(lambda i, s, d: events.append((i, s, d)))
+    mgr.esc_status_changed.connect(lambda i, s, d, info: events.append((i, s, d)))
 
     config_path = tmp_path / "cfg.bin"
     config_path.write_bytes(matching)
@@ -193,3 +207,44 @@ def test_power_cycle_hint_after_repeated_empty_scans(monkeypatch):
     warnings.clear()
     mgr.discover_all()
     assert warnings == [tr("power_cycle_hint")]  # keeps firing while still empty
+
+
+def test_discover_all_decodes_esc_info(monkeypatch, tmp_path):
+    settings = bytearray(_settings_bytes(0x00))
+    settings[0x01] = 3  # LAYOUT_REVISION
+    settings[0x02] = 7  # BOOT_LOADER_REVISION
+    settings[0x03] = 2  # MAIN_REVISION
+    settings[0x04] = 16  # SUB_REVISION
+    settings[0x11] = 1  # MOTOR_DIRECTION (reversed)
+    settings[0x12] = 0  # BIDIRECTIONAL_MODE (not 3D)
+    settings = bytes(settings)
+
+    name_block = b"ESCV_12S33mV\x00" + b"\xff" * (FILENAME_BLOCK_SIZE - 13)
+
+    mgr, fake = _make_manager_with_fake(
+        monkeypatch, bad_indices=set(), expected_count=1, settings_by_index={0: settings}
+    )
+    monkeypatch.setattr(
+        fake,
+        "read",
+        lambda address, length, retries=10, timeout_s=0.2: (
+            name_block if length == FILENAME_BLOCK_SIZE else settings
+        ),
+    )
+
+    events = []
+    mgr.esc_status_changed.connect(lambda i, s, d, info: events.append((i, s, d, info)))
+    mgr.discover_all()
+
+    index, state, detail, info = events[-1]
+    assert state == "ok"
+    assert info.mcu_family == "STM32F051"
+    assert info.mcu_type == "12S33mV"
+    assert info.firmware_name == "ESCV_12S33mV"
+    assert info.firmware_version == "2.16"
+    assert info.boot_pin == "PA4"  # FakeFourWay.init_flash always returns input_pin=4 -> port=0('A'), pin=4
+    assert info.boot_version == 7
+    assert info.eeprom_version == 3
+    assert info.reversed is True
+    assert info.bidirectional is False
+    assert detail == "12S33mV v2.16"

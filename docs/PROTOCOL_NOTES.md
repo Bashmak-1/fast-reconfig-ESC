@@ -28,11 +28,26 @@ be re-derived from scratch later.
   `ACK_D_GENERAL_ERROR` on all 12 without crashing — confirms the
   per-ESC try/except isolation works on real hardware, not just in mocked
   tests
+- ESC identity/firmware display: a second FourWay read (32-byte name block
+  at `eeprom_offset - 32`) plus decoded settings fields now surface MCU
+  type, firmware name/version, bootloader pin/version, EEPROM layout
+  version, and reversed/3D-mode flags per ESC — compact label on the card,
+  full breakdown on hover. Field offsets and the pin-decoding algorithm are
+  sourced from am32-configurator's `src/eeprom.ts`/`src/mcu.ts` (see below);
+  cross-checked structurally against a real am32.ca session log the user
+  captured on 2026-08-22 showing e.g. `PIN: PB4`, `MCU Type: 12S33mV`,
+  `Firmware: ESCV_12S33mV v2.16` for real responding ESCs (that session was
+  against the reference site, not yet against this tool with a live ESC).
+- Last-used config file path now persists across restarts, in a real `.ini`
+  file (`~/.fast_reconfig_esc/settings.ini`, `settings_store.py`) — not the
+  registry, not inside the git-tracked project directory.
 
-**Not yet done — blocked on having a real ESC physically wired:**
-- Confirm a genuinely present ESC shows green with a correct MCU name
-  (currently only verified via mocked `FourWayClient` in
-  `tests/test_esc_manager.py`)
+**Not yet done — blocked on having a real ESC physically wired to this
+tool (the am32.ca session above used the reference site, not this app):**
+- Confirm a genuinely present ESC shows green with a correct MCU name and
+  the new firmware/bootloader detail fields populated (currently only
+  verified via mocked `FourWayClient` in `tests/test_esc_manager.py`,
+  using field values transcribed from the real am32.ca session log)
 - Confirm a real `Flash All` write + readback-verify round-trip on one ESC
 - Confirm the fallback behavior with a *mixed* real batch (some ESCs wired,
   one deliberately unplugged) rather than the all-missing case already
@@ -47,9 +62,9 @@ stops matching real-device behavior)
 
 Sources: `am32-firmware/am32-configurator` (`src/communication/four_way.ts`,
 `src/communication/msp.ts`, `@am32/serial-msp` npm package source,
-`components/SerialDevice.vue`), `am32-firmware/Offline-Configurator`
-(`fourwayif.cpp`), `iNavFlight/inav` (`src/main/fc/fc_msp.c`,
-`src/main/io/serial_4way.c`).
+`components/SerialDevice.vue`, `src/eeprom.ts`, `src/mcu.ts`),
+`am32-firmware/Offline-Configurator` (`fourwayif.cpp`), `iNavFlight/inav`
+(`src/main/fc/fc_msp.c`, `src/main/io/serial_4way.c`).
 
 - **MSP passthrough trigger**: `MSP_SET_PASSTHROUGH` (code `0xF5`/245) sent
   with an **empty payload** → INAV's "legacy format" path, auto-selects
@@ -84,6 +99,24 @@ Sources: `am32-firmware/am32-configurator` (`src/communication/four_way.ts`,
   between attempts (app default lowered to **2 retries** for the
   ESC-presence-probe use case — see below). ~2s delay after
   `MSP_SET_PASSTHROUGH` before FourWay traffic starts.
+- **Name block**: a *second* FourWay read, 32 bytes at `eeprom_offset - 32`,
+  NUL-terminated ASCII (e.g. `"ESCV_12S33mV"`). `mcu_type` = the substring
+  after the last `_` (e.g. `"12S33mV"`). Best-effort in this tool: a failed
+  name read does not fail the whole probe (upstream's `getInfo()` does
+  fail the probe on this - a deliberate divergence).
+- **Settings-block field offsets** (full table in `eeprom_layout.py`,
+  sourced from `EepromLayout` in `src/eeprom.ts`): `LAYOUT_REVISION`@0x01,
+  `BOOT_LOADER_REVISION`@0x02, `MAIN_REVISION`@0x03, `SUB_REVISION`@0x04
+  (firmware version = `"{MAIN_REVISION}.{SUB_REVISION}"`), `MOTOR_DIRECTION`
+  @0x11 (reversed), `BIDIRECTIONAL_MODE`@0x12 (3D mode). Many other fields
+  (current/brake/servo/etc. tuning) are catalogued but not yet surfaced in
+  the UI - this app only *displays* identity info, it doesn't edit settings
+  field-by-field.
+- **Bootloader pin decoding** (`Mcu.parseBootLoaderPin` in `src/mcu.ts`):
+  from the raw `DeviceInitFlash` response's `input` byte (already captured
+  as `DeviceInfo.input_pin`) - `port = pin >> 4` indexes `A..Z`,
+  `pin_number = pin & 0xF` is used directly (0-15) → e.g. `0x14` → `"PB4"`.
+  No extra read needed, it's decoded from data already fetched.
 - **Serial port hints**: FC USB VIDs incl. `0x0483` (STMicro native
   CDC-ACM — what most Betaflight/INAV FCs enumerate as). `0x10C4` (Silicon
   Labs CP210x) is listed under *direct-ESC-connect* mode in the reference
@@ -130,9 +163,11 @@ src/fast_reconfig_esc/
     msp.py                MSP v1/v2 framing, CRC8-DVB-S2
     fourway.py             FourWay framing, CRC16-XMODEM, FourWayClient
     mcu_profiles.py         MCU signature -> eeprom_offset table
+    eeprom_layout.py         184-byte settings field offsets, name-block/boot-pin decoding
     serial_transport.py     pyserial wrapper, FC-port VID hinting
     eeprom_config.py        184-byte config file load/validate
-    models.py               EscState enum, ProbeResult
+    settings_store.py       persistent app settings (~/.fast_reconfig_esc/settings.ini)
+    models.py               EscState enum, ProbeResult, EscInfo
     esc_manager.py           discovery/flash orchestration, per-ESC isolation
     connection_worker.py     QThread hosting EscManager
     i18n.py                 en/uk translations
@@ -141,13 +176,15 @@ src/fast_reconfig_esc/
     main_window.py, esc_status_widget.py   PyQt6 UI
 tests/
     test_protocol.py        CRC/framing unit tests, known-vector checks
-    test_esc_manager.py      mocked-hardware orchestration/fallback tests
+    test_esc_manager.py      mocked-hardware orchestration/fallback/decoding tests
 ```
 
 ## Next steps
 
 1. Get a real ESC wired to the FC and re-run the plan's hardware
    verification steps 3–5 (single-ESC discovery, single-ESC flash+verify,
-   mixed-batch fallback).
+   mixed-batch fallback) — including checking that the new firmware/
+   bootloader detail fields populate correctly against a real device, not
+   just against the am32.ca session log values used in tests.
 2. If the power-cycle hint theory holds up in practice, consider surfacing
    it more prominently (not just a log line).

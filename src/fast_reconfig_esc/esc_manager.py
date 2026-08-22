@@ -13,10 +13,11 @@ from typing import Optional
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from .eeprom_config import ConfigFileError, load_config_file
+from .eeprom_layout import EEPROM_LAYOUT, FILENAME_BLOCK_SIZE, parse_boot_loader_pin, parse_name_block
 from .fourway import FourWayClient
 from .i18n import tr
 from .mcu_profiles import LAYOUT_SIZE, MCU_VARIANTS
-from .models import EscState, ProbeResult
+from .models import EscInfo, EscState, ProbeResult
 from .msp import MspClient, MspCommand, MspError
 from .serial_transport import SerialTransport
 
@@ -37,7 +38,7 @@ def _is_blank(settings: bytes) -> bool:
 
 
 class EscManager(QObject):
-    esc_status_changed = pyqtSignal(int, str, str)  # index, EscState.value, detail text
+    esc_status_changed = pyqtSignal(int, str, str, object)  # index, EscState.value, detail text, EscInfo|None
     log_message = pyqtSignal(str, str)  # level ("info"/"warning"/"error"/"success"), text
     connection_state_changed = pyqtSignal(bool, int)  # connected, expected_esc_count
     discovery_finished = pyqtSignal(int, int)  # found, expected
@@ -76,17 +77,26 @@ class EscManager(QObject):
             if not result.ok or result.settings is None:
                 continue
             state, detail = self._classify(result)
-            self.esc_status_changed.emit(index, state.value, detail)
+            self.esc_status_changed.emit(index, state.value, detail, result.esc_info)
+
+    @staticmethod
+    def _display_label(result: ProbeResult) -> str:
+        info = result.esc_info
+        if info is None:
+            return result.mcu_name
+        label = info.mcu_type or info.mcu_family
+        return f"{label} v{info.firmware_version}" if info.firmware_version else label
 
     def _classify(self, result: ProbeResult) -> tuple[EscState, str]:
         settings = result.settings or b""
+        label = self._display_label(result)
         if _is_blank(settings):
-            return EscState.BLANK, result.mcu_name
+            return EscState.BLANK, label
         if self._loaded_config_bytes is not None:
             if settings == self._loaded_config_bytes:
-                return EscState.OK, tr("config_matches", mcu=result.mcu_name)
-            return EscState.DIFF, tr("config_differs", mcu=result.mcu_name)
-        return EscState.OK, result.mcu_name
+                return EscState.OK, tr("config_matches", mcu=label)
+            return EscState.DIFF, tr("config_differs", mcu=label)
+        return EscState.OK, label
 
     def set_esc_connect_retries(self, value: int) -> None:
         """How many times to retry cmd_DeviceInitFlash before giving up on one
@@ -174,19 +184,19 @@ class EscManager(QObject):
 
         found = 0
         for i in range(self._expected_count):
-            self.esc_status_changed.emit(i, EscState.PROBING.value, "")
+            self.esc_status_changed.emit(i, EscState.PROBING.value, "", None)
             try:
                 result = self._probe_one(i)
             except Exception as e:  # noqa: BLE001 - deliberately broad: never abort the batch
                 self._probe_results[i] = ProbeResult(ok=False, error=str(e))
                 self.log_message.emit("error", tr("esc_probe_error", n=i + 1, error=e))
-                self.esc_status_changed.emit(i, EscState.ERROR.value, str(e))
+                self.esc_status_changed.emit(i, EscState.ERROR.value, str(e), None)
                 continue
 
             self._probe_results[i] = result
             found += 1
             state, detail = self._classify(result)
-            self.esc_status_changed.emit(i, state.value, detail)
+            self.esc_status_changed.emit(i, state.value, detail, result.esc_info)
 
         self.log_message.emit("info", tr("discovery_summary", found=found, expected=self._expected_count))
         self.discovery_finished.emit(found, self._expected_count)
@@ -204,8 +214,48 @@ class EscManager(QObject):
         mcu = MCU_VARIANTS.get(info.signature)
         if mcu is None:
             raise KeyError(f"unrecognized MCU signature 0x{info.signature:04X}")
-        settings = self._fourway.read(mcu.eeprom_offset, LAYOUT_SIZE)
-        return ProbeResult(ok=True, mcu_name=mcu.name, settings=settings)
+
+        settings = self._fourway.read(mcu.eeprom_offset, LAYOUT_SIZE, retries=self._esc_connect_retries)
+
+        # Name-block read is best-effort: a failure here (e.g. an odd
+        # bootloader that rejects reads before eeprom_offset) must not fail
+        # the whole probe - ESC presence/config status already stands on
+        # the settings read above.
+        file_name = mcu_type = None
+        try:
+            name_block = self._fourway.read(
+                mcu.eeprom_offset - FILENAME_BLOCK_SIZE, FILENAME_BLOCK_SIZE, retries=self._esc_connect_retries
+            )
+            file_name, mcu_type = parse_name_block(name_block)
+        except Exception:
+            pass
+
+        esc_info = self._build_esc_info(mcu.name, info.input_pin, settings, file_name, mcu_type)
+        return ProbeResult(ok=True, mcu_name=mcu.name, settings=settings, esc_info=esc_info)
+
+    @staticmethod
+    def _build_esc_info(
+        mcu_family: str,
+        boot_input_pin: int,
+        settings: bytes,
+        file_name: Optional[str],
+        mcu_type: Optional[str],
+    ) -> EscInfo:
+        main_rev = settings[EEPROM_LAYOUT["MAIN_REVISION"].offset]
+        sub_rev = settings[EEPROM_LAYOUT["SUB_REVISION"].offset]
+        boot_version = settings[EEPROM_LAYOUT["BOOT_LOADER_REVISION"].offset]
+        eeprom_version = settings[EEPROM_LAYOUT["LAYOUT_REVISION"].offset]
+        return EscInfo(
+            mcu_family=mcu_family,
+            mcu_type=mcu_type,
+            firmware_name=file_name,
+            firmware_version=f"{main_rev}.{sub_rev}" if main_rev != 0xFF else None,
+            boot_pin=parse_boot_loader_pin(boot_input_pin),
+            boot_version=boot_version if boot_version != 0xFF else None,
+            eeprom_version=eeprom_version if eeprom_version != 0xFF else None,
+            reversed=settings[EEPROM_LAYOUT["MOTOR_DIRECTION"].offset] not in (0, 0xFF),
+            bidirectional=settings[EEPROM_LAYOUT["BIDIRECTIONAL_MODE"].offset] not in (0, 0xFF),
+        )
 
     # ---- flashing ----------------------------------------------------
 
@@ -226,14 +276,16 @@ class EscManager(QObject):
 
         success = 0
         for i in target_indices:
-            self.esc_status_changed.emit(i, EscState.PROBING.value, tr("writing"))
+            self.esc_status_changed.emit(i, EscState.PROBING.value, tr("writing"), None)
             try:
                 self._flash_one(i, config_bytes)
             except Exception as e:  # noqa: BLE001 - one ESC's failure must never block the rest
                 self.log_message.emit("error", tr("esc_flash_error", n=i + 1, error=e))
-                self.esc_status_changed.emit(i, EscState.ERROR.value, str(e))
+                self.esc_status_changed.emit(i, EscState.ERROR.value, str(e), None)
                 continue
-            self.esc_status_changed.emit(i, EscState.OK.value, tr("flashed_verified"))
+            self.esc_status_changed.emit(
+                i, EscState.OK.value, tr("flashed_verified"), self._probe_results[i].esc_info
+            )
             success += 1
 
         self.log_message.emit("info", tr("flash_summary", success=success, attempted=len(target_indices)))
@@ -252,4 +304,9 @@ class EscManager(QObject):
         if readback != config_bytes:
             raise VerificationError("readback mismatch after write")
 
-        self._probe_results[index] = ProbeResult(ok=True, mcu_name=mcu.name, settings=readback)
+        # A config write doesn't change the ESC's bootloader/hardware identity,
+        # only its settings - carry forward the name/firmware info from the
+        # last probe rather than doing another name-block read.
+        previous = self._probe_results.get(index)
+        esc_info = previous.esc_info if previous is not None else None
+        self._probe_results[index] = ProbeResult(ok=True, mcu_name=mcu.name, settings=readback, esc_info=esc_info)

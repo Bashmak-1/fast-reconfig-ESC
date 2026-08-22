@@ -33,6 +33,7 @@ from .esc_manager import (
 from .esc_status_widget import EscStatusWidget
 from .flag_icons import FLAG_ICON_BUILDERS
 from .serial_transport import list_fc_ports
+from .settings_store import load_last_config_path, save_last_config_path
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
 
 BAUD_RATES = [1000000, 500000, 256000, 115200, 57600, 38400, 19200, 14400, 9600]
@@ -72,6 +73,7 @@ class MainWindow(QMainWindow):
         self._wire_signals()
         self._refresh_ports()
         self._retranslate_ui()
+        self._restore_last_config_path()
         i18n.signals.language_changed.connect(self._retranslate_ui)
 
     # ---- UI construction ------------------------------------------------
@@ -304,14 +306,26 @@ class MainWindow(QMainWindow):
         self.request_flash.emit(path, None)
 
     def _on_browse_clicked(self) -> None:
-        downloads = str(Path.home() / "Downloads")
+        current = self._config_path_edit.text()
+        start_dir = str(Path(current).parent) if current else str(Path.home() / "Downloads")
         path, _ = QFileDialog.getOpenFileName(
-            self, i18n.tr("select_config_dialog_title"), downloads, i18n.tr("binary_config_filter")
+            self, i18n.tr("select_config_dialog_title"), start_dir, i18n.tr("binary_config_filter")
         )
         if path:
-            self._config_path_edit.setText(path)
-            self._flash_all_btn.setEnabled(self._connected)
-            self.request_set_config_path.emit(path)
+            self._set_config_path(path)
+
+    def _set_config_path(self, path: str) -> None:
+        self._config_path_edit.setText(path)
+        self._flash_all_btn.setEnabled(self._connected)
+        self.request_set_config_path.emit(path)
+        save_last_config_path(path)
+
+    def _restore_last_config_path(self) -> None:
+        path = load_last_config_path()
+        if path and Path(path).is_file():
+            self._set_config_path(path)
+        elif path:
+            self._append_log("warning", i18n.tr("remembered_config_missing", path=path))
 
     # ---- worker signal handlers ------------------------------------------------
 
@@ -339,10 +353,10 @@ class MainWindow(QMainWindow):
             self._esc_widgets[i] = widget
             self._grid_layout.addWidget(widget, i // GRID_COLUMNS, i % GRID_COLUMNS)
 
-    def _on_esc_status_changed(self, index: int, state: str, detail: str) -> None:
+    def _on_esc_status_changed(self, index: int, state: str, detail: str, esc_info) -> None:
         widget = self._esc_widgets.get(index)
         if widget is not None:
-            widget.set_state(state, detail)
+            widget.set_state(state, detail, esc_info)
 
     def _on_log_message(self, level: str, text: str) -> None:
         self._append_log(level, text)
