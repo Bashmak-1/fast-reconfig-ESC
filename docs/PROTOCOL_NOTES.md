@@ -192,6 +192,28 @@ be re-derived from scratch later.
     for them) or get a code-signing certificate reputable enough to satisfy
     SAC (not done here, costs money and doesn't fully guarantee passing
     immediately either).
+- **Accidental-edit protection in the Config tab (2026-08-24)**:
+  - Sliders/dropdowns (`_ClickToWheelSlider`/`_ClickToWheelComboBox` in
+    `config_editor_widget.py`) only respond to the mouse wheel once
+    actually clicked (focused) - wheel-scrolling the long settings page
+    routinely passes the cursor over a field, and an unfocused control
+    ignores the wheel event so it bubbles up to the surrounding
+    `QScrollArea` instead of silently nudging a value. Moving the mouse off
+    a focused control clears its focus again (`leaveEvent`), so scrolling
+    past it a second time without re-clicking is safe; an active slider
+    drag that momentarily leaves the widget's rect is not interrupted
+    (`isSliderDown()` guards that). First cut of this (committed
+    `bc1c1ae`) blocked the wheel unconditionally; refined the same day to
+    this click-to-arm version instead, so wheel-adjustment is still
+    available once a field is deliberately selected.
+  - `ConfigEditorPage.diff_text()` compares the working buffer against the
+    baseline captured at the last Load/Read/Save/Apply and renders every
+    changed field as "Label: old -> new". **Apply to ESC** shows this and
+    requires an explicit confirm before writing to real hardware; **Save**
+    shows it as a post-save summary; closing the window with unsaved edits
+    (`MainWindow.closeEvent`) prompts Save/Discard/Cancel with the same
+    diff, and a cancelled/failed Save aborts the close instead of losing
+    the edits silently.
 
 **Explicitly out of scope for now:** full `.hex` firmware flashing (only the
 184-byte EEPROM/settings block is read/written); editing `STARTUP_MELODY`/

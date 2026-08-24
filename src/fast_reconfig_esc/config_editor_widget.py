@@ -40,28 +40,44 @@ from .mcu_profiles import LAYOUT_SIZE
 from .theme import ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
 
 
-class _NoWheelSlider(QSlider):
-    """A slider that never reacts to the mouse wheel.
-
-    Scrolling the long settings form with the wheel routinely passes the
-    cursor over a slider - by default Qt would silently nudge that field's
-    value instead of scrolling the page. Ignoring the event here (rather
-    than accepting/consuming it) makes Qt bubble it up to the enclosing
-    QScrollArea, so wheel-scrolling still works, it just can't edit a value
-    by accident. Dragging or arrow keys (once clicked) still work normally.
+class _ClickToWheelMixin:
+    """Wheel only nudges the value once this widget has been clicked (given
+    focus) - otherwise the wheel event is ignored so it bubbles up to the
+    enclosing QScrollArea and just scrolls the page, instead of silently
+    changing a value the cursor happened to be passing over. Moving the
+    mouse off the widget clears focus again, so scrolling past it a second
+    time (without clicking it again) stays safe. Dragging a slider past its
+    own edges while the button is held still works normally - focus is only
+    dropped on a genuine "moved away, not interacting" leave.
     """
 
     def wheelEvent(self, event: QWheelEvent) -> None:
-        event.ignore()
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+    def leaveEvent(self, event) -> None:
+        if not (hasattr(self, "isSliderDown") and self.isSliderDown()):
+            self.clearFocus()
+        super().leaveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        super().mouseReleaseEvent(event)
+        if not self.underMouse():
+            self.clearFocus()
 
 
-class _NoWheelComboBox(QComboBox):
-    """Same accidental-edit protection as `_NoWheelSlider`, for dropdowns
-    (e.g. Protocol, Low voltage cutoff mode) - a setting like ESC_PROTOCOL
-    is too consequential to risk changing via an incidental wheel scroll."""
+class _ClickToWheelSlider(_ClickToWheelMixin, QSlider):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-    def wheelEvent(self, event: QWheelEvent) -> None:
-        event.ignore()
+
+class _ClickToWheelComboBox(_ClickToWheelMixin, QComboBox):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
 
 class ConfigEditorPage(QWidget):
@@ -330,7 +346,7 @@ class ConfigEditorPage(QWidget):
         layout.setSpacing(4)
         layout.addWidget(self._make_label_row(spec))
 
-        control = _NoWheelComboBox()
+        control = _ClickToWheelComboBox()
         for raw, text in (spec.options or {}).items():
             control.addItem(text, raw)
         i = control.findData(value)
@@ -362,7 +378,7 @@ class ConfigEditorPage(QWidget):
         layout.setSpacing(4)
         layout.addWidget(self._make_label_row(spec))
 
-        slider = _NoWheelSlider(Qt.Orientation.Horizontal)
+        slider = _ClickToWheelSlider(Qt.Orientation.Horizontal)
         slider.setRange(raw_min, raw_max)
         slider.setValue(raw_max if is_disabled else raw)
         slider.setEnabled(not is_disabled)
