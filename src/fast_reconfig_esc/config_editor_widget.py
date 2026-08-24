@@ -14,19 +14,20 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QWheelEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
     QFileDialog,
-    QFormLayout,
-    QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -34,8 +35,33 @@ from PyQt6.QtWidgets import (
 from . import i18n
 from .eeprom_config import ConfigFileError, load_config_file
 from .eeprom_fields import FieldSpec, GROUP_ORDER, applicable_specs, decode_field, encode_field
+from .eeprom_values import format_field_value
 from .mcu_profiles import LAYOUT_SIZE
-from .theme import ACCENT_ERROR, TEXT_MUTED
+from .theme import ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
+
+
+class _NoWheelSlider(QSlider):
+    """A slider that never reacts to the mouse wheel.
+
+    Scrolling the long settings form with the wheel routinely passes the
+    cursor over a slider - by default Qt would silently nudge that field's
+    value instead of scrolling the page. Ignoring the event here (rather
+    than accepting/consuming it) makes Qt bubble it up to the enclosing
+    QScrollArea, so wheel-scrolling still works, it just can't edit a value
+    by accident. Dragging or arrow keys (once clicked) still work normally.
+    """
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        event.ignore()
+
+
+class _NoWheelComboBox(QComboBox):
+    """Same accidental-edit protection as `_NoWheelSlider`, for dropdowns
+    (e.g. Protocol, Low voltage cutoff mode) - a setting like ESC_PROTOCOL
+    is too consequential to risk changing via an incidental wheel scroll."""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        event.ignore()
 
 
 class ConfigEditorPage(QWidget):
@@ -45,6 +71,7 @@ class ConfigEditorPage(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._working_config: Optional[bytearray] = None
+        self._original_config: Optional[bytes] = None
         self._source_desc = ""
         self._dirty = False
         self._connected = False
@@ -179,11 +206,32 @@ class ConfigEditorPage(QWidget):
 
     def _load_working_config(self, data: bytearray, source_desc: str) -> None:
         self._working_config = data
+        self._original_config = bytes(data)
         self._source_desc = source_desc
         self._dirty = False
         self._set_controls_enabled(True)
         self._rebuild_form()
         self._refresh_source_label()
+
+    def has_unsaved_changes(self) -> bool:
+        return self._dirty and self._working_config is not None
+
+    def diff_text(self) -> str:
+        """Human-readable "Label: old -> new" lines for every field that
+        differs between the last loaded/saved/applied baseline and the
+        current working buffer - used for the exit/save/apply confirmations
+        so a change is never committed (or discarded) silently."""
+        if self._working_config is None or self._original_config is None:
+            return i18n.tr("config_diff_no_changes")
+        current = bytes(self._working_config)
+        lines = []
+        for spec in applicable_specs(current):
+            if self._original_config[spec.offset] == current[spec.offset]:
+                continue
+            old_text = format_field_value(spec, self._original_config)
+            new_text = format_field_value(spec, current)
+            lines.append(i18n.tr("config_diff_line", label=i18n.tr(spec.label_key), old=old_text, new=new_text))
+        return "\n".join(lines) if lines else i18n.tr("config_diff_no_changes")
 
     def _refresh_source_label(self) -> None:
         if self._working_config is None:
@@ -219,69 +267,129 @@ class ConfigEditorPage(QWidget):
             specs = specs_by_group.get(group_key)
             if not specs:
                 continue
-            box = QGroupBox(i18n.tr(group_key))
-            form = QFormLayout(box)
-            for spec in specs:
-                self._add_row(form, spec, settings)
-            self._form_layout.insertWidget(insert_at, box)
+            self._form_layout.insertWidget(insert_at, self._build_group_box(group_key, specs, settings))
             insert_at += 1
 
         self._update_conditional_visibility()
 
-    def _add_row(self, form: QFormLayout, spec: FieldSpec, settings: bytes) -> None:
-        value = decode_field(spec, settings)
-        label_text = i18n.tr(spec.label_key)
+    def _build_group_box(self, group_key: str, specs: list[FieldSpec], settings: bytes) -> QGroupBox:
+        box = QGroupBox(i18n.tr(group_key))
+        box_layout = QHBoxLayout(box)
+        box_layout.setSpacing(28)
 
-        if spec.kind == "bool":
-            control = QCheckBox()
-            control.setChecked(bool(value))
-            control.toggled.connect(lambda checked, s=spec: self._on_value_changed(s, checked))
-            form.addRow(label_text, control)
-            self._rows[spec.offset] = (spec, control, None, control)
-            return
+        bool_specs = [s for s in specs if s.kind == "bool"]
+        other_specs = [s for s in specs if s.kind != "bool"]
 
-        if spec.kind == "enum":
-            control = QComboBox()
-            for raw, text in (spec.options or {}).items():
-                control.addItem(text, raw)
-            i = control.findData(value)
-            if i >= 0:
-                control.setCurrentIndex(i)
-            control.currentIndexChanged.connect(lambda _i, s=spec, c=control: self._on_value_changed(s, c.currentData()))
-            form.addRow(label_text, control)
-            self._rows[spec.offset] = (spec, control, None, control)
-            if spec.key == "LOW_VOLTAGE_CUTOFF":
-                control.currentIndexChanged.connect(self._update_conditional_visibility)
-            return
+        if bool_specs:
+            check_column = QVBoxLayout()
+            check_column.setSpacing(10)
+            for spec in bool_specs:
+                check_column.addWidget(self._build_bool_checkbox(spec, settings))
+            check_column.addStretch(1)
+            box_layout.addLayout(check_column)
 
-        # number / number_or_disabled
+        if other_specs:
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(24)
+            grid.setVerticalSpacing(16)
+            for col in range(3):
+                grid.setColumnStretch(col, 1)
+            for i, spec in enumerate(other_specs):
+                cell = self._build_enum_cell(spec, settings) if spec.kind == "enum" else self._build_numeric_cell(spec, settings)
+                grid.addWidget(cell, i // 3, i % 3)
+            grid_wrap = QWidget()
+            grid_wrap.setLayout(grid)
+            box_layout.addWidget(grid_wrap, 1)
+
+        return box
+
+    def _make_label_row(self, spec: FieldSpec) -> QWidget:
         row = QWidget()
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(QLabel(i18n.tr(spec.label_key)))
+        layout.addStretch(1)
+        dots = QLabel("● ● ● ● ●")
+        dots.setStyleSheet(f"color: {ACCENT_GREEN}; font-size: 7px;")
+        layout.addWidget(dots)
+        return row
 
-        spin = QDoubleSpinBox()
-        spin.setRange(spec.min_display, spec.max_display)
-        spin.setSingleStep(spec.step)
-        spin.setDecimals(spec.decimals if spec.decimals else (2 if spec.step < 1 else 0))
-        if spec.unit:
-            spin.setSuffix(f" {spec.unit}")
+    def _build_bool_checkbox(self, spec: FieldSpec, settings: bytes) -> QCheckBox:
+        value = decode_field(spec, settings)
+        control = QCheckBox(i18n.tr(spec.label_key))
+        control.setChecked(bool(value))
+        control.toggled.connect(lambda checked, s=spec: self._on_value_changed(s, checked))
+        self._rows[spec.offset] = (spec, control, None, control)
+        return control
+
+    def _build_enum_cell(self, spec: FieldSpec, settings: bytes) -> QWidget:
+        value = decode_field(spec, settings)
+        cell = QWidget()
+        layout = QVBoxLayout(cell)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(self._make_label_row(spec))
+
+        control = _NoWheelComboBox()
+        for raw, text in (spec.options or {}).items():
+            control.addItem(text, raw)
+        i = control.findData(value)
+        if i >= 0:
+            control.setCurrentIndex(i)
+        control.currentIndexChanged.connect(lambda _i, s=spec, c=control: self._on_value_changed(s, c.currentData()))
+        layout.addWidget(control)
+        if spec.key == "LOW_VOLTAGE_CUTOFF":
+            control.currentIndexChanged.connect(self._update_conditional_visibility)
+
+        self._rows[spec.offset] = (spec, control, None, cell)
+        return cell
+
+    def _build_numeric_cell(self, spec: FieldSpec, settings: bytes) -> QWidget:
+        # The slider operates over the raw EEPROM byte domain, not display
+        # units - display "step" sizes don't always evenly divide the raw
+        # byte's actual resolution (e.g. TIMING_ADVANCE), so a display-unit
+        # slider could skip achievable raw values. Raw-domain sliders can
+        # always reach every byte, exactly like the old typeable spin box
+        # could (just via drag/arrow-keys instead of typing digits).
+        raw_min = encode_field(spec, spec.min_display)
+        raw_max = encode_field(spec, spec.max_display)
+        raw = settings[spec.offset]
+        is_disabled = spec.kind == "number_or_disabled" and spec.disabled_at_raw is not None and raw >= spec.disabled_at_raw
+
+        cell = QWidget()
+        layout = QVBoxLayout(cell)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(self._make_label_row(spec))
+
+        slider = _NoWheelSlider(Qt.Orientation.Horizontal)
+        slider.setRange(raw_min, raw_max)
+        slider.setValue(raw_max if is_disabled else raw)
+        slider.setEnabled(not is_disabled)
+        layout.addWidget(slider)
+
+        value_row = QHBoxLayout()
+        value_row.setContentsMargins(0, 0, 0, 0)
+        value_label = QLabel(format_field_value(spec, settings))
+        value_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        value_row.addWidget(value_label)
+        value_row.addStretch(1)
 
         disabled_check = None
         if spec.kind == "number_or_disabled":
             disabled_check = QCheckBox(i18n.tr("config_disabled_checkbox"))
-            is_disabled = value is None
             disabled_check.setChecked(is_disabled)
-            spin.setEnabled(not is_disabled)
-            spin.setValue(float(value) if value is not None else spec.min_display)
-            disabled_check.toggled.connect(lambda checked, s=spec, sp=spin: self._on_disabled_toggled(s, sp, checked))
-            row_layout.addWidget(disabled_check)
-        else:
-            spin.setValue(float(value) if value is not None else spec.min_display)
+            value_row.addWidget(disabled_check)
+        layout.addLayout(value_row)
 
-        spin.valueChanged.connect(lambda v, s=spec, dc=disabled_check: self._on_spin_changed(s, v, dc))
-        row_layout.addWidget(spin, 1)
-        form.addRow(label_text, row)
-        self._rows[spec.offset] = (spec, spin, disabled_check, row)
+        slider.valueChanged.connect(lambda v, s=spec, lbl=value_label: self._on_slider_changed(s, lbl, v))
+        if disabled_check is not None:
+            disabled_check.toggled.connect(
+                lambda checked, s=spec, sl=slider, lbl=value_label: self._on_disabled_toggled(s, sl, lbl, checked)
+            )
+
+        self._rows[spec.offset] = (spec, slider, disabled_check, cell)
+        return cell
 
     # ---- edits flow live into the working buffer ------------------------------------------------
 
@@ -291,14 +399,20 @@ class ConfigEditorPage(QWidget):
         self._working_config[spec.offset] = encode_field(spec, value)
         self._mark_dirty()
 
-    def _on_spin_changed(self, spec: FieldSpec, value: float, disabled_check: Optional[QCheckBox]) -> None:
-        if disabled_check is not None and disabled_check.isChecked():
-            return  # value is "disabled" - the checkbox handler owns the raw byte, not the (greyed-out) spin box
-        self._on_value_changed(spec, value)
+    def _on_slider_changed(self, spec: FieldSpec, value_label: QLabel, raw_value: int) -> None:
+        if self._working_config is None:
+            return
+        self._working_config[spec.offset] = raw_value
+        value_label.setText(format_field_value(spec, bytes(self._working_config)))
+        self._mark_dirty()
 
-    def _on_disabled_toggled(self, spec: FieldSpec, spin: QDoubleSpinBox, checked: bool) -> None:
-        spin.setEnabled(not checked)
-        self._on_value_changed(spec, None if checked else spin.value())
+    def _on_disabled_toggled(self, spec: FieldSpec, slider: QSlider, value_label: QLabel, checked: bool) -> None:
+        slider.setEnabled(not checked)
+        if self._working_config is None:
+            return
+        self._working_config[spec.offset] = spec.disabled_at_raw if checked else slider.value()
+        value_label.setText(format_field_value(spec, bytes(self._working_config)))
+        self._mark_dirty()
 
     def _mark_dirty(self) -> None:
         if not self._dirty:
@@ -316,26 +430,55 @@ class ConfigEditorPage(QWidget):
     # ---- save / apply ------------------------------------------------
 
     def _on_save_file_clicked(self) -> None:
+        self.save_via_dialog()
+
+    def save_via_dialog(self) -> bool:
+        """Runs the full Save-to-file flow (file picker, write, change
+        summary). Returns whether a file was actually written - used both by
+        the Save button and by MainWindow's exit-confirmation "Save" choice,
+        so a cancelled file picker or a write failure can correctly abort
+        closing the window instead of silently discarding the edits."""
         if self._working_config is None:
-            return
+            return False
         downloads = str(Path.home() / "Downloads")
         path, _ = QFileDialog.getSaveFileName(
             self, i18n.tr("config_save_to_file"), downloads, i18n.tr("binary_config_filter")
         )
         if not path:
-            return
+            return False
+        diff = self.diff_text()
         try:
             Path(path).write_bytes(bytes(self._working_config))
         except OSError as e:
             self._source_label.setText(i18n.tr("config_save_failed", error=e))
             self._source_label.setStyleSheet(f"color: {ACCENT_ERROR};")
-            return
+            return False
         self._dirty = False
+        self._original_config = bytes(self._working_config)
         self._source_desc = i18n.tr("config_working_from_file", path=path)
         self._refresh_source_label()
         self.file_loaded.emit(path)
+        QMessageBox.information(
+            self, i18n.tr("config_save_summary_title"), i18n.tr("config_save_summary_body", path=path, diff=diff)
+        )
+        return True
 
     def _on_apply_clicked(self) -> None:
         if self._working_config is None or len(self._working_config) != LAYOUT_SIZE:
             return
+        if self.has_unsaved_changes():
+            diff = self.diff_text()
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setWindowTitle(i18n.tr("config_apply_confirm_title"))
+            box.setText(i18n.tr("config_apply_confirm_body", diff=diff))
+            write_btn = box.addButton(i18n.tr("config_apply_confirm_yes"), QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(i18n.tr("config_apply_confirm_cancel"), QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(write_btn)
+            box.exec()
+            if box.clickedButton() is not write_btn:
+                return
+            self._dirty = False
+            self._original_config = bytes(self._working_config)
+            self._refresh_source_label()
         self.apply_requested.emit(bytes(self._working_config))

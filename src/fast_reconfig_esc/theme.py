@@ -55,4 +55,56 @@ QComboBox, QLineEdit, QPlainTextEdit {{
 QCheckBox {{
     spacing: 6px;
 }}
+QCheckBox::indicator {{
+    width: 15px;
+    height: 15px;
+    border: 1px solid {BORDER};
+    border-radius: 3px;
+    background-color: {BG_MAIN};
+}}
+QCheckBox::indicator:checked {{
+    background-color: {ACCENT_RED};
+    border-color: {ACCENT_RED};
+}}
+QGroupBox {{
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    margin-top: 12px;
+    font-weight: 600;
+    padding-top: 14px;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 12px;
+    padding: 0 6px;
+    color: {TEXT_MAIN};
+}}
+QSlider::groove:horizontal {{
+    height: 4px;
+    background: {BORDER};
+    border-radius: 2px;
+}}
+QSlider::sub-page:horizontal {{
+    background: {ACCENT_RED};
+    border-radius: 2px;
+}}
+QSlider::add-page:horizontal {{
+    background: {BORDER};
+    border-radius: 2px;
+}}
+QSlider::handle:horizontal {{
+    background: {ACCENT_RED};
+    border: 2px solid {BG_MAIN};
+    width: 14px;
+    height: 14px;
+    margin: -6px 0;
+    border-radius: 8px;
+}}
+QSlider::handle:horizontal:hover {{
+    background: {ACCENT_RED_HOVER};
+}}
+QSlider:disabled::sub-page:horizontal, QSlider:disabled::handle:horizontal {{
+    background: {TEXT_MUTED};
+}}
 """

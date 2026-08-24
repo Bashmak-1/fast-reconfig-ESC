@@ -143,6 +143,55 @@ be re-derived from scratch later.
     deliberately not editable - excluded from `FIELD_SPECS` entirely, so
     they're always copied through unchanged from whatever buffer the editor
     was seeded from and can never be corrupted by editing other fields.
+- **Config tab visual redesign to match am32.ca's own "Base" tab (2026-08-24,
+  `am32.ca_configurator.png`)** — the user said people are already used to
+  that exact look and won't want anything different, so the field grid was
+  reworked from a plain stacked `QFormLayout` to match it: each group is a
+  bordered `QGroupBox` with the title on the border line, boolean fields
+  stack as a left-hand checkbox column, and every enum/number field sits in
+  a 3-wide grid as label+decorative-dots → `QSlider` → value-text-below,
+  same shape as the site. Sliders deliberately operate over the **raw
+  EEPROM byte domain** (`encode_field(spec, min_display)`/`max_display` for
+  the range, direct raw-byte writes on drag) rather than display units,
+  because a field's display "step" doesn't always evenly divide its actual
+  raw-byte resolution (e.g. `TIMING_ADVANCE` v3+: step=1° but each raw
+  increment is really 0.9375°) - a display-stepped slider could skip
+  achievable raw values entirely; the raw-domain slider can always reach
+  every byte, same guarantee the old typeable spin box had. `FieldSpec.step`
+  became dead weight once the spin box was gone and was removed.
+  `eeprom_values.py` gained a public `format_field_value(spec, settings)`
+  extracted from `decode_settings`'s loop, so the editor's value labels and
+  the technical log share the exact same formatting call, same rationale as
+  `decode_field`/`encode_field` already being shared.
+- **Standalone `.exe` build (2026-08-24)** — `scripts/build_exe.py` runs
+  PyInstaller (`--onefile --windowed`, pinned in `requirements-dev.txt`) and
+  produces `dist/AM32Flasher.exe`, a single ~38MB file with PyQt6/pyserial
+  bundled in - no Python install needed to run it. Build with:
+  `.venv\Scripts\python.exe scripts\build_exe.py`. `build/` and `dist/` are
+  gitignored (regenerated output, not source); rerun the build script after
+  any code change to get a fresh exe. Verified: launches standalone, window/
+  Cyrillic text/COM-port list/persistent config path/log file path all
+  render exactly like running from source - `~/.fast_reconfig_esc/` (config
+  path + log file) lives outside the exe/install location either way, so
+  packaging doesn't change where state is kept. A desktop shortcut
+  ("AM32 Flasher.lnk") points at `dist\AM32Flasher.exe` for double-click
+  launch.
+  - **Known gotcha - Windows Smart App Control can block it outright**:
+    confirmed on this machine (`VerifiedAndReputablePolicyState=1` in
+    `HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy`, i.e. SAC on in
+    evaluation mode) - a freshly rebuilt, unsigned exe has no cloud
+    reputation yet, so SAC can refuse to run it at all ("An Application
+    Control policy has blocked this file"), with no click-through like
+    SmartScreen offers. This is a stock Windows 11 22H2+ feature (default
+    ON on clean installs), so any other target PC may hit the same wall.
+    Decision (2026-08-24): not worth code-signing for this use case: leave
+    it as-is and warn whoever receives the exe. If someone hits the block,
+    they need to either disable Smart App Control themselves (Settings ->
+    Privacy & security -> Windows Security -> App & browser control ->
+    Smart App Control - a system security setting, so this app can't do it
+    for them) or get a code-signing certificate reputable enough to satisfy
+    SAC (not done here, costs money and doesn't fully guarantee passing
+    immediately either).
 
 **Explicitly out of scope for now:** full `.hex` firmware flashing (only the
 184-byte EEPROM/settings block is read/written); editing `STARTUP_MELODY`/

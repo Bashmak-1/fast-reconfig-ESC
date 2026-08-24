@@ -43,7 +43,6 @@ class FieldSpec:
     kind: str  # "bool" | "enum" | "number" | "number_or_disabled"
     min_display: float = 0
     max_display: float = 255
-    step: float = 1
     decimals: int = 0
     display_factor: float = 1.0
     display_offset: float = 0.0
@@ -124,18 +123,18 @@ FIELD_SPECS: list[FieldSpec] = [
     # Motor
     FieldSpec(
         "TIMING_ADVANCE", "field_timing_advance", "group_motor", "number",
-        min_display=0, max_display=32, step=1, display_factor=1, display_offset=-10,
+        min_display=0, max_display=32, display_factor=1, display_offset=-10,
         only_display_factor=0.9375, unit="°", min_eeprom_version=3,
     ),
     FieldSpec(
         "TIMING_ADVANCE", "field_timing_advance", "group_motor", "number",
-        min_display=0, max_display=22.5, step=7.5, display_factor=7.5,
+        min_display=0, max_display=22.5, display_factor=7.5,
         unit="°", max_eeprom_version=2,
     ),
     FieldSpec("STARTUP_POWER", "field_startup_power", "group_motor", "number", min_display=50, max_display=150, unit="%"),
     FieldSpec(
         "MOTOR_KV", "field_motor_kv", "group_motor", "number",
-        min_display=20, max_display=10220, step=40, display_factor=40, display_offset=20,
+        min_display=20, max_display=10220, display_factor=40, display_offset=20,
     ),
     FieldSpec("MOTOR_POLES", "field_motor_poles", "group_motor", "number", min_display=2, max_display=36),
     FieldSpec("BEEP_VOLUME", "field_beep_volume", "group_motor", "number", min_display=0, max_display=11),
@@ -159,12 +158,12 @@ FIELD_SPECS: list[FieldSpec] = [
     # Extended settings (eeprom v3+)
     FieldSpec(
         "MAX_RAMP", "field_ramp_rate", "group_extended", "number",
-        min_display=0.1, max_display=20, step=0.1, decimals=1, display_factor=0.1,
+        min_display=0.1, max_display=20, decimals=1, display_factor=0.1,
         unit="% duty cycle per ms", min_eeprom_version=3,
     ),
     FieldSpec(
         "MINIMUM_DUTY_CYCLE", "field_minimum_duty_cycle", "group_extended", "number",
-        min_display=0, max_display=25, step=0.5, decimals=1, display_factor=0.5,
+        min_display=0, max_display=25, decimals=1, display_factor=0.5,
         unit="%", min_eeprom_version=3,
     ),
     # Limits
@@ -174,7 +173,7 @@ FIELD_SPECS: list[FieldSpec] = [
     ),
     FieldSpec(
         "CURRENT_LIMIT", "field_current_limit", "group_limits", "number_or_disabled",
-        min_display=0, max_display=200, step=2, display_factor=2, disabled_at_raw=101,
+        min_display=0, max_display=200, display_factor=2, disabled_at_raw=101,
     ),
     FieldSpec("LOW_VOLTAGE_CUTOFF", "field_low_voltage_cutoff", "group_limits", "enum", options=LOW_VOLTAGE_CUTOFF_OPTIONS),
     FieldSpec(
@@ -183,7 +182,7 @@ FIELD_SPECS: list[FieldSpec] = [
     ),
     FieldSpec(
         "ABSOLUTE_VOLTAGE_CUTOFF", "field_absolute_voltage_cutoff", "group_limits", "number",
-        min_display=0.5, max_display=50, step=0.5, decimals=1, display_factor=0.5, unit="V",
+        min_display=0.5, max_display=50, decimals=1, display_factor=0.5, unit="V",
         min_eeprom_version=3, visible_when=_lvc_is_absolute,
     ),
     # Current control (eeprom v3+)

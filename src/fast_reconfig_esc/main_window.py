@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
@@ -66,7 +67,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.resize(1100, 760)
+        self.resize(1280, 800)
 
         self.worker = ConnectionWorker()
         self.esc_manager = self.worker.manager
@@ -114,8 +115,9 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(page)
         self.config_editor = ConfigEditorPage()
         self._comparison_list = EscComparisonList()
-        layout.addWidget(self.config_editor, 2)
-        layout.addWidget(self._comparison_list, 1)
+        self._comparison_list.setMaximumWidth(300)
+        layout.addWidget(self.config_editor, 1)
+        layout.addWidget(self._comparison_list)
         return page
 
     def _build_top_bar(self) -> QFrame:
@@ -428,6 +430,25 @@ class MainWindow(QMainWindow):
     # ---- window lifecycle ------------------------------------------------
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self.config_editor.has_unsaved_changes():
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle(i18n.tr("config_exit_unsaved_title"))
+            box.setText(i18n.tr("config_exit_unsaved_body", diff=self.config_editor.diff_text()))
+            save_btn = box.addButton(i18n.tr("dialog_save"), QMessageBox.ButtonRole.AcceptRole)
+            discard_btn = box.addButton(i18n.tr("dialog_discard"), QMessageBox.ButtonRole.DestructiveRole)
+            box.addButton(i18n.tr("dialog_cancel"), QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(save_btn)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is save_btn:
+                if not self.config_editor.save_via_dialog():
+                    event.ignore()
+                    return
+            elif clicked is not discard_btn:
+                event.ignore()
+                return
+
         if self._connected:
             self.esc_manager.disconnect()
         self.worker.stop()

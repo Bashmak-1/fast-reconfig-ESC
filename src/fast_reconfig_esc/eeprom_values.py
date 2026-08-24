@@ -97,6 +97,29 @@ def _format_value(spec: FieldSpec, value) -> str:
     return f"{value:.{spec.decimals}f}" if spec.decimals else _fmt(value)
 
 
+def format_field_value(spec: FieldSpec, settings: bytes) -> str:
+    """The exact display text for one field, given the full 184-byte block -
+    shared by the technical log (`decode_settings`) and the interactive
+    editor's value labels (`config_editor_widget.py`), so they can never
+    disagree about what a raw byte reads as."""
+    value = decode_field(spec, settings)
+
+    # Two fields have display text that isn't a plain "value+unit" - kept as
+    # bespoke formatting here rather than adding editor-only spec flags for
+    # cosmetics most fields don't need.
+    if spec.key == "ACTIVE_BRAKE_POWER":
+        return "Off" if value == 0 else f"{_fmt(value)}% duty cycle"
+    if spec.key == "PWM_FREQUENCY":
+        pwm_raw = settings[EEPROM_LAYOUT["PWM_FREQUENCY"].offset]
+        variable_pwm = settings[EEPROM_LAYOUT["VARIABLE_PWM_FREQUENCY"].offset]
+        return f"{pwm_raw}kHz - {pwm_raw * 2}kHz" if variable_pwm == 1 else f"{pwm_raw}kHz"
+
+    text = _format_value(spec, value)
+    if spec.unit and value is not None and spec.kind not in ("bool", "enum"):
+        text = f"{text}{spec.unit}"
+    return text
+
+
 def decode_settings(settings: bytes) -> list[DecodedValue]:
     """Ordered list of (label, formatted value) for every field that applies
     to this buffer's eeprom_version, matching am32.ca's "Base" tab groupings
@@ -105,24 +128,6 @@ def decode_settings(settings: bytes) -> list[DecodedValue]:
 
     for spec in applicable_specs(settings):
         label = _LOG_LABELS.get(spec.label_key, spec.label_key)
-        value = decode_field(spec, settings)
-
-        # Two fields have display text that isn't a plain "value+unit" -
-        # kept as bespoke formatting here rather than adding editor-only
-        # spec flags for cosmetics the interactive editor doesn't need.
-        if spec.key == "ACTIVE_BRAKE_POWER":
-            out.append(DecodedValue(label, "Off" if value == 0 else f"{_fmt(value)}% duty cycle"))
-            continue
-        if spec.key == "PWM_FREQUENCY":
-            pwm_raw = settings[EEPROM_LAYOUT["PWM_FREQUENCY"].offset]
-            variable_pwm = settings[EEPROM_LAYOUT["VARIABLE_PWM_FREQUENCY"].offset]
-            text = f"{pwm_raw}kHz - {pwm_raw * 2}kHz" if variable_pwm == 1 else f"{pwm_raw}kHz"
-            out.append(DecodedValue(label, text))
-            continue
-
-        text = _format_value(spec, value)
-        if spec.unit and value is not None and spec.kind not in ("bool", "enum"):
-            text = f"{text}{spec.unit}"
-        out.append(DecodedValue(label, text))
+        out.append(DecodedValue(label, format_field_value(spec, settings)))
 
     return out
