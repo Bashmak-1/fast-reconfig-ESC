@@ -19,12 +19,15 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from . import i18n
+from .config_editor_widget import ConfigEditorPage
 from .connection_worker import ConnectionWorker
+from .esc_comparison_widget import EscComparisonList
 from .esc_manager import (
     DEFAULT_ESC_CONNECT_RETRIES,
     MAX_ESC_CONNECT_RETRIES,
@@ -57,17 +60,19 @@ class MainWindow(QMainWindow):
     request_disconnect = pyqtSignal()
     request_discover = pyqtSignal()
     request_flash = pyqtSignal(str, object)  # config_path, target_indices (list | None)
+    request_flash_bytes = pyqtSignal(bytes, object)  # config_bytes, target_indices (list | None)
     request_set_esc_retries = pyqtSignal(int)
     request_set_config_path = pyqtSignal(str)
 
     def __init__(self) -> None:
         super().__init__()
-        self.resize(920, 720)
+        self.resize(1100, 760)
 
         self.worker = ConnectionWorker()
         self.esc_manager = self.worker.manager
 
         self._esc_widgets: dict[int, EscStatusWidget] = {}
+        self._esc_read_cache: dict[int, tuple[str, bytes]] = {}  # index -> (label, settings), for "Read from ESC"
         self._connected = False
 
         self._build_ui()
@@ -86,13 +91,32 @@ class MainWindow(QMainWindow):
         root = QVBoxLayout(central)
 
         root.addWidget(self._build_top_bar())
-        root.addWidget(self._build_config_row())
+
+        self._tabs = QTabWidget()
+        self._tabs.addTab(self._build_main_tab(), "")
+        self._tabs.addTab(self._build_config_tab(), "")
+        root.addWidget(self._tabs, 1)
+
+        root.addWidget(self._build_log_panel())
+
+    def _build_main_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(self._build_config_row())
 
         self._grid_container = QFrame()
         self._grid_layout = QGridLayout(self._grid_container)
-        root.addWidget(self._grid_container, 1)
+        layout.addWidget(self._grid_container, 1)
+        return page
 
-        root.addWidget(self._build_log_panel())
+    def _build_config_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QHBoxLayout(page)
+        self.config_editor = ConfigEditorPage()
+        self._comparison_list = EscComparisonList()
+        layout.addWidget(self.config_editor, 2)
+        layout.addWidget(self._comparison_list, 1)
+        return page
 
     def _build_top_bar(self) -> QFrame:
         bar = QFrame()
@@ -202,6 +226,7 @@ class MainWindow(QMainWindow):
         self.request_disconnect.connect(self.esc_manager.disconnect)
         self.request_discover.connect(self.esc_manager.discover_all)
         self.request_flash.connect(self.esc_manager.flash_all)
+        self.request_flash_bytes.connect(self.esc_manager.flash_bytes)
         self.request_set_esc_retries.connect(self.esc_manager.set_esc_connect_retries)
         self.request_set_config_path.connect(self.esc_manager.set_config_path)
 
@@ -210,6 +235,9 @@ class MainWindow(QMainWindow):
         self.esc_manager.log_message.connect(self._on_log_message)
         self.esc_manager.discovery_finished.connect(self._on_discovery_finished)
         self.esc_manager.flash_finished.connect(self._on_flash_finished)
+
+        self.config_editor.apply_requested.connect(self._on_apply_from_editor)
+        self.config_editor.file_loaded.connect(self._set_config_path)
 
     # ---- i18n ------------------------------------------------
 
@@ -239,6 +267,8 @@ class MainWindow(QMainWindow):
     def _retranslate_ui(self, *_args) -> None:
         self._sync_lang_combo()
         self.setWindowTitle(i18n.tr("window_title"))
+        self._tabs.setTabText(0, i18n.tr("tab_main"))
+        self._tabs.setTabText(1, i18n.tr("tab_config"))
         self._port_label.setText(i18n.tr("port_label"))
         self._refresh_btn.setToolTip(i18n.tr("refresh_tooltip"))
         self._baud_label.setText(i18n.tr("baud_label"))
@@ -339,6 +369,10 @@ class MainWindow(QMainWindow):
         self._flash_all_btn.setEnabled(connected and bool(self._config_path_edit.text()))
 
         self._rebuild_grid(expected_count if connected else 0)
+        self._comparison_list.clear_all(expected_count if connected else 0)
+        self._esc_read_cache.clear()
+        self.config_editor.set_available_escs(self._esc_read_cache)
+        self.config_editor.set_apply_enabled(connected)
         if connected:
             self.request_discover.emit()
 
@@ -359,6 +393,11 @@ class MainWindow(QMainWindow):
         widget = self._esc_widgets.get(index)
         if widget is not None:
             widget.set_state(state, detail, esc_info)
+        self._comparison_list.set_row(index, state, detail)
+
+        if esc_info is not None and esc_info.settings is not None:
+            self._esc_read_cache[index] = (detail or esc_info.mcu_family, esc_info.settings)
+            self.config_editor.set_available_escs(self._esc_read_cache)
 
     def _on_log_message(self, level: str, text: str) -> None:
         self._append_log(level, text)
@@ -377,6 +416,14 @@ class MainWindow(QMainWindow):
 
     def _on_flash_finished(self, success: int, attempted: int) -> None:
         self._flash_all_btn.setEnabled(self._connected and bool(self._config_path_edit.text()))
+        self.config_editor.set_apply_enabled(self._connected)
+
+    def _on_apply_from_editor(self, config_bytes: bytes) -> None:
+        if not self._connected:
+            self._append_log("error", i18n.tr("not_connected_log"))
+            return
+        self.config_editor.set_apply_enabled(False)
+        self.request_flash_bytes.emit(config_bytes, None)
 
     # ---- window lifecycle ------------------------------------------------
 

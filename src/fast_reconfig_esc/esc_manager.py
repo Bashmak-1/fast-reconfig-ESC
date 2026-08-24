@@ -21,6 +21,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from .eeprom_config import ConfigFileError, load_config_file
 from .eeprom_layout import EEPROM_LAYOUT, FILENAME_BLOCK_SIZE, parse_boot_loader_pin, parse_name_block
+from .eeprom_values import decode_settings
 from .file_logger import get_logger, hex_dump, log_at
 from .fourway import FourWayClient
 from .i18n import tr
@@ -262,6 +263,12 @@ class EscManager(QObject):
                 "ESC #%d: found - %s | settings (%d bytes): %s",
                 i + 1, self._describe_esc_info(result.esc_info), len(result.settings or b""), hex_dump(result.settings or b""),
             )
+            if result.settings is not None:
+                decoded = decode_settings(result.settings)
+                self._flog.info(
+                    "ESC #%d: decoded settings: %s",
+                    i + 1, "; ".join(f"{d.label}={d.value}" for d in decoded),
+                )
             self.esc_status_changed.emit(i, state.value, detail, result.esc_info)
 
         self._log("info", tr("discovery_summary", found=found, expected=self._expected_count))
@@ -343,62 +350,126 @@ class EscManager(QObject):
             eeprom_version=eeprom_version if eeprom_version != 0xFF else None,
             reversed=settings[EEPROM_LAYOUT["MOTOR_DIRECTION"].offset] not in (0, 0xFF),
             bidirectional=settings[EEPROM_LAYOUT["BIDIRECTIONAL_MODE"].offset] not in (0, 0xFF),
+            settings=settings,
         )
 
     # ---- flashing ----------------------------------------------------
 
-    def flash_all(self, config_path: str, target_indices: Optional[list] = None) -> None:
-        if self._fourway is None:
-            self._log("error", tr("not_connected_log"))
-            return
+    def _auto_select_flash_targets(self, config_bytes: bytes) -> list[int]:
+        """Default 'Flash All' target list: every successfully-probed ESC
+        whose current settings do NOT already exactly match what we're
+        about to write. An ESC that already has the exact right config is
+        skipped entirely - no point re-writing flash that's already correct,
+        and it cuts down on needless wear/time on a big batch.
+        """
+        ok_results = [(i, r) for i, r in self._probe_results.items() if r.ok]
+        if not ok_results:
+            return list(range(self._expected_count))
 
+        targets: list[int] = []
+        skipped: list[int] = []
+        for i, r in ok_results:
+            if r.settings == config_bytes:
+                skipped.append(i)
+            else:
+                targets.append(i)
+
+        if skipped:
+            self._log("info", tr("skipped_matching", n=len(skipped)))
+            for i in skipped:
+                result = self._probe_results[i]
+                self._flog.info("ESC #%d: already matches target config, skipping write", i + 1)
+                self.esc_status_changed.emit(
+                    i, EscState.OK.value, tr("config_matches", mcu=self._display_label(result)), result.esc_info
+                )
+
+        return targets
+
+    def flash_all(self, config_path: str, target_indices: Optional[list] = None) -> None:
         try:
             config_bytes = load_config_file(config_path)
         except ConfigFileError as e:
             self._log("error", tr("config_file_error", error=e))
             return
+        self._flog.info("Flash source: file %s", config_path)
+        self.flash_bytes(config_bytes, target_indices)
+
+    def flash_bytes(self, config_bytes: bytes, target_indices: Optional[list] = None) -> None:
+        """Writes config_bytes to ESC(s), used both by file-based Flash All
+        (via flash_all above) and by the config editor's direct Apply
+        button. Same per-ESC isolation, skip-if-already-matches, and
+        readback-verify guarantees either way - `_flash_one` and
+        `_auto_select_flash_targets` don't know or care where the bytes
+        came from.
+        """
+        if self._fourway is None:
+            self._log("error", tr("not_connected_log"))
+            return
+
+        if len(config_bytes) != LAYOUT_SIZE:
+            self._log("error", tr("config_bytes_wrong_length", expected=LAYOUT_SIZE, actual=len(config_bytes)))
+            return
 
         if target_indices is None:
-            ok_indices = [i for i, r in self._probe_results.items() if r.ok]
-            target_indices = ok_indices if ok_indices else list(range(self._expected_count))
+            target_indices = self._auto_select_flash_targets(config_bytes)
 
         self._flog.info(
-            "--- Flash started: %s (%d bytes, %s) -> ESC index(es) %s ---",
-            config_path, len(config_bytes), hex_dump(config_bytes), target_indices,
+            "--- Flash started: %d bytes, %s -> ESC index(es) %s ---",
+            len(config_bytes), hex_dump(config_bytes), target_indices,
+        )
+        self._flog.info(
+            "Flash target decoded settings: %s",
+            "; ".join(f"{d.label}={d.value}" for d in decode_settings(config_bytes)),
         )
         success = 0
         for i in target_indices:
             self.esc_status_changed.emit(i, EscState.PROBING.value, tr("writing"), None)
             try:
-                self._flash_one(i, config_bytes)
+                wrote = self._flash_one(i, config_bytes)
             except Exception as e:  # noqa: BLE001 - one ESC's failure must never block the rest
                 self._log("error", tr("esc_flash_error", n=i + 1, error=e))
                 self._flog.info("ESC #%d: flash failed (%s)", i + 1, e)
                 self.esc_status_changed.emit(i, EscState.ERROR.value, str(e), None)
                 continue
-            self.esc_status_changed.emit(
-                i, EscState.OK.value, tr("flashed_verified"), self._probe_results[i].esc_info
-            )
+            result = self._probe_results[i]
+            detail = tr("flashed_verified") if wrote else tr("config_matches", mcu=self._display_label(result))
+            self.esc_status_changed.emit(i, EscState.OK.value, detail, result.esc_info)
             success += 1
 
         self._log("info", tr("flash_summary", success=success, attempted=len(target_indices)))
         self._flog.info("--- Flash finished: %d/%d succeeded ---", success, len(target_indices))
         self.flash_finished.emit(success, len(target_indices))
 
-    def _flash_one(self, index: int, config_bytes: bytes) -> None:
+    def _flash_one(self, index: int, config_bytes: bytes) -> bool:
+        """Writes config_bytes to one ESC, UNLESS its current settings
+        already exactly match - checked with a fresh read right here, not
+        just via the caller's target-list pre-filter, so this guarantee
+        holds no matter how _flash_one ends up being called (never wear
+        flash writing a config that's already correct).
+
+        Returns True if a write actually happened, False if skipped because
+        it already matched.
+        """
         assert self._fourway is not None
         previous = self._probe_results.get(index)
-        before = previous.settings if previous is not None else None
-        self._flog.info(
-            "ESC #%d: before write: %s",
-            index + 1, hex_dump(before) if before is not None else "(not previously read)",
-        )
 
         # re-select defensively even if already probed
         info = self._fourway.init_flash(index, retries=self._esc_connect_retries)
         mcu = MCU_VARIANTS.get(info.signature)
         if mcu is None:
             raise KeyError(f"unrecognized MCU signature 0x{info.signature:04X}")
+
+        current = self._fourway.read(mcu.eeprom_offset, LAYOUT_SIZE)
+        self._flog.info("ESC #%d: current settings (fresh read, before write decision): %s", index + 1, hex_dump(current))
+
+        esc_info = previous.esc_info if previous is not None else None
+        if current == config_bytes:
+            self._flog.info(
+                "ESC #%d: already matches target config - skipping cmd_DeviceWrite entirely (no flash wear)",
+                index + 1,
+            )
+            self._probe_results[index] = ProbeResult(ok=True, mcu_name=mcu.name, settings=current, esc_info=esc_info)
+            return False
 
         self._flog.info("ESC #%d: writing %d bytes to eeprom_offset=0x%X: %s", index + 1, len(config_bytes), mcu.eeprom_offset, hex_dump(config_bytes))
         self._fourway.write(mcu.eeprom_offset, config_bytes)  # cmd_DeviceWrite, NOT DeviceWriteEEprom
@@ -411,5 +482,5 @@ class EscManager(QObject):
         # A config write doesn't change the ESC's bootloader/hardware identity,
         # only its settings - carry forward the name/firmware info from the
         # last probe rather than doing another name-block read.
-        esc_info = previous.esc_info if previous is not None else None
         self._probe_results[index] = ProbeResult(ok=True, mcu_name=mcu.name, settings=readback, esc_info=esc_info)
+        return True

@@ -29,6 +29,7 @@ class EscInfo:
     eeprom_version: Optional[int] = None
     reversed: bool = False
     bidirectional: bool = False
+    settings: Optional[bytes] = None  # the 184-byte block this info was decoded from, for "Read from ESC" in the editor
 
 
 @dataclass

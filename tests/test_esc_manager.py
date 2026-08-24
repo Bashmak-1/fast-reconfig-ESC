@@ -209,6 +209,86 @@ def test_power_cycle_hint_after_repeated_empty_scans(monkeypatch):
     assert warnings == [tr("power_cycle_hint")]  # keeps firing while still empty
 
 
+def test_flash_all_skips_escs_that_already_match_target_config(monkeypatch, tmp_path):
+    target = _settings_bytes(0x42)
+    already_correct = target  # ESC 0 already has exactly this config
+    needs_flashing = _settings_bytes(0x99)  # ESC 1 has something else
+
+    config_path = tmp_path / "cfg.bin"
+    config_path.write_bytes(target)
+
+    mgr, fake = _make_manager_with_fake(
+        monkeypatch,
+        bad_indices=set(),
+        expected_count=2,
+        settings_by_index={0: already_correct, 1: needs_flashing},
+    )
+    mgr.discover_all()  # populate _probe_results so auto-select has something to compare against
+
+    events = []
+    mgr.esc_status_changed.connect(lambda i, s, d, info: events.append((i, s, d)))
+    infos = []
+    mgr.log_message.connect(lambda level, text: infos.append(text) if level == "info" else None)
+    finished = []
+    mgr.flash_finished.connect(lambda success, attempted: finished.append((success, attempted)))
+
+    mgr.flash_all(str(config_path))  # target_indices=None -> auto-select
+
+    assert 0 not in fake.written  # already matched - must NOT be rewritten
+    assert fake.written[1] == target  # the differing one gets flashed
+
+    assert finished == [(1, 1)]  # only 1 ESC was actually attempted
+    assert any("Skipping" in msg or "Пропускаю" in msg for msg in infos)
+
+    # ESC 0 should have been re-emitted as "ok/matches" (skip path), ESC 1 as flashed+verified
+    esc0_final = [e for e in events if e[0] == 0][-1]
+    esc1_final = [e for e in events if e[0] == 1][-1]
+    assert esc0_final[1] == "ok"
+    assert esc0_final[2] == tr("config_matches", mcu="STM32F051")
+    assert esc1_final[1] == "ok"
+    assert esc1_final[2] == tr("flashed_verified")
+
+
+def test_flash_one_skips_write_even_with_explicit_target_indices(monkeypatch, tmp_path):
+    # The already-matches check lives in _flash_one itself (a fresh read
+    # right before the write decision), not just in the batch-level
+    # auto-select pre-filter - so it holds no matter how target_indices was
+    # produced, including an explicit list that names an already-correct ESC.
+    target = _settings_bytes(0x42)
+    config_path = tmp_path / "cfg.bin"
+    config_path.write_bytes(target)
+
+    mgr, fake = _make_manager_with_fake(
+        monkeypatch, bad_indices=set(), expected_count=1, settings_by_index={0: target}
+    )
+    mgr.discover_all()
+
+    events = []
+    mgr.esc_status_changed.connect(lambda i, s, d, info: events.append((i, s, d)))
+
+    mgr.flash_all(str(config_path), target_indices=[0])
+
+    assert 0 not in fake.written  # explicit target, but already matched -> no write happened
+    assert events[-1][1] == "ok"
+    assert events[-1][2] == tr("config_matches", mcu="STM32F051")
+
+
+def test_flash_one_writes_when_explicit_target_actually_differs(monkeypatch, tmp_path):
+    target = _settings_bytes(0x42)
+    current = _settings_bytes(0x99)
+    config_path = tmp_path / "cfg.bin"
+    config_path.write_bytes(target)
+
+    mgr, fake = _make_manager_with_fake(
+        monkeypatch, bad_indices=set(), expected_count=1, settings_by_index={0: current}
+    )
+    mgr.discover_all()
+
+    mgr.flash_all(str(config_path), target_indices=[0])
+
+    assert fake.written[0] == target  # actually different -> gets written
+
+
 def test_discover_all_decodes_esc_info(monkeypatch, tmp_path):
     settings = bytearray(_settings_bytes(0x00))
     settings[0x01] = 3  # LAYOUT_REVISION
