@@ -214,12 +214,42 @@ be re-derived from scratch later.
     (`MainWindow.closeEvent`) prompts Save/Discard/Cancel with the same
     diff, and a cancelled/failed Save aborts the close instead of losing
     the edits silently.
+- **"Хотспот" tab: hands-off hot-plug flashing station (2026-08-24)** - a
+  third tab (`hotspot_widget.py`, `HotspotFlashPage`) for a non-technical
+  operator reflashing many ESCs back-to-back as fast as possible: pick a
+  config file and a port once, click Старт, then just plug devices in one
+  after another - no further clicks. A `QTimer` (1s) polls
+  `list_fc_ports()` for the chosen port's presence and drives a small state
+  machine (waiting_device -> connecting -> checking -> flashing ->
+  waiting_removal, plus warning/error branches) entirely through the
+  existing `EscManager` signals - no protocol changes, this is pure
+  orchestration on top of what already existed. Calling `flash_bytes`
+  unconditionally after every scan (same as the Main tab's "Режим
+  автопрошивки" checkbox already does) is what makes "flash only what's
+  wrong, skip what's already correct" work for free - the skip-if-matches
+  guarantee lives in `_flash_one`, not here. A big color banner
+  (`ACCENT_ERROR` red "НЕ ВІДКЛЮЧАЙТЕ" while writing, `ACCENT_GREEN` green
+  "Можна відключати" once verified, `QApplication.beep()` on done) is the
+  only thing the operator needs to watch. After a finished cycle it
+  disconnects immediately and waits for the port to actually *disappear*
+  before re-arming - reconnecting to the same still-plugged device would
+  otherwise spam reconnect/reflash loops. Session counters (flashed/already
+  -ok/errors) are a pure throughput readout, no effect on behavior.
+  `MainWindow` enforces mutual exclusion: while Хотспот is armed, the top
+  bar's manual Connect/port controls and the Main/Config tabs' action
+  buttons are disabled (only one workflow may hold the single `EscManager`
+  connection at a time), and symmetrically Старт is disabled while a manual
+  connection is already active elsewhere.
 
 **Explicitly out of scope for now:** full `.hex` firmware flashing (only the
 184-byte EEPROM/settings block is read/written); editing `STARTUP_MELODY`/
 `CAN_SETTINGS` (see above); "Send default config" (no default byte tables
-available). The architecture leaves room for firmware flashing later via the
-same `FourWayClient.read`/`write` primitives.
+available); watching/flashing more than one port at once in the Хотспот tab
+(confirmed with the user - normal case is one port per FC, and the whole
+app is single-connection by design, so true parallel multi-port flashing
+would need a much larger redesign). The architecture leaves room for
+firmware flashing later via the same `FourWayClient.read`/`write`
+primitives.
 
 ## Protocol facts (sourced — re-verify against upstream if anything here
 stops matching real-device behavior)
@@ -359,10 +389,11 @@ src/fast_reconfig_esc/
     i18n.py                 en/uk translations
     flag_icons.py            QPainter-drawn language-switcher flags
     theme.py                 dark QSS palette
-    main_window.py            QMainWindow: top bar + log panel (always visible) + QTabWidget(Main, Config)
+    main_window.py            QMainWindow: top bar + log panel (always visible) + QTabWidget(Main, Config, Хотспот)
     esc_status_widget.py      Main tab's per-ESC status card
     config_editor_widget.py   Config tab: generic form built from eeprom_fields.FIELD_SPECS, in-memory working buffer, load/read/save/apply
     esc_comparison_widget.py  Config tab: compact per-ESC comparison table, fed by the same esc_status_changed stream as the Main tab
+    hotspot_widget.py         Хотспот tab: hands-off hot-plug flashing station, port-presence poll + state machine on top of the existing EscManager signals
 tests/
     test_protocol.py        CRC/framing unit tests, known-vector checks
     test_eeprom_fields.py     decode_field/encode_field round-trip tests (every raw byte, every field spec)

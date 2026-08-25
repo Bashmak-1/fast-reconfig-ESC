@@ -1,0 +1,379 @@
+"""The "Hotspot" tab: hands-off hot-plug flashing station.
+
+Meant for an operator who doesn't need to understand the tool at all: pick
+the correct config file and the port once, click Start, then just plug ESCs
+in one after another. Each one is connected, checked against the loaded
+config, flashed only if it actually differs (the existing skip-if-matches
+guarantee in EscManager.flash_bytes makes an already-correct ESC a no-op),
+and a big banner says clearly when it's safe to unplug. After a finished
+cycle this disconnects and waits for the port to actually disappear before
+re-arming, so leaving the same unit plugged in doesn't spam reconnects.
+
+Drives EscManager only indirectly, through signals MainWindow wires to the
+existing request_connect/request_disconnect/request_discover/
+request_flash_bytes - same delegation pattern ConfigEditorPage already uses.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional
+
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from . import i18n
+from .eeprom_config import ConfigFileError, load_config_file
+from .esc_comparison_widget import EscComparisonList
+from .serial_transport import list_fc_ports
+from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, BG_PANEL, TEXT_MAIN, TEXT_MUTED
+
+DEFAULT_BAUD = 115200
+MAX_CONNECT_ATTEMPTS = 5
+POLL_INTERVAL_MS = 1000
+
+_PHASE_STYLE = {
+    "idle": (BG_PANEL, TEXT_MUTED),
+    "waiting_device": (BG_PANEL, TEXT_MAIN),
+    "connecting": (ACCENT_AMBER, "white"),
+    "checking": (ACCENT_AMBER, "white"),
+    "flashing": (ACCENT_ERROR, "white"),
+    "waiting_removal": (ACCENT_GREEN, "white"),
+    "warning_not_found": (ACCENT_AMBER, "white"),
+    "error_connect": (ACCENT_ERROR, "white"),
+    "error_flash": (ACCENT_ERROR, "white"),
+}
+_PHASE_BANNER_KEY = {
+    "idle": "hotspot_banner_idle",
+    "waiting_device": "hotspot_banner_waiting_device",
+    "connecting": "hotspot_banner_connecting",
+    "checking": "hotspot_banner_checking",
+    "flashing": "hotspot_banner_flashing",
+    "waiting_removal": "hotspot_banner_done",
+    "warning_not_found": "hotspot_banner_warning_not_found",
+    "error_connect": "hotspot_banner_error_connect",
+    "error_flash": "hotspot_banner_error_flash",
+}
+_RETRY_PHASES = {"warning_not_found", "error_connect", "error_flash"}
+_WATCH_DISAPPEAR_PHASES = {"waiting_removal", "warning_not_found", "error_connect", "error_flash"}
+
+
+class HotspotFlashPage(QWidget):
+    connect_requested = pyqtSignal(str, int)
+    disconnect_requested = pyqtSignal()
+    discover_requested = pyqtSignal()
+    flash_requested = pyqtSignal(bytes)
+    armed_changed = pyqtSignal(bool)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._config_bytes: Optional[bytes] = None
+        self._config_path: str = ""
+        self._armed = False
+        self._phase = "idle"
+        self._connect_attempts = 0
+        self._manual_connection_active = False
+        self._counter_flashed = 0
+        self._counter_ok = 0
+        self._counter_errors = 0
+
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(POLL_INTERVAL_MS)
+        self._poll_timer.timeout.connect(self._on_poll_tick)
+
+        self._build_ui()
+        i18n.signals.language_changed.connect(self._retranslate)
+        self._retranslate()
+
+    # ---- construction ------------------------------------------------
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+
+        top = QHBoxLayout()
+        self._load_config_btn = QPushButton()
+        self._load_config_btn.clicked.connect(self._on_load_config_clicked)
+        top.addWidget(self._load_config_btn)
+        self._config_label = QLabel()
+        top.addWidget(self._config_label, 1)
+        root.addLayout(top)
+
+        port_row = QHBoxLayout()
+        self._port_label = QLabel()
+        port_row.addWidget(self._port_label)
+        self._port_combo = QComboBox()
+        self._port_combo.setMinimumWidth(220)
+        self._port_combo.currentIndexChanged.connect(lambda *_: self._update_start_stop_button())
+        port_row.addWidget(self._port_combo)
+        self._refresh_btn = QPushButton("↻")
+        self._refresh_btn.setFixedSize(36, 30)
+        self._refresh_btn.setStyleSheet("font-size: 16px; padding: 0px;")
+        self._refresh_btn.clicked.connect(self._refresh_ports)
+        port_row.addWidget(self._refresh_btn)
+        port_row.addStretch(1)
+        self._start_stop_btn = QPushButton()
+        self._start_stop_btn.setObjectName("connectButton")
+        self._start_stop_btn.setMinimumWidth(120)
+        self._start_stop_btn.clicked.connect(self._on_start_stop_clicked)
+        port_row.addWidget(self._start_stop_btn)
+        root.addLayout(port_row)
+
+        self._banner = QLabel()
+        self._banner.setWordWrap(True)
+        self._banner.setMinimumHeight(90)
+        self._banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self._banner)
+
+        self._retry_btn = QPushButton()
+        self._retry_btn.clicked.connect(self._on_retry_clicked)
+        self._retry_btn.setVisible(False)
+        root.addWidget(self._retry_btn)
+
+        self._comparison_list = EscComparisonList()
+        root.addWidget(self._comparison_list, 1)
+
+        counters_row = QHBoxLayout()
+        self._counters_label = QLabel()
+        self._counters_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        counters_row.addWidget(self._counters_label, 1)
+        self._reset_counters_btn = QPushButton()
+        self._reset_counters_btn.clicked.connect(self._on_reset_counters_clicked)
+        counters_row.addWidget(self._reset_counters_btn)
+        root.addLayout(counters_row)
+
+        self._refresh_ports()
+
+    # ---- i18n ------------------------------------------------
+
+    def _retranslate(self, *_args) -> None:
+        self._load_config_btn.setText(i18n.tr("hotspot_load_config"))
+        if self._config_bytes is None:
+            self._config_label.setText(i18n.tr("hotspot_no_config"))
+        else:
+            self._config_label.setText(i18n.tr("hotspot_config_loaded", path=self._config_path))
+        self._port_label.setText(i18n.tr("hotspot_port_label"))
+        self._refresh_btn.setToolTip(i18n.tr("refresh_tooltip"))
+        self._retry_btn.setText(i18n.tr("hotspot_retry"))
+        self._reset_counters_btn.setText(i18n.tr("hotspot_reset_counters"))
+        self._update_counters_label()
+        self._render_banner()
+        self._update_start_stop_button()
+
+    # ---- config / port pickers ------------------------------------------------
+
+    def _on_load_config_clicked(self) -> None:
+        downloads = str(Path.home() / "Downloads")
+        path, _ = QFileDialog.getOpenFileName(
+            self, i18n.tr("hotspot_load_config"), downloads, i18n.tr("binary_config_filter")
+        )
+        if not path:
+            return
+        try:
+            self._config_bytes = load_config_file(path)
+        except ConfigFileError as e:
+            self._config_label.setText(str(e))
+            self._config_label.setStyleSheet(f"color: {ACCENT_ERROR};")
+            return
+        self._config_path = path
+        self._config_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        self._config_label.setText(i18n.tr("hotspot_config_loaded", path=path))
+        self._update_start_stop_button()
+
+    def _refresh_ports(self) -> None:
+        current = self._port_combo.currentData()
+        self._port_combo.clear()
+        for info in list_fc_ports():
+            label = f"{info.device} - {info.description}"
+            if info.likely_fc:
+                label += "  ★"
+            self._port_combo.addItem(label, info.device)
+        if current:
+            idx = self._port_combo.findData(current)
+            if idx >= 0:
+                self._port_combo.setCurrentIndex(idx)
+        self._update_start_stop_button()
+
+    def _selected_port_device(self) -> Optional[str]:
+        data = self._port_combo.currentData()
+        return str(data) if data else None
+
+    # ---- arm / disarm ------------------------------------------------
+
+    def _on_start_stop_clicked(self) -> None:
+        if self._armed:
+            self._disarm()
+        else:
+            self._arm()
+
+    def _arm(self) -> None:
+        self._armed = True
+        self.armed_changed.emit(True)
+        self._load_config_btn.setEnabled(False)
+        self._port_combo.setEnabled(False)
+        self._refresh_btn.setEnabled(False)
+        self._set_phase("waiting_device")
+        self._poll_timer.start()
+
+    def _disarm(self) -> None:
+        self._armed = False
+        self.armed_changed.emit(False)
+        self._poll_timer.stop()
+        if self._phase not in ("idle", "waiting_device"):
+            self.disconnect_requested.emit()
+        self._load_config_btn.setEnabled(True)
+        self._port_combo.setEnabled(True)
+        self._refresh_btn.setEnabled(True)
+        self._comparison_list.clear_all(0)
+        self._set_phase("idle")
+
+    # ---- polling / hot-plug detection ------------------------------------------------
+
+    def _on_poll_tick(self) -> None:
+        if not self._armed:
+            return
+        port = self._selected_port_device()
+        if not port:
+            return
+        present = port in {info.device for info in list_fc_ports()}
+
+        if self._phase == "waiting_device":
+            if present:
+                self._connect_attempts = 0
+                self._set_phase("connecting")
+                self._attempt_connect()
+        elif self._phase == "connecting":
+            if not present:
+                self._set_phase("waiting_device")
+            elif self._connect_attempts >= MAX_CONNECT_ATTEMPTS:
+                self._set_phase("error_connect")
+            else:
+                self._attempt_connect()
+        elif self._phase in _WATCH_DISAPPEAR_PHASES and not present:
+            self._set_phase("waiting_device")
+
+    def _attempt_connect(self) -> None:
+        port = self._selected_port_device()
+        if not port:
+            self._set_phase("error_connect")
+            return
+        self._connect_attempts += 1
+        self.connect_requested.emit(port, DEFAULT_BAUD)
+
+    # ---- retry / counters ------------------------------------------------
+
+    def _on_retry_clicked(self) -> None:
+        if self._phase == "error_connect":
+            self._connect_attempts = 0
+            self._set_phase("connecting")
+            self._attempt_connect()
+        elif self._phase in ("warning_not_found", "error_flash"):
+            self._set_phase("checking")
+            self.discover_requested.emit()
+
+    def _on_reset_counters_clicked(self) -> None:
+        self._counter_flashed = 0
+        self._counter_ok = 0
+        self._counter_errors = 0
+        self._update_counters_label()
+
+    def _update_counters_label(self) -> None:
+        self._counters_label.setText(
+            i18n.tr(
+                "hotspot_counters",
+                flashed=self._counter_flashed,
+                ok=self._counter_ok,
+                errors=self._counter_errors,
+            )
+        )
+
+    # ---- banner / button rendering ------------------------------------------------
+
+    def _set_phase(self, phase: str) -> None:
+        self._phase = phase
+        self._render_banner()
+        self._update_start_stop_button()
+
+    def _render_banner(self) -> None:
+        bg, fg = _PHASE_STYLE[self._phase]
+        self._banner.setStyleSheet(
+            f"background-color: {bg}; color: {fg}; font-size: 22px; font-weight: 700;"
+            "padding: 24px; border-radius: 8px;"
+        )
+        self._banner.setText(i18n.tr(_PHASE_BANNER_KEY[self._phase]))
+        self._retry_btn.setVisible(self._phase in _RETRY_PHASES)
+
+    def _update_start_stop_button(self) -> None:
+        if self._armed:
+            self._start_stop_btn.setText(i18n.tr("hotspot_stop"))
+            flashing = self._phase == "flashing"
+            self._start_stop_btn.setEnabled(not flashing)
+            self._start_stop_btn.setToolTip(i18n.tr("hotspot_stop_disabled_flashing") if flashing else "")
+            return
+
+        self._start_stop_btn.setText(i18n.tr("hotspot_start"))
+        if self._manual_connection_active:
+            self._start_stop_btn.setEnabled(False)
+            self._start_stop_btn.setToolTip(i18n.tr("hotspot_start_disabled_manual"))
+        elif self._config_bytes is None:
+            self._start_stop_btn.setEnabled(False)
+            self._start_stop_btn.setToolTip(i18n.tr("hotspot_start_disabled_no_config"))
+        elif not self._selected_port_device():
+            self._start_stop_btn.setEnabled(False)
+            self._start_stop_btn.setToolTip(i18n.tr("hotspot_start_disabled_no_port"))
+        else:
+            self._start_stop_btn.setEnabled(True)
+            self._start_stop_btn.setToolTip("")
+
+    # ---- forwarded EscManager signals (called by MainWindow) ------------------------------------------------
+
+    def on_connection_state_changed(self, connected: bool, expected_count: int) -> None:
+        if not self._armed:
+            self._manual_connection_active = connected
+            self._update_start_stop_button()
+            return
+
+        if self._phase != "connecting":
+            return
+        if connected:
+            self._comparison_list.clear_all(expected_count)
+            self._set_phase("checking")
+        # A failed attempt just leaves us in "connecting" - the poll timer retries or gives up.
+
+    def on_discovery_finished(self, found: int, expected: int) -> None:
+        if not self._armed or self._phase != "checking":
+            return
+        if found == 0:
+            self._set_phase("warning_not_found")
+            return
+        self._set_phase("flashing")
+        self.flash_requested.emit(self._config_bytes)
+
+    def on_flash_finished(self, success: int, attempted: int) -> None:
+        if not self._armed or self._phase != "flashing":
+            return
+        if success == attempted:
+            if attempted == 0:
+                self._counter_ok += 1
+            else:
+                self._counter_flashed += 1
+            self._update_counters_label()
+            QApplication.beep()
+            self.disconnect_requested.emit()
+            self._set_phase("waiting_removal")
+        else:
+            self._counter_errors += 1
+            self._update_counters_label()
+            self._set_phase("error_flash")
+
+    def on_esc_status_changed(self, index: int, state: str, detail: str, esc_info) -> None:
+        if not self._armed:
+            return
+        self._comparison_list.set_row(index, state, detail)

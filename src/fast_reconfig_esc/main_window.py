@@ -37,6 +37,7 @@ from .esc_manager import (
 from .esc_status_widget import EscStatusWidget
 from .file_logger import LOG_FILE
 from .flag_icons import FLAG_ICON_BUILDERS
+from .hotspot_widget import HotspotFlashPage
 from .serial_transport import list_fc_ports
 from .settings_store import load_last_config_path, save_last_config_path
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
@@ -75,6 +76,7 @@ class MainWindow(QMainWindow):
         self._esc_widgets: dict[int, EscStatusWidget] = {}
         self._esc_read_cache: dict[int, tuple[str, bytes]] = {}  # index -> (label, settings), for "Read from ESC"
         self._connected = False
+        self._hotspot_armed = False
 
         self._build_ui()
         self._wire_signals()
@@ -96,6 +98,7 @@ class MainWindow(QMainWindow):
         self._tabs = QTabWidget()
         self._tabs.addTab(self._build_main_tab(), "")
         self._tabs.addTab(self._build_config_tab(), "")
+        self._tabs.addTab(self._build_hotspot_tab(), "")
         root.addWidget(self._tabs, 1)
 
         root.addWidget(self._build_log_panel())
@@ -119,6 +122,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.config_editor, 1)
         layout.addWidget(self._comparison_list)
         return page
+
+    def _build_hotspot_tab(self) -> QWidget:
+        self.hotspot_page = HotspotFlashPage()
+        return self.hotspot_page
 
     def _build_top_bar(self) -> QFrame:
         bar = QFrame()
@@ -241,6 +248,12 @@ class MainWindow(QMainWindow):
         self.config_editor.apply_requested.connect(self._on_apply_from_editor)
         self.config_editor.file_loaded.connect(self._set_config_path)
 
+        self.hotspot_page.connect_requested.connect(self.request_connect.emit)
+        self.hotspot_page.disconnect_requested.connect(self.request_disconnect.emit)
+        self.hotspot_page.discover_requested.connect(self.request_discover.emit)
+        self.hotspot_page.flash_requested.connect(lambda data: self.request_flash_bytes.emit(data, None))
+        self.hotspot_page.armed_changed.connect(self._on_hotspot_armed_changed)
+
     # ---- i18n ------------------------------------------------
 
     def _on_language_selected(self, index: int) -> None:
@@ -271,6 +284,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(i18n.tr("window_title"))
         self._tabs.setTabText(0, i18n.tr("tab_main"))
         self._tabs.setTabText(1, i18n.tr("tab_config"))
+        self._tabs.setTabText(2, i18n.tr("tab_hotspot"))
         self._port_label.setText(i18n.tr("port_label"))
         self._refresh_btn.setToolTip(i18n.tr("refresh_tooltip"))
         self._baud_label.setText(i18n.tr("baud_label"))
@@ -365,16 +379,17 @@ class MainWindow(QMainWindow):
 
     def _on_connection_state_changed(self, connected: bool, expected_count: int) -> None:
         self._connected = connected
-        self._connect_toggle_btn.setEnabled(True)
+        self._connect_toggle_btn.setEnabled(not self._hotspot_armed)
         self._update_connect_toggle_button()
-        self._rescan_btn.setEnabled(connected)
-        self._flash_all_btn.setEnabled(connected and bool(self._config_path_edit.text()))
+        self._rescan_btn.setEnabled(connected and not self._hotspot_armed)
+        self._flash_all_btn.setEnabled(connected and bool(self._config_path_edit.text()) and not self._hotspot_armed)
 
         self._rebuild_grid(expected_count if connected else 0)
         self._comparison_list.clear_all(expected_count if connected else 0)
         self._esc_read_cache.clear()
         self.config_editor.set_available_escs(self._esc_read_cache)
         self.config_editor.set_apply_enabled(connected)
+        self.hotspot_page.on_connection_state_changed(connected, expected_count)
         if connected:
             self.request_discover.emit()
 
@@ -401,6 +416,8 @@ class MainWindow(QMainWindow):
             self._esc_read_cache[index] = (detail or esc_info.mcu_family, esc_info.settings)
             self.config_editor.set_available_escs(self._esc_read_cache)
 
+        self.hotspot_page.on_esc_status_changed(index, state, detail, esc_info)
+
     def _on_log_message(self, level: str, text: str) -> None:
         self._append_log(level, text)
 
@@ -409,16 +426,22 @@ class MainWindow(QMainWindow):
         self._log_view.appendHtml(f'<span style="color:{color};">{text}</span>')
 
     def _on_discovery_finished(self, found: int, expected: int) -> None:
-        self._rescan_btn.setEnabled(self._connected)
-        if self._auto_flash_check.isChecked() and self._config_path_edit.text():
+        self._rescan_btn.setEnabled(self._connected and not self._hotspot_armed)
+        if self._hotspot_armed:
+            pass  # the Hotspot tab drives its own flash decision below
+        elif self._auto_flash_check.isChecked() and self._config_path_edit.text():
             self._flash_all_btn.setEnabled(False)
             self.request_flash.emit(self._config_path_edit.text(), None)
         else:
             self._flash_all_btn.setEnabled(self._connected and bool(self._config_path_edit.text()))
+        self.hotspot_page.on_discovery_finished(found, expected)
 
     def _on_flash_finished(self, success: int, attempted: int) -> None:
-        self._flash_all_btn.setEnabled(self._connected and bool(self._config_path_edit.text()))
+        self._flash_all_btn.setEnabled(
+            self._connected and bool(self._config_path_edit.text()) and not self._hotspot_armed
+        )
         self.config_editor.set_apply_enabled(self._connected)
+        self.hotspot_page.on_flash_finished(success, attempted)
 
     def _on_apply_from_editor(self, config_bytes: bytes) -> None:
         if not self._connected:
@@ -426,6 +449,22 @@ class MainWindow(QMainWindow):
             return
         self.config_editor.set_apply_enabled(False)
         self.request_flash_bytes.emit(config_bytes, None)
+
+    def _on_hotspot_armed_changed(self, armed: bool) -> None:
+        # Hotspot mode drives the single shared EscManager connection on its
+        # own - manual controls elsewhere must stay out of its way while armed.
+        self._hotspot_armed = armed
+        tooltip = i18n.tr("hotspot_manual_disabled_hotspot_active") if armed else ""
+        for widget in (self._port_combo, self._refresh_btn, self._baud_combo):
+            widget.setEnabled(not armed)
+            widget.setToolTip(tooltip)
+
+        self._connect_toggle_btn.setEnabled(not armed)
+        self._connect_toggle_btn.setToolTip(tooltip)
+        self._rescan_btn.setEnabled(self._connected and not armed)
+        self._rescan_btn.setToolTip(tooltip)
+        self._flash_all_btn.setEnabled(self._connected and bool(self._config_path_edit.text()) and not armed)
+        self._flash_all_btn.setToolTip(tooltip)
 
     # ---- window lifecycle ------------------------------------------------
 

@@ -122,6 +122,7 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
     # ---- tabs ----
     "tab_main": {"en": "Main", "uk": "Головна"},
     "tab_config": {"en": "Config", "uk": "Конфіг"},
+    "tab_hotspot": {"en": "Hotspot", "uk": "Хотспот"},
     # ---- config editor: field groups ----
     "group_essentials": {"en": "Essentials", "uk": "Основне"},
     "group_motor": {"en": "Motor", "uk": "Мотор"},
@@ -215,6 +216,57 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
     "comparison_column_esc": {"en": "ESC", "uk": "ESC"},
     "comparison_column_status": {"en": "Status", "uk": "Статус"},
     "comparison_status_not_scanned": {"en": "Not scanned", "uk": "Не скановано"},
+    # ---- hotspot tab ----
+    "hotspot_load_config": {"en": "Load config...", "uk": "Завантажити конфіг..."},
+    "hotspot_no_config": {"en": "No config loaded", "uk": "Конфіг не завантажено"},
+    "hotspot_config_loaded": {"en": "Config: {path}", "uk": "Конфіг: {path}"},
+    "hotspot_port_label": {"en": "Watch port:", "uk": "Слідкувати за портом:"},
+    "hotspot_start": {"en": "Start", "uk": "Старт"},
+    "hotspot_stop": {"en": "Stop", "uk": "Стоп"},
+    "hotspot_retry": {"en": "Try again", "uk": "Спробувати ще раз"},
+    "hotspot_reset_counters": {"en": "Reset", "uk": "Скинути"},
+    "hotspot_counters": {
+        "en": "Flashed: {flashed} - Already OK: {ok} - Errors: {errors}",
+        "uk": "Прошито: {flashed} - Вже коректно: {ok} - Помилок: {errors}",
+    },
+    "hotspot_start_disabled_no_config": {
+        "en": "Load a config file first",
+        "uk": "Спочатку завантажте файл конфігу",
+    },
+    "hotspot_start_disabled_no_port": {"en": "Select a port first", "uk": "Спочатку оберіть порт"},
+    "hotspot_start_disabled_manual": {
+        "en": "Disconnect on the Main tab first",
+        "uk": "Спочатку відключіться на Головній вкладці",
+    },
+    "hotspot_stop_disabled_flashing": {
+        "en": "Wait for the write to finish",
+        "uk": "Зачекайте, завершується прошивка",
+    },
+    "hotspot_manual_disabled_hotspot_active": {
+        "en": "Hotspot mode is active on the Hotspot tab",
+        "uk": "Активний режим Хотспот на вкладці Хотспот",
+    },
+    "hotspot_banner_idle": {"en": "Not started", "uk": "Не запущено"},
+    "hotspot_banner_waiting_device": {"en": "Waiting for an ESC...", "uk": "Очікуємо ESC..."},
+    "hotspot_banner_connecting": {"en": "Connecting...", "uk": "Підключення..."},
+    "hotspot_banner_checking": {"en": "Checking configuration...", "uk": "Перевірка конфігурації..."},
+    "hotspot_banner_flashing": {
+        "en": "Flashing - DO NOT UNPLUG",
+        "uk": "Прошивається - НЕ ВІДКЛЮЧАЙТЕ",
+    },
+    "hotspot_banner_done": {"en": "Done! Safe to unplug", "uk": "Готово! Можна відключати"},
+    "hotspot_banner_warning_not_found": {
+        "en": "No ESCs found - check the wiring",
+        "uk": "ESC не знайдено - перевірте підключення",
+    },
+    "hotspot_banner_error_connect": {
+        "en": "Could not connect - check the cable",
+        "uk": "Не вдалося підключитися - перевірте кабель",
+    },
+    "hotspot_banner_error_flash": {
+        "en": "Write error - DO NOT UNPLUG, call a technician",
+        "uk": "Помилка запису - НЕ ВІДКЛЮЧАЙТЕ, покличте техніка",
+    },
 }
 
 _current_language = "uk"
