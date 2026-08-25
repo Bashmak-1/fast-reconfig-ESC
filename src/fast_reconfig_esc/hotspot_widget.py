@@ -2,12 +2,27 @@
 
 Meant for an operator who doesn't need to understand the tool at all: pick
 the correct config file and the port once, click Start, then just plug ESCs
-in one after another. Each one is connected, checked against the loaded
-config, flashed only if it actually differs (the existing skip-if-matches
-guarantee in EscManager.flash_bytes makes an already-correct ESC a no-op),
-and a big banner says clearly when it's safe to unplug. After a finished
-cycle this disconnects and waits for the port to actually disappear before
-re-arming, so leaving the same unit plugged in doesn't spam reconnects.
+in one after another. Each one is checked against the loaded config, flashed
+only if it actually differs (the existing skip-if-matches guarantee in
+EscManager.flash_bytes makes an already-correct ESC a no-op), and a big
+banner says clearly when it's safe to unplug that ESC's wires.
+
+The FC itself stays connected over USB the whole time an operator is
+swapping through ESCs - individual ESC signal wires are what get plugged in
+and out, and neither MSP nor FourWay has any way to notify us when that
+happens (the FC doesn't know or report it). So there is no "wait for the
+port to disappear" signal to key off between rounds: instead, once
+connected, this keeps the SAME connection open and loops
+discover -> flash -> discover -> flash indefinitely on its own, pausing only
+briefly after each round so the banner is readable. Re-scanning an ESC that
+hasn't changed is harmless and cheap (no wear - flash_bytes never rewrites
+an already-correct ESC), so looping continuously while a swap is in
+progress is the correct default, not a bug to guard against.
+
+The port-presence poll is now only used for the very first connect (wait
+for the FC's own USB link to appear) and to notice if that FC gets unplugged
+entirely mid-session (a real, if rare, event - as opposed to an ESC wire
+change, which is invisible to us).
 
 Drives EscManager only indirectly, through signals MainWindow wires to the
 existing request_connect/request_disconnect/request_discover/
@@ -34,6 +49,7 @@ from . import i18n
 from .eeprom_config import ConfigFileError, load_config_file
 from .esc_comparison_widget import EscComparisonList
 from .serial_transport import list_fc_ports
+from .settings_store import load_last_config_path
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, BG_PANEL, TEXT_MAIN, TEXT_MUTED
 
 DEFAULT_BAUD = 115200
@@ -46,10 +62,10 @@ _PHASE_STYLE = {
     "connecting": (ACCENT_AMBER, "white"),
     "checking": (ACCENT_AMBER, "white"),
     "flashing": (ACCENT_ERROR, "white"),
-    "waiting_removal": (ACCENT_GREEN, "white"),
-    "warning_not_found": (ACCENT_AMBER, "white"),
+    "round_done": (ACCENT_GREEN, "white"),
+    "round_warning": (ACCENT_AMBER, "white"),
+    "round_error": (ACCENT_ERROR, "white"),
     "error_connect": (ACCENT_ERROR, "white"),
-    "error_flash": (ACCENT_ERROR, "white"),
 }
 _PHASE_BANNER_KEY = {
     "idle": "hotspot_banner_idle",
@@ -57,13 +73,17 @@ _PHASE_BANNER_KEY = {
     "connecting": "hotspot_banner_connecting",
     "checking": "hotspot_banner_checking",
     "flashing": "hotspot_banner_flashing",
-    "waiting_removal": "hotspot_banner_done",
-    "warning_not_found": "hotspot_banner_warning_not_found",
+    "round_done": "hotspot_banner_done",
+    "round_warning": "hotspot_banner_warning_not_found",
+    "round_error": "hotspot_banner_error_flash",
     "error_connect": "hotspot_banner_error_connect",
-    "error_flash": "hotspot_banner_error_flash",
 }
-_RETRY_PHASES = {"warning_not_found", "error_connect", "error_flash"}
-_WATCH_DISAPPEAR_PHASES = {"waiting_removal", "warning_not_found", "error_connect", "error_flash"}
+# Phases that finish one round and, once the FC is confirmed still present,
+# automatically loop back into another discover/flash round on the next
+# poll tick - no click needed. Only a true connection-level failure
+# (error_connect) waits for a manual retry or the FC itself disappearing.
+_AUTO_CONTINUE_PHASES = {"round_done", "round_warning", "round_error"}
+_RETRY_PHASES = {"error_connect"}
 
 
 class HotspotFlashPage(QWidget):
@@ -91,6 +111,7 @@ class HotspotFlashPage(QWidget):
 
         self._build_ui()
         i18n.signals.language_changed.connect(self._retranslate)
+        self._restore_last_config()
         self._retranslate()
 
     # ---- construction ------------------------------------------------
@@ -125,6 +146,11 @@ class HotspotFlashPage(QWidget):
         self._start_stop_btn.clicked.connect(self._on_start_stop_clicked)
         port_row.addWidget(self._start_stop_btn)
         root.addLayout(port_row)
+
+        self._start_hint_label = QLabel()
+        self._start_hint_label.setStyleSheet(f"color: {ACCENT_AMBER};")
+        self._start_hint_label.setVisible(False)
+        root.addWidget(self._start_hint_label)
 
         self._banner = QLabel()
         self._banner.setWordWrap(True)
@@ -186,6 +212,20 @@ class HotspotFlashPage(QWidget):
         self._config_label.setStyleSheet(f"color: {TEXT_MUTED};")
         self._config_label.setText(i18n.tr("hotspot_config_loaded", path=path))
         self._update_start_stop_button()
+
+    def _restore_last_config(self) -> None:
+        """Pick up the same last-used config file the Main tab remembers, so
+        the operator doesn't have to separately re-browse for it here just
+        because this tab keeps its own working copy of the bytes (an easy
+        thing to mistake for "Start doesn't work" if missed)."""
+        path = load_last_config_path()
+        if not path or not Path(path).is_file():
+            return
+        try:
+            self._config_bytes = load_config_file(path)
+        except ConfigFileError:
+            return
+        self._config_path = path
 
     def _refresh_ports(self) -> None:
         current = self._port_combo.currentData()
@@ -256,8 +296,18 @@ class HotspotFlashPage(QWidget):
                 self._set_phase("error_connect")
             else:
                 self._attempt_connect()
-        elif self._phase in _WATCH_DISAPPEAR_PHASES and not present:
-            self._set_phase("waiting_device")
+        elif self._phase == "error_connect":
+            if not present:
+                self._set_phase("waiting_device")
+        elif self._phase in _AUTO_CONTINUE_PHASES:
+            if present:
+                self._start_next_round()
+            else:
+                # The FC's own USB link is actually gone (not just an ESC
+                # wire, which we'd never see) - release the connection and
+                # wait for it to come back.
+                self.disconnect_requested.emit()
+                self._set_phase("waiting_device")
 
     def _attempt_connect(self) -> None:
         port = self._selected_port_device()
@@ -267,6 +317,10 @@ class HotspotFlashPage(QWidget):
         self._connect_attempts += 1
         self.connect_requested.emit(port, DEFAULT_BAUD)
 
+    def _start_next_round(self) -> None:
+        self._set_phase("checking")
+        self.discover_requested.emit()
+
     # ---- retry / counters ------------------------------------------------
 
     def _on_retry_clicked(self) -> None:
@@ -274,9 +328,6 @@ class HotspotFlashPage(QWidget):
             self._connect_attempts = 0
             self._set_phase("connecting")
             self._attempt_connect()
-        elif self._phase in ("warning_not_found", "error_flash"):
-            self._set_phase("checking")
-            self.discover_requested.emit()
 
     def _on_reset_counters_clicked(self) -> None:
         self._counter_flashed = 0
@@ -315,22 +366,32 @@ class HotspotFlashPage(QWidget):
             self._start_stop_btn.setText(i18n.tr("hotspot_stop"))
             flashing = self._phase == "flashing"
             self._start_stop_btn.setEnabled(not flashing)
-            self._start_stop_btn.setToolTip(i18n.tr("hotspot_stop_disabled_flashing") if flashing else "")
+            self._set_start_hint(i18n.tr("hotspot_stop_disabled_flashing") if flashing else "")
             return
 
         self._start_stop_btn.setText(i18n.tr("hotspot_start"))
         if self._manual_connection_active:
             self._start_stop_btn.setEnabled(False)
-            self._start_stop_btn.setToolTip(i18n.tr("hotspot_start_disabled_manual"))
+            self._set_start_hint(i18n.tr("hotspot_start_disabled_manual"))
         elif self._config_bytes is None:
             self._start_stop_btn.setEnabled(False)
-            self._start_stop_btn.setToolTip(i18n.tr("hotspot_start_disabled_no_config"))
+            self._set_start_hint(i18n.tr("hotspot_start_disabled_no_config"))
         elif not self._selected_port_device():
             self._start_stop_btn.setEnabled(False)
-            self._start_stop_btn.setToolTip(i18n.tr("hotspot_start_disabled_no_port"))
+            self._set_start_hint(i18n.tr("hotspot_start_disabled_no_port"))
         else:
             self._start_stop_btn.setEnabled(True)
-            self._start_stop_btn.setToolTip("")
+            self._set_start_hint("")
+
+    def _set_start_hint(self, text: str) -> None:
+        # A tooltip alone is too easy to miss (needs hovering exactly over
+        # the button) - show the same reason as always-visible text too,
+        # since "Старт does nothing" was reported as a bug when this was
+        # tooltip-only and the actual cause (still manually connected on
+        # the Main tab) was invisible without hovering.
+        self._start_stop_btn.setToolTip(text)
+        self._start_hint_label.setText(text)
+        self._start_hint_label.setVisible(bool(text))
 
     # ---- forwarded EscManager signals (called by MainWindow) ------------------------------------------------
 
@@ -351,7 +412,10 @@ class HotspotFlashPage(QWidget):
         if not self._armed or self._phase != "checking":
             return
         if found == 0:
-            self._set_phase("warning_not_found")
+            # Nothing wired right now is a normal transient state while the
+            # operator's hand is mid-swap, not an error - _on_poll_tick will
+            # automatically start another round shortly, no click needed.
+            self._set_phase("round_warning")
             return
         self._set_phase("flashing")
         self.flash_requested.emit(self._config_bytes)
@@ -366,12 +430,15 @@ class HotspotFlashPage(QWidget):
                 self._counter_flashed += 1
             self._update_counters_label()
             QApplication.beep()
-            self.disconnect_requested.emit()
-            self._set_phase("waiting_removal")
+            self._set_phase("round_done")
         else:
             self._counter_errors += 1
             self._update_counters_label()
-            self._set_phase("error_flash")
+            self._set_phase("round_error")
+        # Deliberately stays connected here - the FC's own USB link doesn't
+        # change between ESCs, only individual ESC wires do, and we have no
+        # way to see that. The next poll tick starts the next round on its
+        # own (see _on_poll_tick / _AUTO_CONTINUE_PHASES).
 
     def on_esc_status_changed(self, index: int, state: str, detail: str, esc_info) -> None:
         if not self._armed:

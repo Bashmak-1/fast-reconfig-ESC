@@ -240,6 +240,34 @@ be re-derived from scratch later.
   buttons are disabled (only one workflow may hold the single `EscManager`
   connection at a time), and symmetrically Старт is disabled while a manual
   connection is already active elsewhere.
+- **Хотспот fixes after real-hardware use (2026-08-25):**
+  - **"Старт does nothing" turned out not to be a bug** - the button was
+    correctly disabled because the app was still manually connected from
+    an earlier Main-tab test (confirmed from the log file: a successful
+    manual connect + discovery, no subsequent disconnect, then the report
+    came in). The real gap was that the reason was only ever shown as a
+    tooltip - easy to miss entirely. Fixed: the same reason now also shows
+    as always-visible text next to the button
+    (`HotspotFlashPage._set_start_hint`), not just on hover. Also: the tab
+    now auto-loads the same last-used config path the Main tab remembers
+    (`settings_store.load_last_config_path`) instead of always starting
+    with no config and silently blocking Старт for that reason too.
+  - **The original "wait for the port to disappear before starting the
+    next round" design (2026-08-24) was wrong for the actual physical
+    setup**: the user clarified the FC stays connected over USB the whole
+    time - only individual ESC signal wires get swapped, and neither MSP
+    nor FourWay has any way to notice that ("FC не скаже коли пропадає
+    підключення"). So the port never disappears between ESCs, and the
+    tool would just sit at the "done" banner forever after the first one.
+    Fixed: after a round finishes (done/nothing-found/write-error), the
+    connection now stays open and the next `discover_all` fires
+    automatically on the following poll tick (~1s later) - continuous
+    scan → flash → scan → flash, no clicks, no reconnects between rounds.
+    Re-scanning an ESC that hasn't changed is harmless (still no
+    unnecessary write, same `_flash_one` guarantee as always). The only
+    thing that still triggers an actual disconnect is the FC's own USB
+    link genuinely disappearing from `list_fc_ports()` - a real, if rare,
+    event distinct from an ESC wire changing.
 
 **Explicitly out of scope for now:** full `.hex` firmware flashing (only the
 184-byte EEPROM/settings block is read/written); editing `STARTUP_MELODY`/
