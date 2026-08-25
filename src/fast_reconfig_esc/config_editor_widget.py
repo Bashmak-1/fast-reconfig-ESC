@@ -72,6 +72,7 @@ class _ClickToWheelSlider(_ClickToWheelMixin, QSlider):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
 
 class _ClickToWheelComboBox(_ClickToWheelMixin, QComboBox):
@@ -379,6 +380,7 @@ class ConfigEditorPage(QWidget):
         layout.addWidget(self._make_label_row(spec))
 
         slider = _ClickToWheelSlider(Qt.Orientation.Horizontal)
+        slider.setFixedHeight(20)
         slider.setRange(raw_min, raw_max)
         slider.setValue(raw_max if is_disabled else raw)
         slider.setEnabled(not is_disabled)

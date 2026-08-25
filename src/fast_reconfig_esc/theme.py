@@ -74,24 +74,33 @@ QGroupBox {{
     padding-top: 14px;
 }}
 QGroupBox::title {{
-    subcontrol-origin: margin;
-    subcontrol-position: top left;
-    left: 12px;
     padding: 0 6px;
     color: {TEXT_MAIN};
 }}
+QSlider {{
+    background: {BORDER};
+    outline: none;
+    min-height: 20px;
+    max-height: 20px;
+}}
+QSlider:focus {{
+    outline: none;
+    border: none;
+}}
 QSlider::groove:horizontal {{
     height: 4px;
-    background: {BORDER};
+    background: transparent;
     border-radius: 2px;
 }}
 QSlider::sub-page:horizontal {{
     background: {ACCENT_RED};
     border-radius: 2px;
+    margin: 0px;
 }}
 QSlider::add-page:horizontal {{
     background: {BORDER};
     border-radius: 2px;
+    margin: 0px;
 }}
 QSlider::handle:horizontal {{
     background: {ACCENT_RED};
