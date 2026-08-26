@@ -129,6 +129,7 @@ class HotspotStationController(QObject):
         self._armed = False
         self._phase = "idle"
         self._connect_attempts = 0
+        self._connect_in_flight = False
         self._counter_flashed = 0
         self._counter_ok = 0
         self._counter_errors = 0
@@ -166,6 +167,7 @@ class HotspotStationController(QObject):
         self._armed = True
         self.armed_changed.emit(True)
         self._connect_attempts = 0
+        self._connect_in_flight = False
         self._last_esc_state = None
         self._set_phase("waiting_device")
         self._poll_timer.start()
@@ -212,6 +214,19 @@ class HotspotStationController(QObject):
                 self._set_phase("connecting")
                 self._attempt_connect()
         elif self._phase == "connecting":
+            if self._connect_in_flight:
+                # EscManager.connect() includes a required ~2s protocol
+                # delay (POST_PASSTHROUGH_DELAY_S) after entering
+                # passthrough - longer than this 1s poll interval. Firing
+                # another connect_requested before the first one has even
+                # resolved queues a second EscManager.connect() call that
+                # runs right after the first succeeds, tries to open the
+                # already-open port, and fails - and that failed open
+                # attempt was confirmed on real hardware to disrupt the
+                # FIRST connection's own FourWay traffic, not just fail
+                # cleanly. Wait for the in-flight attempt to resolve
+                # (success or failure) before ever attempting another.
+                return
             if not present:
                 self._set_phase("waiting_device")
             elif self._connect_attempts >= MAX_CONNECT_ATTEMPTS:
@@ -237,6 +252,7 @@ class HotspotStationController(QObject):
             self._set_phase("error_connect")
             return
         self._connect_attempts += 1
+        self._connect_in_flight = True
         self._connect_requested.emit(self._port_device, DEFAULT_BAUD)
 
     def _set_phase(self, phase: str) -> None:
@@ -246,6 +262,11 @@ class HotspotStationController(QObject):
     # ---- forwarded EscManager signals ------------------------------------------------
 
     def _on_connection_state_changed(self, connected: bool, expected_count: int) -> None:
+        # Cleared unconditionally, before the phase guard below - a stale
+        # in-flight flag left True would otherwise silently block every
+        # future reconnect attempt if this particular signal happens to
+        # arrive after the phase already moved on (see _on_poll_tick).
+        self._connect_in_flight = False
         if not self._armed or self._phase != "connecting":
             return
         if connected:

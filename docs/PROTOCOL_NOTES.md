@@ -549,6 +549,42 @@ exposed it as an adjustable "ESC retries" spinner (1–20) in the UI.
   when the operator happens to click it. Does NOT prevent using the two
   Хотспот tabs simultaneously on genuinely DIFFERENT ports - only refuses
   the exact-same-port collision that caused this.
+- **2026-08-26 (later the same day) — a second, pre-existing root cause for
+  the same class of symptom, present in BOTH Хотспот tabs since the very
+  first 2026-08-24 design, not something introduced this session.**
+  Diagnosed from another real hardware log (session at 12:54:43, this time
+  with `hotspot_line_page` alone - no second tab armed, confirmed by
+  `grep -c "Discovery started: probing 12"` returning 0 for that window,
+  ruling out the port-busy fix above as the explanation here): every single
+  reconnect showed the identical duplicate `Connect requested` -> `Access
+  is denied` pair a couple of seconds after the first connect succeeded.
+  Root cause: `EscManager.connect()` includes a required
+  `time.sleep(POST_PASSTHROUGH_DELAY_S)` = 2.0s after entering passthrough
+  (`esc_manager.py`) - longer than the Хотспот loop's own 1000ms
+  (`POLL_INTERVAL_MS`) poll interval. `_on_poll_tick`'s "connecting" phase
+  fired `_attempt_connect()` unconditionally on every tick without
+  tracking whether the PREVIOUS attempt had actually resolved yet - so a
+  second, redundant `EscManager.connect()` call always ended up queued on
+  the worker thread, running immediately after the first one succeeded,
+  and failing to open the now-already-open port. Precise 1-second gap
+  analysis of `ESC #1: ...` log timestamps across the whole session (670/
+  677 gaps exactly 1.0s) confirmed the *polling* itself never skipped a
+  beat - the user's "через раз перевірялись ESC" report was this spurious
+  reconnect noise coinciding with real "not found" results, not a missed
+  poll tick.
+  Fix: both `hotspot_station.py` and `hotspot_widget.py` now track
+  `self._connect_in_flight`, set `True` in `_attempt_connect()` and
+  cleared unconditionally at the top of the connection-state-changed
+  handler (before any early-return branch, so a stale flag can never get
+  permanently stuck if that signal happens to arrive after the phase has
+  already moved on). `_on_poll_tick`'s "connecting" branch returns
+  immediately if an attempt is still in-flight, instead of burning another
+  retry and queuing a redundant `connect()` call. Since this bug predates
+  every "Хотспот" hardware verification session back to 2026-08-24, it was
+  presumably always contributing some background noise/rare disruption -
+  just never isolated until reconnects got frequent enough (continuous
+  hot-plug looping) and the log got read carefully enough to notice the
+  precise ~2s timing match to `POST_PASSTHROUGH_DELAY_S`.
 
 ## Module map
 

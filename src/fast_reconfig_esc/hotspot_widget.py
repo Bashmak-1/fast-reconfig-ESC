@@ -109,6 +109,7 @@ class HotspotFlashPage(QWidget):
         self._armed = False
         self._phase = "idle"
         self._connect_attempts = 0
+        self._connect_in_flight = False
         self._manual_connection_active = False
         self._port_busy_checker: Optional[Callable[[str], bool]] = None
         self._counter_flashed = 0
@@ -300,6 +301,8 @@ class HotspotFlashPage(QWidget):
             return
         self._armed = True
         self.armed_changed.emit(True)
+        self._connect_attempts = 0
+        self._connect_in_flight = False
         self._load_config_btn.setEnabled(False)
         self._port_combo.setEnabled(False)
         self._refresh_btn.setEnabled(False)
@@ -334,6 +337,19 @@ class HotspotFlashPage(QWidget):
                 self._set_phase("connecting")
                 self._attempt_connect()
         elif self._phase == "connecting":
+            if self._connect_in_flight:
+                # EscManager.connect() includes a required ~2s protocol
+                # delay (POST_PASSTHROUGH_DELAY_S) after entering
+                # passthrough - longer than this 1s poll interval. Firing
+                # another connect_requested before the first one has even
+                # resolved queues a second EscManager.connect() call that
+                # runs right after the first succeeds, tries to open the
+                # already-open port, and fails - and that failed open
+                # attempt was confirmed on real hardware to disrupt the
+                # FIRST connection's own FourWay traffic, not just fail
+                # cleanly. Wait for the in-flight attempt to resolve
+                # (success or failure) before ever attempting another.
+                return
             if not present:
                 self._set_phase("waiting_device")
             elif self._connect_attempts >= MAX_CONNECT_ATTEMPTS:
@@ -359,6 +375,7 @@ class HotspotFlashPage(QWidget):
             self._set_phase("error_connect")
             return
         self._connect_attempts += 1
+        self._connect_in_flight = True
         self.connect_requested.emit(port, DEFAULT_BAUD)
 
     def _start_next_round(self) -> None:
@@ -443,6 +460,11 @@ class HotspotFlashPage(QWidget):
     # ---- forwarded EscManager signals (called by MainWindow) ------------------------------------------------
 
     def on_connection_state_changed(self, connected: bool, expected_count: int) -> None:
+        # Cleared unconditionally, before any branch below - a stale
+        # in-flight flag left True would otherwise silently block every
+        # future reconnect attempt if this particular signal happens to
+        # arrive after the phase already moved on (see _on_poll_tick).
+        self._connect_in_flight = False
         if not self._armed:
             self._manual_connection_active = connected
             self._update_start_stop_button()
