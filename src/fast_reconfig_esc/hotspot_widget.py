@@ -92,6 +92,7 @@ class HotspotFlashPage(QWidget):
     discover_requested = pyqtSignal()
     flash_requested = pyqtSignal(bytes)
     armed_changed = pyqtSignal(bool)
+    config_path_changed = pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -212,6 +213,13 @@ class HotspotFlashPage(QWidget):
         self._config_label.setStyleSheet(f"color: {TEXT_MUTED};")
         self._config_label.setText(i18n.tr("hotspot_config_loaded", path=path))
         self._update_start_stop_button()
+        # EscManager.discover_all() classifies each ESC's readback against its
+        # OWN _loaded_config_bytes, set only via request_set_config_path — not
+        # the bytes flash_requested carries. Without this, a freshly-flashed
+        # (now-matching) ESC gets re-classified as DIFF on the very next
+        # auto-continuing round because EscManager is still comparing against
+        # whatever config path the Main/Config tab last set (or none at all).
+        self.config_path_changed.emit(path)
 
     def _restore_last_config(self) -> None:
         """Pick up the same last-used config file the Main tab remembers, so

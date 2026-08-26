@@ -396,6 +396,24 @@ exposed it as an adjustable "ESC retries" spinner (1–20) in the UI.
 - `objectName`-based QSS styling does not auto-refresh when `objectName` is
   changed at runtime — must call `style().unpolish()`/`style().polish()`
   after (used for the Connect/Disconnect toggle button's color swap).
+- **2026-08-25 — freshly-flashed ESCs showed up as "different config" on
+  the very next Хотспот round.** Root cause: `EscManager.discover_all()`
+  classifies each probed ESC against `EscManager._loaded_config_bytes`
+  (set only via `set_config_path` / the `request_set_config_path` signal),
+  which is a *separate* field from the bytes actually passed to
+  `flash_bytes()`. The Хотспот tab keeps its own local `_config_bytes`
+  buffer and flashed with it directly, but never told `EscManager` about
+  the path — so `_loaded_config_bytes` stayed whatever the Main/Config tab
+  last set (or `None`). A flash would correctly report OK once (via
+  `flash_bytes`'s own explicit `esc_status_changed(..., EscState.OK.value,
+  ...)` emission), but the continuous auto-loop's *next* `discover_all()`
+  round re-classified the same ESC by comparing against the stale bytes and
+  showed DIFF. Fix: `HotspotFlashPage` now emits a `config_path_changed`
+  signal whenever it loads a config file, wired in `main_window.py` to the
+  same `_set_config_path` handler the Config tab's `file_loaded` already
+  uses — so all three tabs' notion of "the loaded config" for
+  classification purposes stays one coherent thing, same pattern as
+  before, just extended to the tab that had been left out of it.
 
 ## Module map
 

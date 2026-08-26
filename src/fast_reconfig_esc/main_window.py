@@ -253,6 +253,7 @@ class MainWindow(QMainWindow):
         self.hotspot_page.discover_requested.connect(self.request_discover.emit)
         self.hotspot_page.flash_requested.connect(lambda data: self.request_flash_bytes.emit(data, None))
         self.hotspot_page.armed_changed.connect(self._on_hotspot_armed_changed)
+        self.hotspot_page.config_path_changed.connect(self._set_config_path)
 
     # ---- i18n ------------------------------------------------
 
