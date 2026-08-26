@@ -598,6 +598,25 @@ exposed it as an adjustable "ESC retries" spinner (1–20) in the UI.
   timer at all then). `HotspotStationController.poll_timer_remaining_ms()`
   is a thin wrapper around Qt's own `QTimer.remainingTime()` - no manual
   elapsed-time tracking needed, Qt already provides this.
+- **2026-08-26 — added an operator-editable "total reworked" counter to
+  both Хотспот tabs.** Requested directly: the automatic flashed/already-OK/
+  errors breakdown reflects only what the state machine itself observed
+  each round, and real production-line situations (a re-seated ESC
+  re-flashed by hand, a miscount, a bench restart mid-batch) are too varied
+  to always guess right in code. New reusable `ManualCounterWidget`
+  (`manual_counter_widget.py`): a `QLineEdit` + "-"/"+" `QPushButton`s,
+  clamped to `[0, 100_000]` (`clamp_counter`, unit-tested), digits-only via
+  `QIntValidator(0, 100000)` so no stray character can even be typed. Still
+  auto-increments by exactly +1 at the same moment the existing
+  `_counter_flashed` diagnostic counter does (a real flash success, not a
+  skip-because-already-matching) - `hotspot_widget.py` calls `increment()`
+  directly in `on_flash_finished`; `hotspot_line_widget.py` has no direct
+  access to that moment (it only sees `HotspotStationController`'s
+  `counters_changed(flashed, ok, errors)` signal), so it tracks the
+  previous `flashed` value itself and calls `increment(delta)` only when
+  `flashed` actually went up - an `ok`/`errors`-only update never touches
+  it. The existing "Скинути" button resets this counter to 0 alongside the
+  diagnostic ones.
 
 ## Module map
 
@@ -623,6 +642,7 @@ src/fast_reconfig_esc/
     esc_status_widget.py      Main tab's per-ESC status card
     config_editor_widget.py   Config tab: generic form built from eeprom_fields.FIELD_SPECS, in-memory working buffer, load/read/save/apply
     esc_comparison_widget.py  Config tab: compact per-ESC comparison table, fed by the same esc_status_changed stream as the Main tab
+    manual_counter_widget.py  ManualCounterWidget: reusable [-]/edit/[+] operator-editable counter (0-100_000, digits only), used by both Хотспот tabs' "total reworked" tally
     hotspot_widget.py         Хотспот tab: hands-off hot-plug flashing station that sweeps EVERY ESC output the FC reports (discover_all), port-presence poll + state machine on top of the shared EscManager (this connection is exclusive with Main/Config)
     hotspot_station.py        HotspotStationController: a DIFFERENT state machine that watches exactly ONE operator-chosen ESC output (discover_one), widget-free, owning its OWN private ConnectionWorker/EscManager/thread - used only by hotspot_line_widget.py, not hotspot_widget.py
     hotspot_line_widget.py    Хотспот (лінія) tab: a second, independent tab with its own watch-one-ESC-slot workflow, driven by its own private HotspotStationController (own port, own ESC slot, own connection, own config - no mutual exclusion needed with any other tab)
@@ -633,6 +653,7 @@ tests/
     test_esc_manager.py      mocked-hardware orchestration/fallback/decoding tests
     test_file_logger.py       confirms detailed traces actually land in the log file
     test_hotspot_station.py   phase_after_discovery/phase_after_flash - the decision logic hotspot_station.py's watch-one-ESC-slot loop is built on (Хотспот (лінія) only, not hotspot_widget.py)
+    test_manual_counter_widget.py  clamp_counter bound checks (0..100_000) for the operator-editable counter
 ```
 
 ## Next steps
