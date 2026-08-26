@@ -120,6 +120,15 @@ class HotspotFlashPage(QWidget):
         self._poll_timer.setInterval(POLL_INTERVAL_MS)
         self._poll_timer.timeout.connect(self._on_poll_tick)
 
+        # Purely a UI refresh - ticks faster than _poll_timer so the "next
+        # check in..." countdown reads smoothly instead of jumping straight
+        # from 1s to 0s. An impatient operator staring at an unchanging
+        # banner for a few seconds easily mistakes "still polling" for
+        # "stuck" - this is a live reassurance that it isn't.
+        self._countdown_timer = QTimer(self)
+        self._countdown_timer.setInterval(150)
+        self._countdown_timer.timeout.connect(self._update_countdown)
+
         self._build_ui()
         i18n.signals.language_changed.connect(self._retranslate)
         self._restore_last_config()
@@ -175,6 +184,11 @@ class HotspotFlashPage(QWidget):
         self._banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self._banner)
 
+        self._countdown_label = QLabel()
+        self._countdown_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        self._countdown_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self._countdown_label)
+
         self._retry_btn = QPushButton()
         self._retry_btn.clicked.connect(self._on_retry_clicked)
         self._retry_btn.setVisible(False)
@@ -209,6 +223,7 @@ class HotspotFlashPage(QWidget):
         self._update_counters_label()
         self._render_banner()
         self._update_start_stop_button()
+        self._update_countdown()
 
     # ---- config / port pickers ------------------------------------------------
 
@@ -308,11 +323,14 @@ class HotspotFlashPage(QWidget):
         self._refresh_btn.setEnabled(False)
         self._set_phase("waiting_device")
         self._poll_timer.start()
+        self._countdown_timer.start()
 
     def _disarm(self) -> None:
         self._armed = False
         self.armed_changed.emit(False)
         self._poll_timer.stop()
+        self._countdown_timer.stop()
+        self._countdown_label.setText("")
         if self._phase not in ("idle", "waiting_device"):
             self.disconnect_requested.emit()
         self._load_config_btn.setEnabled(True)
@@ -412,6 +430,19 @@ class HotspotFlashPage(QWidget):
         self._phase = phase
         self._render_banner()
         self._update_start_stop_button()
+        self._update_countdown()
+
+    def _update_countdown(self) -> None:
+        if self._phase == "connecting":
+            self._countdown_label.setText(
+                i18n.tr("hotspot_connect_attempt", attempt=self._connect_attempts, max=MAX_CONNECT_ATTEMPTS)
+            )
+            return
+        remaining_ms = self._poll_timer.remainingTime() if self._poll_timer.isActive() else -1
+        if self._phase == "flashing" or remaining_ms < 0:
+            self._countdown_label.setText("")
+            return
+        self._countdown_label.setText(i18n.tr("hotspot_next_check_in", seconds=f"{remaining_ms / 1000:.1f}"))
 
     def _render_banner(self) -> None:
         bg, fg = _PHASE_STYLE[self._phase]

@@ -151,6 +151,16 @@ class HotspotStationController(QObject):
     def counters(self) -> tuple[int, int, int]:
         return self._counter_flashed, self._counter_ok, self._counter_errors
 
+    def connect_attempts(self) -> int:
+        return self._connect_attempts
+
+    def poll_timer_remaining_ms(self) -> int:
+        """Milliseconds until the next poll tick, or -1 if not currently
+        polling. Lets the UI show a reassuring "next check in..." countdown
+        - an impatient operator watching a static banner for a few seconds
+        can otherwise easily mistake "still polling" for "stuck"."""
+        return self._poll_timer.remainingTime() if self._poll_timer.isActive() else -1
+
     def set_port(self, device: Optional[str]) -> None:
         self._port_device = device
 

@@ -585,6 +585,19 @@ exposed it as an adjustable "ESC retries" spinner (1–20) in the UI.
   just never isolated until reconnects got frequent enough (continuous
   hot-plug looping) and the log got read carefully enough to notice the
   precise ~2s timing match to `POST_PASSTHROUGH_DELAY_S`.
+- **2026-08-26 — added a live "next check in..." countdown to both Хотспот
+  tabs.** Requested directly: impatient production-line operators watching
+  a static banner for a few seconds assume nothing is happening. A small
+  muted label under the banner now shows either "Наступна перевірка через
+  Nс" (ticking down, refreshed every 150ms by a separate UI-only `QTimer`
+  - `HotspotFlashPage`/`HotspotLinePage`'s own `_countdown_timer`, distinct
+  from the 1s poll timer that actually drives the state machine) or, during
+  `connecting`, "Спроба підключення X з 5" - the attempt counter reads
+  better than a raw timer there since the wait length depends on retries,
+  not a fixed duration. Hidden during `flashing` (not waiting on the poll
+  timer at all then). `HotspotStationController.poll_timer_remaining_ms()`
+  is a thin wrapper around Qt's own `QTimer.remainingTime()` - no manual
+  elapsed-time tracking needed, Qt already provides this.
 
 ## Module map
 

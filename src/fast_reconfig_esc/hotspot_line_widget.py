@@ -32,7 +32,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -46,7 +46,13 @@ from PyQt6.QtWidgets import (
 from . import i18n
 from .eeprom_config import ConfigFileError, load_config_file
 from .esc_manager import MAX_ESC_COUNT
-from .hotspot_station import HotspotStationController, PHASE_BANNER_KEY, PHASE_STYLE, RETRY_PHASES
+from .hotspot_station import (
+    MAX_CONNECT_ATTEMPTS,
+    HotspotStationController,
+    PHASE_BANNER_KEY,
+    PHASE_STYLE,
+    RETRY_PHASES,
+)
 from .serial_transport import list_fc_ports
 from .settings_store import load_int, load_str, save_int, save_str
 from .theme import ACCENT_AMBER, ACCENT_ERROR, TEXT_MUTED
@@ -65,6 +71,15 @@ class HotspotLinePage(QWidget):
         self._port_busy_checker: Optional[Callable[[str], bool]] = None
 
         self._build_ui()
+
+        # Purely a UI refresh - ticks faster than the controller's own 1s
+        # poll so the "next check in..." countdown reads smoothly instead
+        # of jumping straight from 1s to 0s. An impatient operator staring
+        # at an unchanging banner for a few seconds easily mistakes "still
+        # polling" for "stuck" - this is a live reassurance that it isn't.
+        self._countdown_timer = QTimer(self)
+        self._countdown_timer.setInterval(150)
+        self._countdown_timer.timeout.connect(self._update_countdown)
 
         self.controller.phase_changed.connect(self._on_phase_changed)
         self.controller.esc_detail_changed.connect(self._on_esc_detail_changed)
@@ -129,6 +144,11 @@ class HotspotLinePage(QWidget):
         self._banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self._banner)
 
+        self._countdown_label = QLabel()
+        self._countdown_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        self._countdown_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self._countdown_label)
+
         self._retry_btn = QPushButton()
         self._retry_btn.clicked.connect(self.controller.retry)
         self._retry_btn.setVisible(False)
@@ -167,6 +187,7 @@ class HotspotLinePage(QWidget):
         self._update_counters_label()
         self._render_banner()
         self._update_start_stop_button()
+        self._update_countdown()
 
     # ---- config / port / ESC-slot pickers ------------------------------------------------
 
@@ -295,6 +316,7 @@ class HotspotLinePage(QWidget):
     def _on_phase_changed(self, _phase: str) -> None:
         self._render_banner()
         self._update_start_stop_button()
+        self._update_countdown()
 
     def _on_esc_detail_changed(self, state: str, detail: str) -> None:
         self._detail_label.setText(detail)
@@ -304,9 +326,26 @@ class HotspotLinePage(QWidget):
         self._port_combo.setEnabled(not armed)
         self._refresh_btn.setEnabled(not armed)
         self._esc_combo.setEnabled(not armed)
-        if not armed:
+        if armed:
+            self._countdown_timer.start()
+        else:
+            self._countdown_timer.stop()
             self._detail_label.setText("")
+            self._countdown_label.setText("")
         self._update_start_stop_button()
+
+    def _update_countdown(self) -> None:
+        phase = self.controller.phase
+        if phase == "connecting":
+            self._countdown_label.setText(
+                i18n.tr("hotspot_connect_attempt", attempt=self.controller.connect_attempts(), max=MAX_CONNECT_ATTEMPTS)
+            )
+            return
+        remaining_ms = self.controller.poll_timer_remaining_ms()
+        if phase == "flashing" or remaining_ms < 0:
+            self._countdown_label.setText("")
+            return
+        self._countdown_label.setText(i18n.tr("hotspot_next_check_in", seconds=f"{remaining_ms / 1000:.1f}"))
 
     def _render_banner(self) -> None:
         bg, fg = PHASE_STYLE[self.controller.phase]

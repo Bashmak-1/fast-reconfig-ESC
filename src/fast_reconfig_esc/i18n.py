@@ -223,6 +223,11 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
     "hotspot_config_loaded": {"en": "Config: {path}", "uk": "Конфіг: {path}"},
     "hotspot_port_label": {"en": "Watch port:", "uk": "Слідкувати за портом:"},
     "hotspot_esc_label": {"en": "ESC:", "uk": "ESC:"},
+    "hotspot_next_check_in": {"en": "Next check in {seconds}s", "uk": "Наступна перевірка через {seconds}с"},
+    "hotspot_connect_attempt": {
+        "en": "Connect attempt {attempt} of {max}...",
+        "uk": "Спроба підключення {attempt} з {max}...",
+    },
     "hotspot_start": {"en": "Start", "uk": "Старт"},
     "hotspot_stop": {"en": "Stop", "uk": "Стоп"},
     "hotspot_retry": {"en": "Try again", "uk": "Спробувати ще раз"},
