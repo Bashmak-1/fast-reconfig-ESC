@@ -240,6 +240,10 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "en": "Disconnect on the Main tab first",
         "uk": "Спочатку відключіться на Головній вкладці",
     },
+    "hotspot_port_busy_elsewhere": {
+        "en": "This port is already in use on another tab",
+        "uk": "Цей порт вже використовується на іншій вкладці",
+    },
     "hotspot_stop_disabled_flashing": {
         "en": "Wait for the write to finish",
         "uk": "Зачекайте, завершується прошивка",

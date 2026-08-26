@@ -261,9 +261,18 @@ class MainWindow(QMainWindow):
         self.hotspot_page.armed_changed.connect(self._on_hotspot_armed_changed)
         self.hotspot_page.config_path_changed.connect(self._set_config_path)
 
-        # hotspot_line_page (HotspotLinePage) is deliberately NOT wired here:
-        # it drives its own private EscManager, so it has no shared
-        # connection/config state with MainWindow to sync.
+        # hotspot_line_page (HotspotLinePage) is NOT wired into the shared
+        # request_*/EscManager signals above: it drives its own private
+        # EscManager, so it has no shared connection/config state with
+        # MainWindow to sync. It DOES still need to know about port
+        # collisions with the shared connection and with hotspot_page,
+        # though - two connections fighting over the same physical port
+        # was confirmed on real hardware to make ESC probes fail even on
+        # the side that "won" the port, not just a clean refusal.
+        self.hotspot_page.set_port_busy_checker(self._is_port_busy_for_hotspot)
+        self.hotspot_line_page.set_port_busy_checker(self._is_port_busy_for_hotspot_line)
+        self.hotspot_page.armed_changed.connect(lambda *_: self.hotspot_line_page.recheck_availability())
+        self.hotspot_line_page.controller.armed_changed.connect(lambda *_: self.hotspot_page.recheck_availability())
 
     # ---- i18n ------------------------------------------------
 
@@ -402,6 +411,7 @@ class MainWindow(QMainWindow):
         self.config_editor.set_available_escs(self._esc_read_cache)
         self.config_editor.set_apply_enabled(connected)
         self.hotspot_page.on_connection_state_changed(connected, expected_count)
+        self.hotspot_line_page.recheck_availability()
         if connected:
             self.request_discover.emit()
 
@@ -477,6 +487,34 @@ class MainWindow(QMainWindow):
         self._rescan_btn.setToolTip(tooltip)
         self._flash_all_btn.setEnabled(self._connected and bool(self._config_path_edit.text()) and not armed)
         self._flash_all_btn.setToolTip(tooltip)
+
+    # ---- cross-tab port-collision guard ------------------------------------------------
+    #
+    # Confirmed on real hardware (2026-08-26): letting two connections fight
+    # over the same physical port doesn't just fail cleanly on the loser -
+    # it can make the WINNING side's own ESC probes start failing too
+    # (ACK_D_GENERAL_ERROR on an ESC that was responding fine moments
+    # earlier), which looks exactly like "stopped detecting a correctly
+    # wired ESC". hotspot_page shares MainWindow's EscManager and already
+    # has proper mutual exclusion with the Main/Config tabs; hotspot_line_page
+    # deliberately doesn't (private EscManager, meant to be usable alongside
+    # everything else on a DIFFERENT port) - these checks are the one thing
+    # that still needs to cross that boundary: refuse to arm on a port
+    # something else already holds, rather than silently racing for it.
+
+    def _is_port_busy_for_hotspot(self, port: str) -> bool:
+        if self.hotspot_line_page.controller.armed and self.hotspot_line_page._selected_port_device() == port:
+            return True
+        if self._connected and not self._hotspot_armed and self._port_combo.currentData() == port:
+            return True
+        return False
+
+    def _is_port_busy_for_hotspot_line(self, port: str) -> bool:
+        if self._hotspot_armed and self.hotspot_page._selected_port_device() == port:
+            return True
+        if self._connected and not self._hotspot_armed and self._port_combo.currentData() == port:
+            return True
+        return False
 
     # ---- window lifecycle ------------------------------------------------
 

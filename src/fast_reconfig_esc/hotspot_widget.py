@@ -40,7 +40,7 @@ request_flash_bytes - same delegation pattern ConfigEditorPage already uses.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -110,6 +110,7 @@ class HotspotFlashPage(QWidget):
         self._phase = "idle"
         self._connect_attempts = 0
         self._manual_connection_active = False
+        self._port_busy_checker: Optional[Callable[[str], bool]] = None
         self._counter_flashed = 0
         self._counter_ok = 0
         self._counter_errors = 0
@@ -269,6 +270,23 @@ class HotspotFlashPage(QWidget):
 
     # ---- arm / disarm ------------------------------------------------
 
+    def set_port_busy_checker(self, checker: Callable[[str], bool]) -> None:
+        """MainWindow injects this so arming can refuse a port already
+        claimed by the other Хотспот tab or a manual connection. Confirmed
+        on real hardware: two connections fighting over the same port
+        doesn't just fail cleanly - it can make the WINNING side's ESC
+        probes fail too, which looks exactly like "not detecting" a
+        correctly-wired ESC. Not just cosmetic - genuinely avoid opening a
+        second connection to an already-claimed port at all."""
+        self._port_busy_checker = checker
+
+    def recheck_availability(self) -> None:
+        """Call when some OTHER connection surface's armed/connected state
+        changes, so this tab's Старт button reflects port availability
+        without waiting for the operator to touch this tab first."""
+        if not self._armed:
+            self._update_start_stop_button()
+
     def _on_start_stop_clicked(self) -> None:
         if self._armed:
             self._disarm()
@@ -276,6 +294,10 @@ class HotspotFlashPage(QWidget):
             self._arm()
 
     def _arm(self) -> None:
+        port = self._selected_port_device()
+        if port and self._port_busy_checker and self._port_busy_checker(port):
+            self._set_start_hint(i18n.tr("hotspot_port_busy_elsewhere"))
+            return
         self._armed = True
         self.armed_changed.emit(True)
         self._load_config_btn.setEnabled(False)
@@ -401,6 +423,9 @@ class HotspotFlashPage(QWidget):
         elif not self._selected_port_device():
             self._start_stop_btn.setEnabled(False)
             self._set_start_hint(i18n.tr("hotspot_start_disabled_no_port"))
+        elif self._port_busy_checker and self._port_busy_checker(self._selected_port_device()):
+            self._start_stop_btn.setEnabled(False)
+            self._set_start_hint(i18n.tr("hotspot_port_busy_elsewhere"))
         else:
             self._start_stop_btn.setEnabled(True)
             self._set_start_hint("")

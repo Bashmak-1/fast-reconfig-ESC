@@ -30,7 +30,7 @@ with a different config, than the first "Хотспот" tab.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
@@ -62,6 +62,7 @@ class HotspotLinePage(QWidget):
         self.controller = HotspotStationController(self)
         self._config_bytes: Optional[bytes] = None
         self._config_path: str = ""
+        self._port_busy_checker: Optional[Callable[[str], bool]] = None
 
         self._build_ui()
 
@@ -258,11 +259,32 @@ class HotspotLinePage(QWidget):
 
     # ---- start/stop ------------------------------------------------
 
+    def set_port_busy_checker(self, checker: Callable[[str], bool]) -> None:
+        """MainWindow injects this so arming can refuse a port already
+        claimed by the other Хотспот tab or a manual connection. Confirmed
+        on real hardware: two connections fighting over the same port
+        doesn't just fail cleanly - it can make the WINNING side's ESC
+        probes fail too, which looks exactly like "not detecting" a
+        correctly-wired ESC. Not just cosmetic - genuinely avoid opening a
+        second connection to an already-claimed port at all."""
+        self._port_busy_checker = checker
+
+    def recheck_availability(self) -> None:
+        """Call when some OTHER connection surface's armed/connected state
+        changes, so this tab's Старт button reflects port availability
+        without waiting for the operator to touch this tab first."""
+        if not self.controller.armed:
+            self._update_start_stop_button()
+
     def _on_start_stop_clicked(self) -> None:
         if self.controller.armed:
             self.controller.stop()
-        else:
-            self.controller.start()
+            return
+        port = self._selected_port_device()
+        if port and self._port_busy_checker and self._port_busy_checker(port):
+            self._set_start_hint(i18n.tr("hotspot_port_busy_elsewhere"))
+            return
+        self.controller.start()
 
     def shutdown(self) -> None:
         """Stop this tab's private connection/thread - call on app close."""
@@ -310,6 +332,9 @@ class HotspotLinePage(QWidget):
         elif not self._selected_port_device():
             self._start_stop_btn.setEnabled(False)
             self._set_start_hint(i18n.tr("hotspot_start_disabled_no_port"))
+        elif self._port_busy_checker and self._port_busy_checker(self._selected_port_device()):
+            self._start_stop_btn.setEnabled(False)
+            self._set_start_hint(i18n.tr("hotspot_port_busy_elsewhere"))
         else:
             self._start_stop_btn.setEnabled(True)
             self._set_start_hint("")

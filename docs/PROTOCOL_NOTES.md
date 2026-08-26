@@ -519,6 +519,36 @@ exposed it as an adjustable "ESC retries" spinner (1–20) in the UI.
   shape as the multi-station one above, worth stating twice): confirm which
   EXISTING piece a request is about before generalizing a fix across
   multiple places that merely look similar.
+- **2026-08-26 — two Хотспот tabs armed on the same physical port can make
+  the winning side's own ESC probes fail too, not just the loser.**
+  Diagnosed from a real hardware log (`~/.fast_reconfig_esc/logs/
+  fast_reconfig_esc.log`, session starting 11:24:40): the user ran
+  "Хотспот" (full-sweep), successfully found and flashed the ESC on output
+  #1 three times in a row, then switched to "Хотспот (лінія)" (watching
+  slot #1) without stopping "Хотспот" first. The log shows the tell:
+  `Connect requested` immediately followed by `PermissionError: Access is
+  denied` in duplicate pairs right after each successful connect - i.e. a
+  second connection was actively trying to steal the port from the first
+  the whole time. Once "Хотспот (лінія)" had the port, its `discover_one`
+  calls on slot #1 returned `ACK_D_GENERAL_ERROR` for 35 straight seconds -
+  the same output that had just been read/written successfully moments
+  earlier via "Хотспот" - strongly suggesting the OTHER tab's repeated
+  background reconnect attempts (never disarmed, so its own poll timer kept
+  retrying) were disrupting the winning side's FourWay traffic, not that
+  the ESC itself had gone bad.
+  Fix: `MainWindow._is_port_busy_for_hotspot`/`_is_port_busy_for_hotspot_line`
+  - before either Хотспот tab arms, it now refuses (clear
+  `hotspot_port_busy_elsewhere` hint, Старт stays disabled) if the chosen
+  port is already claimed by the other Хотспот tab or by a manual Main-tab
+  connection. Wired via a small injected callback
+  (`set_port_busy_checker`) so `hotspot_line_widget.py`/`hotspot_station.py`
+  don't need a back-reference to `MainWindow` - `MainWindow` is the only
+  place that actually knows about all three connection surfaces at once.
+  Each tab's `armed_changed` is cross-connected to the other's
+  `recheck_availability()` so the button greys out reactively, not only
+  when the operator happens to click it. Does NOT prevent using the two
+  Хотспот tabs simultaneously on genuinely DIFFERENT ports - only refuses
+  the exact-same-port collision that caused this.
 
 ## Module map
 
