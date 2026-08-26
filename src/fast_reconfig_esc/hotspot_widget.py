@@ -56,6 +56,7 @@ from PyQt6.QtWidgets import (
 from . import i18n
 from .eeprom_config import ConfigFileError, load_config_file
 from .esc_comparison_widget import EscComparisonList
+from .manual_counter_widget import ManualCounterWidget
 from .serial_transport import list_fc_ports
 from .settings_store import load_last_config_path
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, BG_PANEL, TEXT_MAIN, TEXT_MUTED
@@ -201,6 +202,11 @@ class HotspotFlashPage(QWidget):
         self._counters_label = QLabel()
         self._counters_label.setStyleSheet(f"color: {TEXT_MUTED};")
         counters_row.addWidget(self._counters_label, 1)
+        self._manual_counter_label = QLabel()
+        self._manual_counter_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        counters_row.addWidget(self._manual_counter_label)
+        self._manual_counter = ManualCounterWidget()
+        counters_row.addWidget(self._manual_counter)
         self._reset_counters_btn = QPushButton()
         self._reset_counters_btn.clicked.connect(self._on_reset_counters_clicked)
         counters_row.addWidget(self._reset_counters_btn)
@@ -220,6 +226,8 @@ class HotspotFlashPage(QWidget):
         self._refresh_btn.setToolTip(i18n.tr("refresh_tooltip"))
         self._retry_btn.setText(i18n.tr("hotspot_retry"))
         self._reset_counters_btn.setText(i18n.tr("hotspot_reset_counters"))
+        self._manual_counter_label.setText(i18n.tr("hotspot_manual_counter_label"))
+        self._manual_counter.setToolTip(i18n.tr("hotspot_manual_counter_tooltip"))
         self._update_counters_label()
         self._render_banner()
         self._update_start_stop_button()
@@ -413,6 +421,7 @@ class HotspotFlashPage(QWidget):
         self._counter_ok = 0
         self._counter_errors = 0
         self._update_counters_label()
+        self._manual_counter.reset()
 
     def _update_counters_label(self) -> None:
         self._counters_label.setText(
@@ -528,6 +537,7 @@ class HotspotFlashPage(QWidget):
                 self._counter_ok += 1
             else:
                 self._counter_flashed += 1
+                self._manual_counter.increment()
             self._update_counters_label()
             self._set_phase("round_done")
         else:

@@ -236,6 +236,12 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "en": "Flashed: {flashed} - Already OK: {ok} - Errors: {errors}",
         "uk": "Прошито: {flashed} - Вже коректно: {ok} - Помилок: {errors}",
     },
+    "hotspot_manual_counter_label": {"en": "Total reworked:", "uk": "Всього перероблено:"},
+    "hotspot_manual_counter_tooltip": {
+        "en": "+1 automatically on every successful flash. Editable - use +/- or type a number to correct it.",
+        "uk": "+1 автоматично при кожній вдалій прошивці. Можна редагувати - "
+        "кнопками +/- або ввести число вручну, щоб виправити.",
+    },
     "hotspot_start_disabled_no_config": {
         "en": "Load a config file first",
         "uk": "Спочатку завантажте файл конфігу",

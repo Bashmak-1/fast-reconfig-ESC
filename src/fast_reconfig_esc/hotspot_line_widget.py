@@ -53,6 +53,7 @@ from .hotspot_station import (
     PHASE_STYLE,
     RETRY_PHASES,
 )
+from .manual_counter_widget import ManualCounterWidget
 from .serial_transport import list_fc_ports
 from .settings_store import load_int, load_str, save_int, save_str
 from .theme import ACCENT_AMBER, ACCENT_ERROR, TEXT_MUTED
@@ -69,6 +70,7 @@ class HotspotLinePage(QWidget):
         self._config_bytes: Optional[bytes] = None
         self._config_path: str = ""
         self._port_busy_checker: Optional[Callable[[str], bool]] = None
+        self._last_flashed = 0
 
         self._build_ui()
 
@@ -83,7 +85,7 @@ class HotspotLinePage(QWidget):
 
         self.controller.phase_changed.connect(self._on_phase_changed)
         self.controller.esc_detail_changed.connect(self._on_esc_detail_changed)
-        self.controller.counters_changed.connect(lambda *_: self._update_counters_label())
+        self.controller.counters_changed.connect(self._on_counters_changed)
         self.controller.armed_changed.connect(self._on_armed_changed)
 
         i18n.signals.language_changed.connect(self._retranslate)
@@ -164,8 +166,13 @@ class HotspotLinePage(QWidget):
         self._counters_label = QLabel()
         self._counters_label.setStyleSheet(f"color: {TEXT_MUTED};")
         counters_row.addWidget(self._counters_label, 1)
+        self._manual_counter_label = QLabel()
+        self._manual_counter_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        counters_row.addWidget(self._manual_counter_label)
+        self._manual_counter = ManualCounterWidget()
+        counters_row.addWidget(self._manual_counter)
         self._reset_counters_btn = QPushButton()
-        self._reset_counters_btn.clicked.connect(self.controller.reset_counters)
+        self._reset_counters_btn.clicked.connect(self._on_reset_counters_clicked)
         counters_row.addWidget(self._reset_counters_btn)
         root.addLayout(counters_row)
 
@@ -184,6 +191,8 @@ class HotspotLinePage(QWidget):
         self._esc_label.setText(i18n.tr("hotspot_esc_label"))
         self._retry_btn.setText(i18n.tr("hotspot_retry"))
         self._reset_counters_btn.setText(i18n.tr("hotspot_reset_counters"))
+        self._manual_counter_label.setText(i18n.tr("hotspot_manual_counter_label"))
+        self._manual_counter.setToolTip(i18n.tr("hotspot_manual_counter_tooltip"))
         self._update_counters_label()
         self._render_banner()
         self._update_start_stop_button()
@@ -386,3 +395,19 @@ class HotspotLinePage(QWidget):
     def _update_counters_label(self) -> None:
         flashed, ok, errors = self.controller.counters()
         self._counters_label.setText(i18n.tr("hotspot_counters", flashed=flashed, ok=ok, errors=errors))
+
+    def _on_counters_changed(self, flashed: int, ok: int, errors: int) -> None:
+        # The controller's own "flashed" count only goes up at the exact
+        # moment a flash actually succeeds (see
+        # HotspotStationController._on_flash_finished) - never on a
+        # reset_counters() call, which sets it back to 0 and is handled
+        # separately by _on_reset_counters_clicked. So any increase here,
+        # and only an increase, is a real "+1 for this flash" event.
+        if flashed > self._last_flashed:
+            self._manual_counter.increment(flashed - self._last_flashed)
+        self._last_flashed = flashed
+        self._update_counters_label()
+
+    def _on_reset_counters_clicked(self) -> None:
+        self.controller.reset_counters()
+        self._manual_counter.reset()
