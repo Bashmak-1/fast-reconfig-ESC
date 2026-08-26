@@ -282,6 +282,46 @@ class EscManager(QObject):
         if self._consecutive_empty_scans >= EMPTY_SCANS_BEFORE_POWER_CYCLE_HINT:
             self._log("warning", tr("power_cycle_hint"))
 
+    def discover_one(self, index: int) -> None:
+        """Probe and classify exactly one ESC index - the building block for
+        the Хотспот "watch one output" workflow, where an operator only ever
+        has one physical ESC wired to one specific output at a time.
+
+        Deliberately does NOT call discover_all(): sweeping every possible
+        index every ~1s (as the continuous Хотспот loop does) would log an
+        "error"-level line for every one of the other, permanently-empty
+        outputs, forever. Here, "not currently responding" is the normal,
+        expected steady state between ESC swaps - it's only logged to the
+        technical file log (info level), never surfaced to the GUI panel as
+        an error.
+        """
+        if self._fourway is None:
+            self._log("error", tr("not_connected_log"))
+            return
+
+        try:
+            result = self._probe_one(index)
+        except Exception as e:  # noqa: BLE001 - "not plugged in yet" is routine here, not a batch-abort condition
+            self._probe_results[index] = ProbeResult(ok=False, error=str(e))
+            self._flog.info("ESC #%d: not found/no response (%s)", index + 1, e)
+            self.discovery_finished.emit(0, 1)
+            return
+
+        self._probe_results[index] = result
+        state, detail = self._classify(result)
+        self._flog.info(
+            "ESC #%d: found - %s | settings (%d bytes): %s",
+            index + 1, self._describe_esc_info(result.esc_info), len(result.settings or b""), hex_dump(result.settings or b""),
+        )
+        if result.settings is not None:
+            decoded = decode_settings(result.settings)
+            self._flog.info(
+                "ESC #%d: decoded settings: %s",
+                index + 1, "; ".join(f"{d.label}={d.value}" for d in decoded),
+            )
+        self.esc_status_changed.emit(index, state.value, detail, result.esc_info)
+        self.discovery_finished.emit(1, 1)
+
     @staticmethod
     def _describe_esc_info(info: Optional[EscInfo]) -> str:
         if info is None:

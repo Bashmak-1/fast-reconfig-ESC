@@ -123,6 +123,7 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
     "tab_main": {"en": "Main", "uk": "Головна"},
     "tab_config": {"en": "Config", "uk": "Конфіг"},
     "tab_hotspot": {"en": "Hotspot", "uk": "Хотспот"},
+    "tab_hotspot_multi": {"en": "Hotspot (Line)", "uk": "Хотспот (лінія)"},
     # ---- config editor: field groups ----
     "group_essentials": {"en": "Essentials", "uk": "Основне"},
     "group_motor": {"en": "Motor", "uk": "Мотор"},
@@ -221,6 +222,7 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
     "hotspot_no_config": {"en": "No config loaded", "uk": "Конфіг не завантажено"},
     "hotspot_config_loaded": {"en": "Config: {path}", "uk": "Конфіг: {path}"},
     "hotspot_port_label": {"en": "Watch port:", "uk": "Слідкувати за портом:"},
+    "hotspot_esc_label": {"en": "ESC:", "uk": "ESC:"},
     "hotspot_start": {"en": "Start", "uk": "Старт"},
     "hotspot_stop": {"en": "Stop", "uk": "Стоп"},
     "hotspot_retry": {"en": "Try again", "uk": "Спробувати ще раз"},
@@ -250,6 +252,10 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
     "hotspot_banner_waiting_device": {"en": "Waiting for an ESC...", "uk": "Очікуємо ESC..."},
     "hotspot_banner_connecting": {"en": "Connecting...", "uk": "Підключення..."},
     "hotspot_banner_checking": {"en": "Checking configuration...", "uk": "Перевірка конфігурації..."},
+    "hotspot_banner_watching_esc": {
+        "en": "Waiting for an ESC on the selected output...",
+        "uk": "Очікуємо ESC на обраному виході...",
+    },
     "hotspot_banner_flashing": {
         "en": "Flashing - DO NOT UNPLUG",
         "uk": "Прошивається - НЕ ВІДКЛЮЧАЙТЕ",

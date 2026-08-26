@@ -37,6 +37,7 @@ from .esc_manager import (
 from .esc_status_widget import EscStatusWidget
 from .file_logger import LOG_FILE
 from .flag_icons import FLAG_ICON_BUILDERS
+from .hotspot_line_widget import HotspotLinePage
 from .hotspot_widget import HotspotFlashPage
 from .serial_transport import list_fc_ports
 from .settings_store import load_last_config_path, save_last_config_path
@@ -99,6 +100,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._build_main_tab(), "")
         self._tabs.addTab(self._build_config_tab(), "")
         self._tabs.addTab(self._build_hotspot_tab(), "")
+        self._tabs.addTab(self._build_hotspot_line_tab(), "")
         root.addWidget(self._tabs, 1)
 
         root.addWidget(self._build_log_panel())
@@ -126,6 +128,10 @@ class MainWindow(QMainWindow):
     def _build_hotspot_tab(self) -> QWidget:
         self.hotspot_page = HotspotFlashPage()
         return self.hotspot_page
+
+    def _build_hotspot_line_tab(self) -> QWidget:
+        self.hotspot_line_page = HotspotLinePage()
+        return self.hotspot_line_page
 
     def _build_top_bar(self) -> QFrame:
         bar = QFrame()
@@ -255,6 +261,10 @@ class MainWindow(QMainWindow):
         self.hotspot_page.armed_changed.connect(self._on_hotspot_armed_changed)
         self.hotspot_page.config_path_changed.connect(self._set_config_path)
 
+        # hotspot_line_page (HotspotLinePage) is deliberately NOT wired here:
+        # it drives its own private EscManager, so it has no shared
+        # connection/config state with MainWindow to sync.
+
     # ---- i18n ------------------------------------------------
 
     def _on_language_selected(self, index: int) -> None:
@@ -286,6 +296,7 @@ class MainWindow(QMainWindow):
         self._tabs.setTabText(0, i18n.tr("tab_main"))
         self._tabs.setTabText(1, i18n.tr("tab_config"))
         self._tabs.setTabText(2, i18n.tr("tab_hotspot"))
+        self._tabs.setTabText(3, i18n.tr("tab_hotspot_multi"))
         self._port_label.setText(i18n.tr("port_label"))
         self._refresh_btn.setToolTip(i18n.tr("refresh_tooltip"))
         self._baud_label.setText(i18n.tr("baud_label"))
@@ -492,4 +503,5 @@ class MainWindow(QMainWindow):
         if self._connected:
             self.esc_manager.disconnect()
         self.worker.stop()
+        self.hotspot_line_page.shutdown()
         super().closeEvent(event)

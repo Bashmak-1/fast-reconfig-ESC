@@ -19,6 +19,15 @@ hasn't changed is harmless and cheap (no wear - flash_bytes never rewrites
 an already-correct ESC), so looping continuously while a swap is in
 progress is the correct default, not a bug to guard against.
 
+This tab intentionally sweeps ALL of the FC's reported ESC outputs
+(EscManager.discover_all) every round, not just one - it's the "flash a
+whole batch of ESCs already wired to the FC" workflow. For the "watch just
+one operator-chosen ESC output" workflow (a single port swapped through one
+ESC at a time), see the second, independent "Хотспот (лінія)" tab
+(hotspot_line_widget.py / hotspot_station.py) - deliberately a SEPARATE tab
+with its own logic, not a mode of this one, per the user's explicit request
+(docs/PROTOCOL_NOTES.md, 2026-08-26).
+
 The port-presence poll is now only used for the very first connect (wait
 for the FC's own USB link to appear) and to notice if that FC gets unplugged
 entirely mid-session (a real, if rare, event - as opposed to an ESC wire
@@ -35,7 +44,6 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
-    QApplication,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -125,6 +133,12 @@ class HotspotFlashPage(QWidget):
         self._load_config_btn.clicked.connect(self._on_load_config_clicked)
         top.addWidget(self._load_config_btn)
         self._config_label = QLabel()
+        self._config_label.setWordWrap(True)
+        # A long config path (deeply nested folders) must never be allowed to
+        # dictate the window's natural width - QLabel's sizeHint ignores
+        # word-wrap when a parent layout asks "how wide do you want to be",
+        # so an explicit cap is the only thing that actually bounds it.
+        self._config_label.setMaximumWidth(700)
         top.addWidget(self._config_label, 1)
         root.addLayout(top)
 
@@ -437,7 +451,6 @@ class HotspotFlashPage(QWidget):
             else:
                 self._counter_flashed += 1
             self._update_counters_label()
-            QApplication.beep()
             self._set_phase("round_done")
         else:
             self._counter_errors += 1

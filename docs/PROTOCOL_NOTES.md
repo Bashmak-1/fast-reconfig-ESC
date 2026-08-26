@@ -414,6 +414,111 @@ exposed it as an adjustable "ESC retries" spinner (1–20) in the UI.
   uses — so all three tabs' notion of "the loaded config" for
   classification purposes stays one coherent thing, same pattern as
   before, just extended to the tab that had been left out of it.
+- **A `QLabel` with `addWidget(label, 1)` and no width cap can balloon the
+  whole window's size.** Discovered 2026-08-26 while testing an early,
+  since-replaced multi-station prototype of the second Хотспот tab: an
+  offscreen test script had (accidentally, as a test side effect) persisted
+  an unusually long scratchpad path as the "last-used config" in
+  `~/.fast_reconfig_esc/settings.ini`. Both `hotspot_widget.py`'s and the
+  second tab's (now `hotspot_line_widget.py`) config-path labels used
+  `top.addWidget(self._config_label, 1)` with no wrap/width limit —
+  `QLabel.sizeHint()` reports its *unwrapped* single-line width even with
+  `setWordWrap(True)` unless a `setMaximumWidth(...)` is also set, and
+  since all tabs are built eagerly in `MainWindow._build_ui()` (not lazily
+  on first view), one hidden tab's oversized sizeHint was enough to inflate
+  the whole window well past its requested `resize()` size. Fixed by adding
+  `setWordWrap(True)` + `setMaximumWidth(700)` to both labels. If you add
+  another label bound to a user-supplied path/string with a stretch factor,
+  give it the same treatment up front.
+- **`PrintWindow` can silently fail to capture certain `QPushButton`s** in
+  this app's real (non-offscreen) window, even with `PW_RENDERFULLCONTENT`
+  (flag `2`) and a settled layout (confirmed via `QTimer.singleShot` well
+  after `show()`, not just a fixed sleep). Hit while verifying the
+  since-replaced multi-station prototype's row buttons: a direct Qt-side
+  geometry/`isVisible()` dump (write it to a file from inside the running
+  app, since it's a windowed `pythonw` process with no console) showed
+  every button correctly positioned and visible, while `PrintWindow`
+  screenshots of the exact same window consistently rendered that row
+  without them, regardless of flag (`0` or `2`) or settle time. Same family
+  of native-Windows-GDI-vs-Qt6 rendering mismatch as the earlier unresolved
+  slider-background issue — when a screenshot looks wrong but the app's own
+  widget state says otherwise, trust the in-process geometry dump over
+  `PrintWindow`.
+- **2026-08-26 — the second Хотспот tab's first design was more than the
+  user actually wanted.** Built as a dynamic multi-station tab (add/remove
+  buttons, N simultaneous ports, a shared claimed-ports auto-picker,
+  `MAX_STATIONS` cap) based on an ambiguous initial request
+  ("по стандарту буде 1 порт... з можливістю зміни його на інші"). Once
+  shown a screenshot, the user clarified they'd pictured exactly one port
+  picker and one Старт/Стоп button — i.e. the existing "Хотспот" tab's own
+  UX, just as a second, independent instance. Replaced `multi_station_widget.py`
+  (deleted) with `hotspot_line_widget.py`: same UI as `hotspot_widget.py`,
+  driven by one private `HotspotStationController` instead of N of them.
+  `hotspot_station.py` (the extracted, widget-free state machine) turned
+  out to be exactly the right reusable piece regardless of which UI shape
+  was wanted, so it needed no changes. Lesson: when a request describes a
+  UI in terms of "how many buttons/lists," build that literally before
+  reaching for a more general/scalable design — the general version may
+  solve a problem nobody asked for.
+- **2026-08-26 — both Хотспот tabs' continuous loop swept every possible
+  ESC output every ~1s, which was never actually what was wanted, and
+  quietly spammed the GUI log.** The real workflow: an operator has exactly
+  one physical ESC wired to exactly one FC output at a time; the other up
+  to 11 outputs are permanently empty. `discover_all()` (used by both
+  tabs' every-tick loop up to this point) probes **every** output the FC
+  reports and, critically, logs a GUI "error"-level line
+  (`tr("esc_probe_error", ...)`) for each one that doesn't respond - i.e.
+  roughly 11 error lines per second, forever, while armed. The user's own
+  description of the intended flow ("програма має сама постійно трогати
+  лише цей порт" - the program should keep touching only that one output)
+  made the mismatch obvious once stated explicitly.
+  Fix: added `EscManager.discover_one(index)` (purely additive, sits next
+  to `discover_all`, reuses the exact same `_probe_one`/`_classify` -
+  `discover_all` itself is untouched, so Main tab's full-sweep Rescan is
+  unaffected) - a "not found" result there is only file-logged at info
+  level, never surfaced as a GUI error, since it's the expected steady
+  state between ESC swaps, not an anomaly. Both tabs' phase machines were
+  rewritten around watching one operator-chosen ESC slot
+  (`hotspot_station.py`'s new `watching`/`esc_ready`/`esc_error` phases,
+  replacing `checking`/`round_done`/`round_warning`/`round_error`) instead
+  of a sweep-then-loop. `EscComparisonList` no longer fits (it renders rows
+  `0..N-1`, and a single watched slot at an arbitrary index doesn't map
+  onto that) and was replaced with a single detail label in both tabs.
+  Port, ESC slot, and (for the independent `hotspot_line_widget.py`)
+  config path are now all persisted per tab (`settings_store.py`'s new
+  `load_str`/`save_str`/`load_int`/`save_int` plus four new keys) - the
+  user asked for this explicitly ("це все має зберігатись").
+  The actual phase-transition *decision* (`phase_after_discovery`,
+  `phase_after_flash` in `hotspot_station.py`) is shared between
+  `hotspot_widget.py`'s own hand-written copy and
+  `HotspotStationController`, unit-tested in `tests/test_hotspot_station.py`
+  - everything else (UI, and which EscManager each drives) stays separate
+  by design, per the 2026-08-26 note above about not sharing connection
+  architecture between the two tabs.
+- **2026-08-26 (same day, immediate follow-up) — applying the watch-one-slot
+  redesign to `hotspot_widget.py` too, per the note directly above, was
+  wrong.** The user's actual intent (stated only after seeing the result):
+  two tabs with two genuinely DIFFERENT behaviors, not two tabs sharing one
+  behavior - "Хотспот" ("нормальний хотспот") stays the full-sweep,
+  flash-everything-the-FC-reports design exactly as it was
+  (`discover_all()`, `EscComparisonList`, `checking`/`round_done`/
+  `round_warning`/`round_error` phases, all reverted to the pre-2026-08-26
+  committed version, keeping only the two independently-wanted fixes from
+  earlier that day: no beep, and the config-label word-wrap/max-width
+  guard). "Хотспот (лінія)" keeps the watch-one-slot redesign exactly as
+  built. `hotspot_station.py`/`hotspot_line_widget.py` needed no changes
+  for this correction - only `hotspot_widget.py` (reverted) and
+  `main_window.py` (reverted the `request_discover_one` wiring, the
+  `flash_requested` signal-shape change, and the `and not
+  self._hotspot_armed` guard on the post-connect auto-`discover_all()` -
+  all of that existed solely to support `hotspot_widget.py` driving
+  `discover_one`, which it no longer does). `hotspot_widget.py` and
+  `hotspot_station.py` now share **nothing** - not even the phase
+  constants or the two pure decision functions - since they're genuinely
+  different state machines for genuinely different workflows. Lesson (same
+  shape as the multi-station one above, worth stating twice): confirm which
+  EXISTING piece a request is about before generalizing a fix across
+  multiple places that merely look similar.
 
 ## Module map
 
@@ -435,17 +540,20 @@ src/fast_reconfig_esc/
     i18n.py                 en/uk translations
     flag_icons.py            QPainter-drawn language-switcher flags
     theme.py                 dark QSS palette
-    main_window.py            QMainWindow: top bar + log panel (always visible) + QTabWidget(Main, Config, Хотспот)
+    main_window.py            QMainWindow: top bar + log panel (always visible) + QTabWidget(Main, Config, Хотспот, Хотспот (лінія))
     esc_status_widget.py      Main tab's per-ESC status card
     config_editor_widget.py   Config tab: generic form built from eeprom_fields.FIELD_SPECS, in-memory working buffer, load/read/save/apply
     esc_comparison_widget.py  Config tab: compact per-ESC comparison table, fed by the same esc_status_changed stream as the Main tab
-    hotspot_widget.py         Хотспот tab: hands-off hot-plug flashing station, port-presence poll + state machine on top of the existing EscManager signals
+    hotspot_widget.py         Хотспот tab: hands-off hot-plug flashing station that sweeps EVERY ESC output the FC reports (discover_all), port-presence poll + state machine on top of the shared EscManager (this connection is exclusive with Main/Config)
+    hotspot_station.py        HotspotStationController: a DIFFERENT state machine that watches exactly ONE operator-chosen ESC output (discover_one), widget-free, owning its OWN private ConnectionWorker/EscManager/thread - used only by hotspot_line_widget.py, not hotspot_widget.py
+    hotspot_line_widget.py    Хотспот (лінія) tab: a second, independent tab with its own watch-one-ESC-slot workflow, driven by its own private HotspotStationController (own port, own ESC slot, own connection, own config - no mutual exclusion needed with any other tab)
 tests/
     test_protocol.py        CRC/framing unit tests, known-vector checks
     test_eeprom_fields.py     decode_field/encode_field round-trip tests (every raw byte, every field spec)
     test_eeprom_values.py     decode_settings() vs. a real ESC capture's am32.ca-displayed values
     test_esc_manager.py      mocked-hardware orchestration/fallback/decoding tests
     test_file_logger.py       confirms detailed traces actually land in the log file
+    test_hotspot_station.py   phase_after_discovery/phase_after_flash - the decision logic hotspot_station.py's watch-one-ESC-slot loop is built on (Хотспот (лінія) only, not hotspot_widget.py)
 ```
 
 ## Next steps
