@@ -236,11 +236,41 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "en": "Flashed: {flashed} - Already OK: {ok} - Errors: {errors}",
         "uk": "Прошито: {flashed} - Вже коректно: {ok} - Помилок: {errors}",
     },
+    "hotspot_power_cycle_hint": {
+        "en": (
+            "This ESC hasn't been detected for a while. Tip: connect the signal wire "
+            "before power - if power went on first, try unplugging and reconnecting "
+            "the ESC's power."
+        ),
+        "uk": (
+            "Цей ESC довго не визначається. Підказка: підключайте спочатку сигнальний "
+            "провід, а вже потім силові - якщо живлення підключили першим, спробуйте "
+            "від'єднати й підключити його знову."
+        ),
+    },
     "hotspot_manual_counter_label": {"en": "Total reworked:", "uk": "Всього перероблено:"},
     "hotspot_manual_counter_tooltip": {
         "en": "+1 automatically on every successful flash. Editable - use +/- or type a number to correct it.",
         "uk": "+1 автоматично при кожній вдалій прошивці. Можна редагувати - "
         "кнопками +/- або ввести число вручну, щоб виправити.",
+    },
+    "hotspot_poll_interval_label": {"en": "Check every:", "uk": "Перевіряти кожні:"},
+    "hotspot_poll_interval_suffix": {"en": "ms", "uk": "мс"},
+    "hotspot_poll_interval_seconds_hint": {"en": "({seconds} s)", "uk": "({seconds} с)"},
+    "hotspot_poll_interval_tooltip": {
+        "en": (
+            "How often to check the watched ESC slot (and, while connecting, how often "
+            "to retry). Some ESCs need a few extra seconds to finish booting before "
+            "they respond - raise this if one keeps erroring right after power-on. "
+            "Step: 100 ms."
+        ),
+        "uk": (
+            "Як часто перевіряти обраний слот ESC (а також, під час підключення, як "
+            "часто повторювати спробу). Деяким ESC потрібно кілька зайвих секунд, щоб "
+            "завершити завантаження, перш ніж відповідати - збільште це значення, якщо "
+            "такий ESC постійно помиляється одразу після підключення живлення. "
+            "Крок: 100 мс."
+        ),
     },
     "hotspot_start_disabled_no_config": {
         "en": "Load a config file first",

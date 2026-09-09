@@ -33,6 +33,31 @@ from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, BG_PANEL, TEXT_MAIN
 DEFAULT_BAUD = 115200
 MAX_CONNECT_ATTEMPTS = 5
 POLL_INTERVAL_MS = 1000
+# Operator-adjustable via HotspotStationController.set_poll_interval_ms()
+# (Хотспот (лінія) only - see hotspot_widget.py's own, separate constant).
+# MIN is deliberately == the compiled-in default, not lower: the same timer
+# also paces the connect-retry cadence, and EscManager.discover_one()'s
+# probe (esc_connect_retries=2, ~0.2s timeout + 0.25s retry delay each) can
+# itself take up to ~0.9s worst case - going below that floor wouldn't poll
+# faster, it would just queue backlogged probes on the worker thread. This
+# control can only slow polling down from today's proven-safe default,
+# never speed it up - which matches the actual need (some ESCs already
+# respond fine at 1000ms; only a slow-booting one needs more). MAX gives
+# >3x headroom over the ~3s a slow ESC was reported to need.
+MIN_POLL_INTERVAL_MS = 1000
+MAX_POLL_INTERVAL_MS = 10_000
+POLL_INTERVAL_STEP_MS = 100
+# esc_manager.py's discover_all() already warns after just 2 consecutive
+# empty SWEEPS (EMPTY_SCANS_BEFORE_POWER_CYCLE_HINT) - a community-reported
+# BLHeli/AM32 bootloader quirk where repeated failed connection attempts can
+# "wedge" it until the ESC is power-cycled (see docs/PROTOCOL_NOTES.md,
+# "Known gotchas"). That threshold is wrong here: for THIS tab, "nothing
+# found" is the normal steady state for as long as the operator's hand is
+# elsewhere between ESC swaps, so a 2-tick threshold would nag every couple
+# of seconds during completely ordinary idle waiting - exactly the log-spam
+# discover_one() itself was built to avoid. Only worth a hint once a slot
+# has gone unusually long (~20s) without a single successful probe.
+EMPTY_PROBES_BEFORE_POWER_CYCLE_HINT = 20
 
 PHASE_STYLE = {
     "idle": (BG_PANEL, TEXT_MUTED),
@@ -97,6 +122,7 @@ class HotspotStationController(QObject):
     esc_detail_changed = pyqtSignal(str, str)  # EscState.value, detail text
     counters_changed = pyqtSignal(int, int, int)  # flashed, ok, errors
     armed_changed = pyqtSignal(bool)
+    power_cycle_hint_changed = pyqtSignal(bool)
 
     # Internal-only: reach the private EscManager, which lives on another
     # thread - never call its methods directly, only through these signals.
@@ -133,6 +159,7 @@ class HotspotStationController(QObject):
         self._counter_flashed = 0
         self._counter_ok = 0
         self._counter_errors = 0
+        self._consecutive_not_found = 0
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(POLL_INTERVAL_MS)
@@ -161,6 +188,19 @@ class HotspotStationController(QObject):
         can otherwise easily mistake "still polling" for "stuck"."""
         return self._poll_timer.remainingTime() if self._poll_timer.isActive() else -1
 
+    def poll_interval_ms(self) -> int:
+        return self._poll_timer.interval()
+
+    def set_poll_interval_ms(self, value: int) -> None:
+        """How often to re-check the watched slot (and, while connecting,
+        how often to retry) - safe to call at any time, including while
+        armed: QTimer.setInterval() on an already-running timer restarts
+        its remaining-time countdown from the new value immediately, so
+        poll_timer_remaining_ms() (already re-read every 150ms by the UI's
+        countdown label) picks this up with no extra wiring needed."""
+        clamped = max(MIN_POLL_INTERVAL_MS, min(int(value), MAX_POLL_INTERVAL_MS))
+        self._poll_timer.setInterval(clamped)
+
     def set_port(self, device: Optional[str]) -> None:
         self._port_device = device
 
@@ -179,6 +219,8 @@ class HotspotStationController(QObject):
         self._connect_attempts = 0
         self._connect_in_flight = False
         self._last_esc_state = None
+        self._consecutive_not_found = 0
+        self.power_cycle_hint_changed.emit(False)
         self._set_phase("waiting_device")
         self._poll_timer.start()
 
@@ -282,12 +324,32 @@ class HotspotStationController(QObject):
         if connected:
             self._last_esc_state = None
             self.esc_detail_changed.emit("idle", "")
+            # The poll timer has been running continuously since start() -
+            # it does NOT reset itself when a connection finally completes,
+            # and EscManager.connect()'s own handshake takes a variable
+            # ~2.0-2.1s (POST_PASSTHROUGH_DELAY_S). Without restarting here,
+            # the delay until the FIRST probe of a freshly-connected ESC is
+            # whatever happened to be left on the timer's existing
+            # countdown - observed on real hardware ranging from 0.16s to
+            # 1.6s, uncorrelated with anything the operator did. That makes
+            # the configured poll interval a lie for the one thing it's
+            # actually meant to guarantee: a slow-booting ESC gets AT LEAST
+            # a full interval to settle before it's ever probed. Restarting
+            # here makes that a hard guarantee instead of a coin flip.
+            self._poll_timer.start()
             self._set_phase("watching")
         # A failed attempt just leaves us in "connecting" - the poll timer retries or gives up.
 
     def _on_discovery_finished(self, found: int, expected: int) -> None:
         if not self._armed or self._phase not in WATCH_PHASES:
             return
+        if found == 0:
+            self._consecutive_not_found += 1
+            if self._consecutive_not_found == EMPTY_PROBES_BEFORE_POWER_CYCLE_HINT:
+                self.power_cycle_hint_changed.emit(True)
+        elif self._consecutive_not_found > 0:
+            self._consecutive_not_found = 0
+            self.power_cycle_hint_changed.emit(False)
         was_watching = self._phase == "watching"
         next_phase, should_flash = phase_after_discovery(found, self._last_esc_state)
         if next_phase == "watching":

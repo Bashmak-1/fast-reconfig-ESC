@@ -48,6 +48,10 @@ from .eeprom_config import ConfigFileError, load_config_file
 from .esc_manager import MAX_ESC_COUNT
 from .hotspot_station import (
     MAX_CONNECT_ATTEMPTS,
+    MAX_POLL_INTERVAL_MS,
+    MIN_POLL_INTERVAL_MS,
+    POLL_INTERVAL_MS,
+    POLL_INTERVAL_STEP_MS,
     HotspotStationController,
     PHASE_BANNER_KEY,
     PHASE_STYLE,
@@ -61,6 +65,7 @@ from .theme import ACCENT_AMBER, ACCENT_ERROR, TEXT_MUTED
 _PORT_KEY = "hotspot_line_port"
 _ESC_INDEX_KEY = "hotspot_line_esc_index"
 _CONFIG_PATH_KEY = "hotspot_line_config_path"
+_POLL_INTERVAL_KEY = "hotspot_line_poll_interval_ms"
 
 
 class HotspotLinePage(QWidget):
@@ -71,6 +76,7 @@ class HotspotLinePage(QWidget):
         self._config_path: str = ""
         self._port_busy_checker: Optional[Callable[[str], bool]] = None
         self._last_flashed = 0
+        self._power_cycle_hint_shown = False
 
         self._build_ui()
 
@@ -87,10 +93,12 @@ class HotspotLinePage(QWidget):
         self.controller.esc_detail_changed.connect(self._on_esc_detail_changed)
         self.controller.counters_changed.connect(self._on_counters_changed)
         self.controller.armed_changed.connect(self._on_armed_changed)
+        self.controller.power_cycle_hint_changed.connect(self._on_power_cycle_hint_changed)
 
         i18n.signals.language_changed.connect(self._retranslate)
         self._restore_last_config()
         self._restore_esc_index()
+        self._restore_poll_interval()
         self._retranslate()
 
     # ---- construction ------------------------------------------------
@@ -151,6 +159,29 @@ class HotspotLinePage(QWidget):
         self._countdown_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self._countdown_label)
 
+        # Grouped with the countdown label above (the thing it controls),
+        # not with the port/ESC-index/config row - unlike those, this stays
+        # enabled while armed (see _on_armed_changed): it only touches
+        # QTimer.setInterval(), no protocol/connection-state implication,
+        # so an operator watching a slow-booting ESC struggle can raise it
+        # live without stopping and losing the current watch.
+        poll_interval_row = QHBoxLayout()
+        poll_interval_row.addStretch(1)
+        self._poll_interval_label = QLabel()
+        poll_interval_row.addWidget(self._poll_interval_label)
+        self._poll_interval_stepper = ManualCounterWidget(
+            min_value=MIN_POLL_INTERVAL_MS, max_value=MAX_POLL_INTERVAL_MS, step=POLL_INTERVAL_STEP_MS
+        )
+        self._poll_interval_stepper.value_changed.connect(self._on_poll_interval_changed)
+        poll_interval_row.addWidget(self._poll_interval_stepper)
+        self._poll_interval_unit_label = QLabel()
+        poll_interval_row.addWidget(self._poll_interval_unit_label)
+        self._poll_interval_seconds_label = QLabel()
+        self._poll_interval_seconds_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        poll_interval_row.addWidget(self._poll_interval_seconds_label)
+        poll_interval_row.addStretch(1)
+        root.addLayout(poll_interval_row)
+
         self._retry_btn = QPushButton()
         self._retry_btn.clicked.connect(self.controller.retry)
         self._retry_btn.setVisible(False)
@@ -160,6 +191,12 @@ class HotspotLinePage(QWidget):
         self._detail_label.setStyleSheet(f"color: {TEXT_MUTED};")
         self._detail_label.setWordWrap(True)
         root.addWidget(self._detail_label)
+
+        self._power_cycle_hint_label = QLabel()
+        self._power_cycle_hint_label.setStyleSheet(f"color: {ACCENT_AMBER};")
+        self._power_cycle_hint_label.setWordWrap(True)
+        self._power_cycle_hint_label.setVisible(False)
+        root.addWidget(self._power_cycle_hint_label)
         root.addStretch(1)
 
         counters_row = QHBoxLayout()
@@ -193,6 +230,12 @@ class HotspotLinePage(QWidget):
         self._reset_counters_btn.setText(i18n.tr("hotspot_reset_counters"))
         self._manual_counter_label.setText(i18n.tr("hotspot_manual_counter_label"))
         self._manual_counter.setToolTip(i18n.tr("hotspot_manual_counter_tooltip"))
+        if self._power_cycle_hint_shown:
+            self._power_cycle_hint_label.setText(i18n.tr("hotspot_power_cycle_hint"))
+        self._poll_interval_label.setText(i18n.tr("hotspot_poll_interval_label"))
+        self._poll_interval_unit_label.setText(i18n.tr("hotspot_poll_interval_suffix"))
+        self._poll_interval_stepper.setToolTip(i18n.tr("hotspot_poll_interval_tooltip"))
+        self._update_poll_interval_seconds_label()
         self._update_counters_label()
         self._render_banner()
         self._update_start_stop_button()
@@ -267,6 +310,12 @@ class HotspotLinePage(QWidget):
             self._esc_combo.setCurrentIndex(idx)
         self.controller.set_esc_index(self._selected_esc_index())
 
+    def _restore_poll_interval(self) -> None:
+        value = load_int(_POLL_INTERVAL_KEY, POLL_INTERVAL_MS)
+        self._poll_interval_stepper.set_value(value)
+        self.controller.set_poll_interval_ms(self._poll_interval_stepper.value())
+        self._update_poll_interval_seconds_label()
+
     def _selected_port_device(self) -> Optional[str]:
         data = self._port_combo.currentData()
         return str(data) if data else None
@@ -286,6 +335,17 @@ class HotspotLinePage(QWidget):
         index = self._selected_esc_index()
         self.controller.set_esc_index(index)
         save_int(_ESC_INDEX_KEY, index)
+
+    def _on_poll_interval_changed(self, value: int) -> None:
+        self.controller.set_poll_interval_ms(value)
+        save_int(_POLL_INTERVAL_KEY, value)
+        self._update_poll_interval_seconds_label()
+
+    def _update_poll_interval_seconds_label(self) -> None:
+        seconds = self._poll_interval_stepper.value() / 1000
+        self._poll_interval_seconds_label.setText(
+            i18n.tr("hotspot_poll_interval_seconds_hint", seconds=f"{seconds:.1f}")
+        )
 
     # ---- start/stop ------------------------------------------------
 
@@ -330,17 +390,28 @@ class HotspotLinePage(QWidget):
     def _on_esc_detail_changed(self, state: str, detail: str) -> None:
         self._detail_label.setText(detail)
 
+    def _on_power_cycle_hint_changed(self, show: bool) -> None:
+        self._power_cycle_hint_shown = show
+        self._power_cycle_hint_label.setText(i18n.tr("hotspot_power_cycle_hint") if show else "")
+        self._power_cycle_hint_label.setVisible(show)
+
     def _on_armed_changed(self, armed: bool) -> None:
         self._load_config_btn.setEnabled(not armed)
         self._port_combo.setEnabled(not armed)
         self._refresh_btn.setEnabled(not armed)
         self._esc_combo.setEnabled(not armed)
+        # _poll_interval_stepper is deliberately NOT disabled here - it only
+        # adjusts QTimer.setInterval() (see HotspotStationController.
+        # set_poll_interval_ms), no protocol/connection-state implication,
+        # so it stays live-adjustable even while armed. Don't "fix" this to
+        # match its neighbors above.
         if armed:
             self._countdown_timer.start()
         else:
             self._countdown_timer.stop()
             self._detail_label.setText("")
             self._countdown_label.setText("")
+            self._on_power_cycle_hint_changed(False)
         self._update_start_stop_button()
 
     def _update_countdown(self) -> None:

@@ -384,6 +384,45 @@ exposed it as an adjustable "ESC retries" spinner (1–20) in the UI.
   scans keep returning 0 ESCs found, a power cycle of the FC/ESC often
   clears it. The app now logs a warning hint after 2 consecutive all-empty
   scans (`EMPTY_SCANS_BEFORE_POWER_CYCLE_HINT` in `esc_manager.py`).
+- **2026-08-26 — wire connection order matters, and Хотспот (лінія) never
+  surfaced the existing power-cycle hint for it.** User report: connecting
+  an ESC's signal wire first and power wires last flashes fine; power first
+  then signal "doesn't detect" the ESC. Read the entire last real-hardware
+  session's log (~1400 lines, exclusively the Хотспот (лінія) tab, confirmed
+  by zero "Discovery started" lines - that header is only ever logged by
+  discover_all(), never discover_one()). Found no software bug in the
+  detection/retry loop itself: `discover_one()` polls every ~1s indefinitely
+  while armed and, in every observed streak, eventually found the ESC once
+  both wires were truly connected - one streak ran 84 straight "not found"
+  ticks (84s) and still resolved to "found." Every case that never found
+  anything ended in a manual Disconnect - the operator gave up, the
+  software never did. This lines up with a well-known BLHeli/AM32
+  characteristic (not this app's protocol code): the bootloader-entry
+  handshake the FC performs on `cmd_DeviceInitFlash` only reliably latches
+  right at the ESC's own power-on reset - connect signal first (FC already
+  "listening" when the ESC boots) and it catches the window every time;
+  apply power first (ESC boots straight into app firmware, missing that
+  window) and entry depends on the app firmware's own soft-reentry support,
+  which is exactly the situation the existing "repeated failed attempts can
+  wedge the bootloader" gotcha above describes.
+  **The actual gap:** `esc_manager.py` already has a designed mitigation
+  for precisely this - the `EMPTY_SCANS_BEFORE_POWER_CYCLE_HINT` warning
+  above - but it lives only inside `discover_all()`. It was never ported to
+  `discover_one()` when `hotspot_station.py` was built, so the ONE tab
+  built around exactly this single-ESC hot-plug workflow never showed it,
+  even during an 84-second silent stall. Fixed by adding the equivalent
+  counter directly in `HotspotStationController._on_discovery_finished`
+  (not in `EscManager.discover_one()` itself - this is watch-state that
+  belongs to the controller, same reasoning as `_last_esc_state`), with a
+  MUCH higher, single-slot-appropriate threshold
+  (`EMPTY_PROBES_BEFORE_POWER_CYCLE_HINT=20`, vs. discover_all's 2) - a
+  low threshold here would nag every couple of seconds during completely
+  normal idle waiting between ESC swaps, the exact log-spam `discover_one()`
+  was built to avoid in the first place. Fires once per stall (edge-
+  triggered on `==`, not `>=`, so it doesn't repeat every tick), clears the
+  moment the ESC is found again or the tab is disarmed. New
+  `power_cycle_hint_changed(bool)` signal → a small amber
+  `_power_cycle_hint_label` under `HotspotLinePage`'s `_detail_label`.
 - **CP210x USB driver** (separately investigated earlier in this project,
   `C:\Users\Comp\Downloads\CP210x_Windows_Drivers`) is Silicon Labs' official,
   WHQL-signed VCP driver — legitimate, but per the am32-configurator source
@@ -617,6 +656,47 @@ exposed it as an adjustable "ESC retries" spinner (1–20) in the UI.
   `flashed` actually went up - an `ok`/`errors`-only update never touches
   it. The existing "Скинути" button resets this counter to 0 alongside the
   diagnostic ones.
+- **2026-09-09 — made the "Хотспот (лінія)" poll interval user-adjustable,
+  and fixed a latent timing bug found while investigating it.** User report:
+  some ESCs finish booting and respond within ~1s, but one specific ESC
+  needs ~3s - needed a way to give it more settle time, adjustable in both
+  seconds and milliseconds with a 100ms step. New `HotspotStationController.
+  poll_interval_ms()`/`set_poll_interval_ms(value)` (clamped to
+  `[MIN_POLL_INTERVAL_MS=1000, MAX_POLL_INTERVAL_MS=10_000]`), exposed via
+  a new `ManualCounterWidget` instance (generalized with optional
+  `min_value`/`max_value`/`step` kwargs, fully backward-compatible with the
+  existing "total reworked" tally use case) in a new row under
+  `HotspotLinePage`'s countdown label, persisted as
+  `hotspot_line_poll_interval_ms`. Stays enabled while armed (unlike the
+  port/ESC-index/config pickers) since it only touches `QTimer.
+  setInterval()`, no protocol-state implication. `MIN=1000` rather than
+  lower: the same timer paces connect-retry cadence too, and
+  `EscManager.discover_one()`'s own probe can take up to ~0.9s worst case
+  - going lower wouldn't poll faster, just backlog queued probes on the
+  worker thread.
+  While investigating, found the adjustable interval alone wouldn't have
+  reliably delivered what was asked: reading the currently-running `.exe`'s
+  log (session starting 2026-09-09 10:55) showed the delay between
+  "Підключено" and the FIRST ESC probe ranging from **0.162s to 1.63s**
+  across 12 real connects, with no correlation to how long the tab had
+  been stopped beforehand (the 0.162s case followed the *longest*
+  stop-to-start gap in the whole session, 68.5s - ruling out a simple
+  "quick restart" theory the user initially suspected). Root cause: this
+  is the same family of bug as the 2026-08-24 in-flight-connect race above
+  - `_poll_timer` starts once in `start()` and is never reset, while
+  `EscManager.connect()`'s handshake takes a variable ~2.0-2.1s
+  (`POST_PASSTHROUGH_DELAY_S`), so the first probe after a connection
+  completes fires whenever the timer's pre-existing, unrelated countdown
+  happens to expire - anywhere from near-0 to a full interval later, by
+  pure chance. Fixed by calling `self._poll_timer.start()` in
+  `_on_connection_state_changed` at the exact `connecting -> watching`
+  transition (once per connection, not every tick) - the configured
+  interval is now a guaranteed minimum settle time after connecting, not a
+  coin flip. `hotspot_widget.py` almost certainly has the same latent gap
+  (identical timer architecture) but was deliberately left unfixed here -
+  the user's request was scoped to "Хотспот (лінія)" only ("у хот спота на
+  1 порт"), and the two tabs share no state-machine code by long-standing
+  convention (see the 2026-08-26 entries above).
 
 ## Module map
 
@@ -642,7 +722,7 @@ src/fast_reconfig_esc/
     esc_status_widget.py      Main tab's per-ESC status card
     config_editor_widget.py   Config tab: generic form built from eeprom_fields.FIELD_SPECS, in-memory working buffer, load/read/save/apply
     esc_comparison_widget.py  Config tab: compact per-ESC comparison table, fed by the same esc_status_changed stream as the Main tab
-    manual_counter_widget.py  ManualCounterWidget: reusable [-]/edit/[+] operator-editable counter (0-100_000, digits only), used by both Хотспот tabs' "total reworked" tally
+    manual_counter_widget.py  ManualCounterWidget: reusable [-]/edit/[+] clamped-integer stepper (configurable min/max/step), used for both Хотспот tabs' "total reworked" tally (0-100_000 step 1) and Хотспот (лінія)'s poll-interval control (1000-10_000ms step 100)
     hotspot_widget.py         Хотспот tab: hands-off hot-plug flashing station that sweeps EVERY ESC output the FC reports (discover_all), port-presence poll + state machine on top of the shared EscManager (this connection is exclusive with Main/Config)
     hotspot_station.py        HotspotStationController: a DIFFERENT state machine that watches exactly ONE operator-chosen ESC output (discover_one), widget-free, owning its OWN private ConnectionWorker/EscManager/thread - used only by hotspot_line_widget.py, not hotspot_widget.py
     hotspot_line_widget.py    Хотспот (лінія) tab: a second, independent tab with its own watch-one-ESC-slot workflow, driven by its own private HotspotStationController (own port, own ESC slot, own connection, own config - no mutual exclusion needed with any other tab)
@@ -653,7 +733,7 @@ tests/
     test_esc_manager.py      mocked-hardware orchestration/fallback/decoding tests
     test_file_logger.py       confirms detailed traces actually land in the log file
     test_hotspot_station.py   phase_after_discovery/phase_after_flash - the decision logic hotspot_station.py's watch-one-ESC-slot loop is built on (Хотспот (лінія) only, not hotspot_widget.py)
-    test_manual_counter_widget.py  clamp_counter bound checks (0..100_000) for the operator-editable counter
+    test_manual_counter_widget.py  clamp_counter bound checks - default (0..100_000) and custom bounds (poll-interval range)
 ```
 
 ## Next steps
