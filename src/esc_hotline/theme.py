@@ -52,6 +52,35 @@ QComboBox, QLineEdit, QPlainTextEdit {{
     border-radius: 4px;
     padding: 4px 6px;
 }}
+QTabWidget::pane {{
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    background-color: {BG_MAIN};
+    top: -1px;
+}}
+QTabBar::tab {{
+    background-color: {BG_PANEL};
+    color: {TEXT_MUTED};
+    border: 1px solid {BORDER};
+    border-bottom: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    padding: 8px 16px;
+    margin-right: 2px;
+}}
+QTabBar::tab:selected {{
+    background-color: {BG_MAIN};
+    color: {TEXT_MAIN};
+    font-weight: 600;
+    border-color: {ACCENT_RED};
+}}
+QTabBar::tab:!selected:hover {{
+    color: {TEXT_MAIN};
+    border-color: {ACCENT_RED_HOVER};
+}}
+QTabBar::tab:disabled {{
+    color: {TEXT_MUTED};
+}}
 QCheckBox {{
     spacing: 6px;
 }}
