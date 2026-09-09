@@ -5,7 +5,7 @@ tab's HotspotStationController. Not used by hotspot_widget.py (the original
 """
 from __future__ import annotations
 
-from fast_reconfig_esc.hotspot_station import phase_after_discovery, phase_after_flash
+from esc_hotline.hotspot_station import phase_after_discovery, phase_after_flash
 
 
 def test_not_found_goes_to_watching_regardless_of_last_state():

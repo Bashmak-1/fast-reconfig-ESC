@@ -1,7 +1,7 @@
-"""Build a standalone AM32Flasher.exe with PyInstaller.
+"""Build a standalone EscHotline.exe with PyInstaller.
 
 Usage: .venv\\Scripts\\python.exe scripts\\build_exe.py
-Output: dist\\AM32Flasher.exe (single file, no console window)
+Output: dist\\EscHotline.exe (single file, no console window)
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def main() -> int:
         "--onefile",
         "--windowed",
         "--name",
-        "AM32Flasher",
+        "EscHotline",
         "--paths",
         str(ROOT / "src"),
         "--distpath",

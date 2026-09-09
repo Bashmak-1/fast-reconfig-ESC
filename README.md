@@ -1,9 +1,9 @@
-# AM32 Мульти-ESC Прошивальник
+# EscHotline
 
-Офлайн-програма для читання, перевірки й запису конфігу (налаштувань) на
-AM32-ESC — заміна сайту [am32.ca/configurator](https://am32.ca/configurator)
-для тих випадків, коли потрібно прошивати багато ESC швидко, офлайн, без
-залежності від стороннього сайту й браузера.
+Офлайн-прошивальник AM32-ESC через MSP + FourWay — той самий протокол,
+яким користується [am32.ca/configurator](https://am32.ca/configurator),
+тільки офлайн і без браузера, для тих випадків, коли потрібно прошивати
+багато ESC швидко.
 
 ## Навіщо цей проєкт
 
@@ -26,7 +26,7 @@ AM32-ESC — заміна сайту [am32.ca/configurator](https://am32.ca/conf
   "стрельнув і забув";
 - одна несправна ESC не зупиняє прошивку решти (ізоляція помилок по кожній
   ESC окремо);
-- веде детальний технічний лог-файл (`~/.fast_reconfig_esc/logs/`), щоб
+- веде детальний технічний лог-файл (`~/.esc_hotline/logs/`), щоб
   можна було розібратись у незрозумілій ситуації заднім числом.
 
 ## Що вміє
@@ -60,14 +60,14 @@ AM32-ESC — заміна сайту [am32.ca/configurator](https://am32.ca/conf
 
 Два способи, обидва без встановлення Python:
 
-- **`dist/AM32Flasher.exe`** — один файл, зібраний через PyInstaller
+- **`dist/EscHotline.exe`** — один файл, зібраний через PyInstaller
   ([scripts/build_exe.py](scripts/build_exe.py), або одним подвійним
   кліком через [scripts/build_exe.bat](scripts/build_exe.bat)). Може
   блокуватись Smart App Control на Windows 11 як неопідписаний файл —
   деталі в [docs/PROTOCOL_NOTES.md](docs/PROTOCOL_NOTES.md). Сам файл
   `.exe` не зберігається в цьому репозиторії — його потрібно зібрати
   самостійно одним зі скриптів вище.
-- **[scripts/run_dev.bat](scripts/run_dev.bat)** (або ярлик "AM32 Flasher
+- **[scripts/run_dev.bat](scripts/run_dev.bat)** (або ярлик "EscHotline
   (з коду)" на робочому столі) — запускає напряму з коду через віртуальне
   середовище (`.venv`), без консольного вікна. Потрібен вже налаштований
   `.venv` — дивись [requirements.txt](requirements.txt) /
@@ -83,7 +83,7 @@ AM32-ESC — заміна сайту [am32.ca/configurator](https://am32.ca/conf
 
 ## Структура репозиторію
 
-- [`src/fast_reconfig_esc/`](src/fast_reconfig_esc) — увесь код програми.
+- [`src/esc_hotline/`](src/esc_hotline) — увесь код програми.
 - [`tests/`](tests) — pytest-набір (89 тестів).
 - [`scripts/`](scripts) — запуск з коду й збірка `.exe`
   (`run.py`, `run_dev.bat`, `build_exe.py`, `build_exe.bat`).

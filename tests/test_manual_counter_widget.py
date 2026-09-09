@@ -5,7 +5,7 @@ poll-interval stepper.
 """
 from __future__ import annotations
 
-from fast_reconfig_esc.manual_counter_widget import MAX_VALUE, MIN_VALUE, clamp_counter
+from esc_hotline.manual_counter_widget import MAX_VALUE, MIN_VALUE, clamp_counter
 
 
 def test_in_range_value_passes_through():

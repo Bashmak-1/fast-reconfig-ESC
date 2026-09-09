@@ -138,7 +138,7 @@ class MainWindow(QMainWindow):
         bar.setObjectName("topBar")
         layout = QHBoxLayout(bar)
 
-        logo = QLabel("AM32 FLASHER")
+        logo = QLabel("ESC HOTLINE")
         logo.setStyleSheet("font-weight: 700; font-size: 15px; color: #c0392b;")
         layout.addWidget(logo)
         layout.addStretch(1)

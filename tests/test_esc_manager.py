@@ -9,11 +9,11 @@ from __future__ import annotations
 import pytest
 from PyQt6.QtWidgets import QApplication
 
-from fast_reconfig_esc import esc_manager as esc_manager_module
-from fast_reconfig_esc.eeprom_layout import FILENAME_BLOCK_SIZE
-from fast_reconfig_esc.fourway import DeviceInfo, FourWayAckError, FourWayAck
-from fast_reconfig_esc.i18n import tr
-from fast_reconfig_esc.mcu_profiles import LAYOUT_SIZE
+from esc_hotline import esc_manager as esc_manager_module
+from esc_hotline.eeprom_layout import FILENAME_BLOCK_SIZE
+from esc_hotline.fourway import DeviceInfo, FourWayAckError, FourWayAck
+from esc_hotline.i18n import tr
+from esc_hotline.mcu_profiles import LAYOUT_SIZE
 
 
 @pytest.fixture(scope="module", autouse=True)

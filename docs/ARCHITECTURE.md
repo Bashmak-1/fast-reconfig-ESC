@@ -398,7 +398,7 @@ FourWay/MSP отримує власний бюджет часу, тому оди
 **Навіщо:** зберегти шлях до останнього обраного файлу конфігу між
 запусками — щоб не шукати файл щоразу.
 **Що робить:** `.ini`-файл через `QSettings` у
-`~/.fast_reconfig_esc/settings.ini` (**не** реєстр Windows).
+`~/.esc_hotline/settings.ini` (**не** реєстр Windows).
 **Остерігатись:** якщо колись правитимеш цей файл вручну (не через
 `save_last_config_path`) — `QSettings`-формат сам екранує зворотні
 похилі риски (`\` → `\\`); ручне редагування з неправильним
@@ -410,7 +410,7 @@ FourWay/MSP отримує власний бюджет часу, тому оди
 — щоб можна було розібратись, якщо щось незрозуміле сталось, вже після
 факту.
 **Що робить:** `RotatingFileHandler` (5 файлів по 5МБ) у
-`~/.fast_reconfig_esc/logs/fast_reconfig_esc.log`. `get_logger()` —
+`~/.esc_hotline/logs/esc_hotline.log`. `get_logger()` —
 singleton. `hex_dump(bytes) -> str`.
 **Остерігатись:** у цей файл пишеться **набагато більше**, ніж у
 панель GUI (сирі MSP-payload, повні hex-дампи конфігу до/після запису,
@@ -858,7 +858,7 @@ max_value=MAX_POLL_INTERVAL_MS, step=POLL_INTERVAL_STEP_MS` з
 `scripts/run_dev.bat`.
 
 #### `scripts/build_exe.py`
-**Навіщо:** збирає `dist/AM32Flasher.exe` через PyInstaller
+**Навіщо:** збирає `dist/EscHotline.exe` через PyInstaller
 (`--onefile --windowed`). Прогнати після будь-яких змін коду, щоб
 отримати свіжий `.exe`.
 **Остерігатись:** Windows Smart App Control може заблокувати
@@ -911,7 +911,7 @@ Smart App Control.
     назвами на кшталт ідентифікаторів коду (ймовірно, побічний ефект
     іншого інструменту/IDE, що теж працює в цій же теці) — перевіряй
     `git status` і прибирай їх перед комітом.
-14. **Ніколи не редагуй `~/.fast_reconfig_esc/settings.ini` вручну** —
+14. **Ніколи не редагуй `~/.esc_hotline/settings.ini` вручну** —
     формат екранування `QSettings` не той, що здається інтуїтивним;
     прав лише через `settings_store.save_last_config_path`.
 15. **Хотспот-поллінг (`_on_poll_tick` в обох вкладках) мусить чекати,

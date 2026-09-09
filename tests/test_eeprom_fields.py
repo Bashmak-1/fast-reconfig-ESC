@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from fast_reconfig_esc.eeprom_fields import (
+from esc_hotline.eeprom_fields import (
     FIELD_SPECS,
     applicable_specs,
     decode_field,

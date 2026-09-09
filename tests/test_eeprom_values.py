@@ -5,7 +5,7 @@ docs/PROTOCOL_NOTES.md and eeprom_values.py's module docstring.
 """
 from __future__ import annotations
 
-from fast_reconfig_esc.eeprom_values import decode_settings
+from esc_hotline.eeprom_values import decode_settings
 
 # Real bytes read back from a live ESC (ARM64K, 12S33mV, fw 2.16, eeprom v1).
 REAL_SETTINGS_HEX = (

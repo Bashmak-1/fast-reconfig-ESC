@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from fast_reconfig_esc.eeprom_config import ConfigFileError, load_config_file
-from fast_reconfig_esc.fourway import (
+from esc_hotline.eeprom_config import ConfigFileError, load_config_file
+from esc_hotline.fourway import (
     DEVICE_START_BYTE,
     FourWayAck,
     FourWayCommand,
@@ -19,8 +19,8 @@ from fast_reconfig_esc.fourway import (
     make_frame,
     parse_frame,
 )
-from fast_reconfig_esc.mcu_profiles import LAYOUT_SIZE
-from fast_reconfig_esc.msp import crc8_dvb_s2, encode_msp_v1
+from esc_hotline.mcu_profiles import LAYOUT_SIZE
+from esc_hotline.msp import crc8_dvb_s2, encode_msp_v1
 
 
 CHECK_VECTOR = b"123456789"

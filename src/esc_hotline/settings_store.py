@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QSettings
 
-SETTINGS_DIR = Path.home() / ".fast_reconfig_esc"
+SETTINGS_DIR = Path.home() / ".esc_hotline"
 SETTINGS_FILE = SETTINGS_DIR / "settings.ini"
 
 _LAST_CONFIG_PATH_KEY = "last_config_path"

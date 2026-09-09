@@ -29,7 +29,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo Building AM32Flasher.exe ...
+echo Building EscHotline.exe ...
 echo.
 "%PYTHON%" "%BUILD_PY%"
 if errorlevel 1 (
@@ -40,5 +40,5 @@ if errorlevel 1 (
 )
 
 echo.
-echo Done: %SCRIPT_DIR%..\dist\AM32Flasher.exe
+echo Done: %SCRIPT_DIR%..\dist\EscHotline.exe
 pause

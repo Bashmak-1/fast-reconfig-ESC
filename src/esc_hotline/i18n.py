@@ -15,7 +15,7 @@ LANGUAGES: list[tuple[str, str, str, str]] = [
 ]
 
 _TRANSLATIONS: dict[str, dict[str, str]] = {
-    "window_title": {"en": "AM32 Multi-ESC Flasher", "uk": "AM32 Мульти-ESC Прошивальник"},
+    "window_title": {"en": "EscHotline — AM32-ESC Flasher", "uk": "EscHotline — прошивальник AM32-ESC"},
     "port_label": {"en": "Port:", "uk": "Порт:"},
     "baud_label": {"en": "Baud:", "uk": "Бод:"},
     "connect": {"en": "Connect", "uk": "Підключити"},

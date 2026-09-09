@@ -10,7 +10,7 @@ Every user-visible log line also goes to the persistent technical log file
 payloads, full hex dumps of settings before/after a write) that would be
 too noisy for the GUI panel but is exactly what you want when something
 confusing happens and you need to reconstruct what actually went over the
-wire - see `~/.fast_reconfig_esc/logs/fast_reconfig_esc.log`.
+wire - see `~/.esc_hotline/logs/esc_hotline.log`.
 """
 from __future__ import annotations
 

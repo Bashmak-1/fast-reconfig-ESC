@@ -1,9 +1,10 @@
-# AM32 Multi-ESC Flasher — Project Notes
+# EscHotline — Project Notes
 
-Working notes for `fast-reconfig-ESC`: an offline Python/PyQt6 replacement for
-`am32.ca/configurator`, so ESC flashing/config doesn't depend on that
-third-party website. Kept here so decisions and protocol facts don't have to
-be re-derived from scratch later.
+Working notes for `EscHotline`: an offline Python/PyQt6 tool for flashing
+AM32 ESC firmware/config, built on the AM32/BLHeli MSP + FourWay protocol,
+replacing the workflow at `am32.ca/configurator` so ESC flashing/config
+doesn't depend on that third-party website. Kept here so decisions and
+protocol facts don't have to be re-derived from scratch later.
 
 ## Status
 
@@ -54,9 +55,9 @@ be re-derived from scratch later.
   `Firmware: ESCV_12S33mV v2.16` for real responding ESCs (that session was
   against the reference site, not yet against this tool with a live ESC).
 - Last-used config file path now persists across restarts, in a real `.ini`
-  file (`~/.fast_reconfig_esc/settings.ini`, `settings_store.py`) — not the
+  file (`~/.esc_hotline/settings.ini`, `settings_store.py`) — not the
   registry, not inside the git-tracked project directory.
-- Persistent technical log file (`~/.fast_reconfig_esc/logs/fast_reconfig_esc.log`,
+- Persistent technical log file (`~/.esc_hotline/logs/esc_hotline.log`,
   `file_logger.py`, rotating 5×5MB): every MSP response value, full hex
   dumps of each ESC's settings before/after a write, per-ESC identity
   breakdown - a superset of what the GUI panel shows, for after-the-fact
@@ -165,16 +166,16 @@ be re-derived from scratch later.
   `decode_field`/`encode_field` already being shared.
 - **Standalone `.exe` build (2026-08-24)** — `scripts/build_exe.py` runs
   PyInstaller (`--onefile --windowed`, pinned in `requirements-dev.txt`) and
-  produces `dist/AM32Flasher.exe`, a single ~38MB file with PyQt6/pyserial
+  produces `dist/EscHotline.exe`, a single ~38MB file with PyQt6/pyserial
   bundled in - no Python install needed to run it. Build with:
   `.venv\Scripts\python.exe scripts\build_exe.py`. `build/` and `dist/` are
   gitignored (regenerated output, not source); rerun the build script after
   any code change to get a fresh exe. Verified: launches standalone, window/
   Cyrillic text/COM-port list/persistent config path/log file path all
-  render exactly like running from source - `~/.fast_reconfig_esc/` (config
+  render exactly like running from source - `~/.esc_hotline/` (config
   path + log file) lives outside the exe/install location either way, so
   packaging doesn't change where state is kept. A desktop shortcut
-  ("AM32 Flasher.lnk") points at `dist\AM32Flasher.exe` for double-click
+  ("EscHotline.lnk") points at `dist\EscHotline.exe` for double-click
   launch.
   - **Known gotcha - Windows Smart App Control can block it outright**:
     confirmed on this machine (`VerifiedAndReputablePolicyState=1` in
@@ -268,6 +269,18 @@ be re-derived from scratch later.
     thing that still triggers an actual disconnect is the FC's own USB
     link genuinely disappearing from `list_fc_ports()` - a real, if rare,
     event distinct from an ESC wire changing.
+
+- **Renamed the project (2026-09-09):** `fast-reconfig-ESC` / the
+  `fast_reconfig_esc` Python package → `EscHotline` / `esc_hotline`, chosen
+  to echo the app's own "Хотспот"/"Хотспот (лінія)" tab terminology now
+  that this is being published as its own tool rather than staying an
+  unnamed internal AM32 utility. AM32 remains the protocol this is built
+  on (MSP + FourWay, same wire format am32.ca/configurator uses) - it's
+  just no longer the product's own name. User data folder moved
+  `~/.fast_reconfig_esc/` → `~/.esc_hotline/` (clean break, no migration -
+  the old settings.ini/logs are just a few small remembered fields, not
+  worth migration code for a fresh public launch). Built exe renamed
+  `AM32Flasher.exe` → `EscHotline.exe`.
 
 **Explicitly out of scope for now:** full `.hex` firmware flashing (only the
 184-byte EEPROM/settings block is read/written); editing `STARTUP_MELODY`/
@@ -458,7 +471,7 @@ exposed it as an adjustable "ESC retries" spinner (1–20) in the UI.
   since-replaced multi-station prototype of the second Хотспот tab: an
   offscreen test script had (accidentally, as a test side effect) persisted
   an unusually long scratchpad path as the "last-used config" in
-  `~/.fast_reconfig_esc/settings.ini`. Both `hotspot_widget.py`'s and the
+  `~/.esc_hotline/settings.ini`. Both `hotspot_widget.py`'s and the
   second tab's (now `hotspot_line_widget.py`) config-path labels used
   `top.addWidget(self._config_label, 1)` with no wrap/width limit —
   `QLabel.sizeHint()` reports its *unwrapped* single-line width even with
@@ -560,8 +573,8 @@ exposed it as an adjustable "ESC retries" spinner (1–20) in the UI.
   multiple places that merely look similar.
 - **2026-08-26 — two Хотспот tabs armed on the same physical port can make
   the winning side's own ESC probes fail too, not just the loser.**
-  Diagnosed from a real hardware log (`~/.fast_reconfig_esc/logs/
-  fast_reconfig_esc.log`, session starting 11:24:40): the user ran
+  Diagnosed from a real hardware log (`~/.esc_hotline/logs/
+  esc_hotline.log`, session starting 11:24:40): the user ran
   "Хотспот" (full-sweep), successfully found and flashed the ESC on output
   #1 three times in a row, then switched to "Хотспот (лінія)" (watching
   slot #1) without stopping "Хотспот" first. The log shows the tell:
@@ -701,7 +714,7 @@ exposed it as an adjustable "ESC retries" spinner (1–20) in the UI.
 ## Module map
 
 ```
-src/fast_reconfig_esc/
+src/esc_hotline/
     msp.py                MSP v1/v2 framing, CRC8-DVB-S2
     fourway.py             FourWay framing, CRC16-XMODEM, FourWayClient
     mcu_profiles.py         MCU signature -> eeprom_offset table
@@ -710,8 +723,8 @@ src/fast_reconfig_esc/
     eeprom_values.py          decode_settings(): thin log/summary formatter built on eeprom_fields.py
     serial_transport.py     pyserial wrapper, FC-port VID hinting
     eeprom_config.py        184-byte config file load/validate
-    settings_store.py       persistent app settings (~/.fast_reconfig_esc/settings.ini)
-    file_logger.py           persistent technical log file (~/.fast_reconfig_esc/logs/)
+    settings_store.py       persistent app settings (~/.esc_hotline/settings.ini)
+    file_logger.py           persistent technical log file (~/.esc_hotline/logs/)
     models.py               EscState enum, ProbeResult, EscInfo (incl. raw settings bytes for "Read from ESC")
     esc_manager.py           discovery/flash orchestration; flash_all (file) + flash_bytes (buffer) share one per-ESC loop
     connection_worker.py     QThread hosting EscManager

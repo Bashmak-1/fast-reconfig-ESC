@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 from PyQt6.QtWidgets import QApplication
 
-from fast_reconfig_esc.file_logger import LOG_FILE
+from esc_hotline.file_logger import LOG_FILE
 from test_esc_manager import _make_manager_with_fake, _settings_bytes
 
 

@@ -15,8 +15,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
-LOG_DIR = Path.home() / ".fast_reconfig_esc" / "logs"
-LOG_FILE = LOG_DIR / "fast_reconfig_esc.log"
+LOG_DIR = Path.home() / ".esc_hotline" / "logs"
+LOG_FILE = LOG_DIR / "esc_hotline.log"
 
 _LEVEL_MAP = {
     "info": logging.INFO,
@@ -34,7 +34,7 @@ def get_logger() -> logging.Logger:
         return _logger
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("fast_reconfig_esc")
+    logger = logging.getLogger("esc_hotline")
     logger.setLevel(logging.DEBUG)
 
     if not logger.handlers:
