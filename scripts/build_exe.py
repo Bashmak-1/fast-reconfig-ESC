@@ -30,6 +30,9 @@ def main() -> int:
         "--specpath",
         str(ROOT / "build"),
         "--noconfirm",
+        "--noupx",
+        "--version-file",
+        str(ROOT / "scripts" / "version_info.txt"),
         str(ROOT / "scripts" / "run.py"),
     ]
     return subprocess.call(args, cwd=ROOT)
