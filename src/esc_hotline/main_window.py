@@ -39,6 +39,7 @@ from .file_logger import LOG_FILE
 from .flag_icons import FLAG_ICON_BUILDERS
 from .hotspot_line_widget import HotspotLinePage
 from .hotspot_widget import HotspotFlashPage
+from .motor_test_widget import MotorTestPage
 from .serial_transport import list_fc_ports
 from .settings_store import load_last_config_path, save_last_config_path
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
@@ -101,6 +102,11 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._build_config_tab(), "")
         self._tabs.addTab(self._build_hotspot_tab(), "")
         self._tabs.addTab(self._build_hotspot_line_tab(), "")
+        # Not retranslated in _retranslate_ui like the other four tab titles -
+        # this tab's strings are plain Ukrainian literals throughout (see
+        # motor_test_widget.py's own docstring), matching the same
+        # not-worth-i18n-upkeep call made for the (separate, shelved) UID Lab tab.
+        self._tabs.addTab(self._build_motor_test_tab(), "Прогон мотором")
         root.addWidget(self._tabs, 1)
 
         root.addWidget(self._build_log_panel())
@@ -132,6 +138,10 @@ class MainWindow(QMainWindow):
     def _build_hotspot_line_tab(self) -> QWidget:
         self.hotspot_line_page = HotspotLinePage()
         return self.hotspot_line_page
+
+    def _build_motor_test_tab(self) -> QWidget:
+        self.motor_test_page = MotorTestPage()
+        return self.motor_test_page
 
     def _build_top_bar(self) -> QFrame:
         bar = QFrame()
@@ -273,6 +283,16 @@ class MainWindow(QMainWindow):
         self.hotspot_line_page.set_port_busy_checker(self._is_port_busy_for_hotspot_line)
         self.hotspot_page.armed_changed.connect(lambda *_: self.hotspot_line_page.recheck_availability())
         self.hotspot_line_page.controller.armed_changed.connect(lambda *_: self.hotspot_page.recheck_availability())
+
+        # motor_test_page (MotorTestPage) is likewise NOT wired into the
+        # shared request_*/EscManager signals - own private plain-MSP
+        # connection, see its own docstring. Same cross-tab port-collision
+        # guard as the two Хотспот tabs (real-hardware-confirmed risk).
+        self.motor_test_page.set_port_busy_checker(self._is_port_busy_for_motor_test)
+        self.motor_test_page.connection_changed.connect(lambda *_: self.hotspot_page.recheck_availability())
+        self.motor_test_page.connection_changed.connect(lambda *_: self.hotspot_line_page.recheck_availability())
+        self.hotspot_page.armed_changed.connect(lambda *_: self.motor_test_page.recheck_availability())
+        self.hotspot_line_page.controller.armed_changed.connect(lambda *_: self.motor_test_page.recheck_availability())
 
     # ---- i18n ------------------------------------------------
 
@@ -507,10 +527,23 @@ class MainWindow(QMainWindow):
             return True
         if self._connected and not self._hotspot_armed and self._port_combo.currentData() == port:
             return True
+        if self.motor_test_page.connected_port() == port:
+            return True
         return False
 
     def _is_port_busy_for_hotspot_line(self, port: str) -> bool:
         if self._hotspot_armed and self.hotspot_page._selected_port_device() == port:
+            return True
+        if self._connected and not self._hotspot_armed and self._port_combo.currentData() == port:
+            return True
+        if self.motor_test_page.connected_port() == port:
+            return True
+        return False
+
+    def _is_port_busy_for_motor_test(self, port: str) -> bool:
+        if self._hotspot_armed and self.hotspot_page._selected_port_device() == port:
+            return True
+        if self.hotspot_line_page.controller.armed and self.hotspot_line_page._selected_port_device() == port:
             return True
         if self._connected and not self._hotspot_armed and self._port_combo.currentData() == port:
             return True
@@ -542,4 +575,5 @@ class MainWindow(QMainWindow):
             self.esc_manager.disconnect()
         self.worker.stop()
         self.hotspot_line_page.shutdown()
+        self.motor_test_page.shutdown()
         super().closeEvent(event)

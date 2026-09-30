@@ -19,9 +19,27 @@ from .serial_transport import SerialTransport, remaining_time
 class MspCommand(IntEnum):
     MSP_API_VERSION = 1
     MSP_FC_VARIANT = 2
+    MSP_STATUS_EX = 150  # armingFlags (u16) at payload offset 13 - deprecated since INAV 9.1 (MSP2_INAV_STATUS
+    # is the replacement) but not yet removed; kept for compatibility with both INAV 7.1.1 and 9.x.
     MSP_BATTERY_STATE = 130
     MSP_MOTOR = 104
+    MSP_SET_MOTOR = 214  # in message - 8x uint16 LE motor override values, live only while FC is disarmed
+    # (writes fc_msp.c's motor_disarmed[], which mixer.c only honours when isDisarmed - verified against
+    # iNavFlight/inav src/main/fc/fc_msp.c and src/main/flight/mixer.c, not guessed)
     MSP_SET_PASSTHROUGH = 245  # 0xF5 - send with an EMPTY payload (legacy ESC_4WAY trigger)
+    MSP_ADVANCED_CONFIG = 90  # read - u8 motorPwmProtocol at payload offset 3 (index into
+    # motor_ramp.MOTOR_PROTOCOLS), u16 LE motorPwmRate @4-5, u16 LE servoPwmRate @6-7. Bytes 0-2 and 8 are
+    # fixed placeholder values INAV sends for Betaflight-configurator compatibility, not real state
+    # (src/main/fc/fc_msp.c `case MSP_ADVANCED_CONFIG`).
+    MSP_SET_ADVANCED_CONFIG = 91  # write - identical 9-byte layout; the FC reads-and-discards bytes 0-2 and
+    # 8, so motorPwmRate/servoPwmRate MUST be echoed back from a prior MSP_ADVANCED_CONFIG read or they get
+    # silently overwritten (`case MSP_SET_ADVANCED_CONFIG: if (dataSize == 9) { ... }`).
+    MSP_EEPROM_WRITE = 250  # write, empty payload - persists in-RAM config to EEPROM. FC replies with an
+    # MSP error ($M!) instead of ACK if it's currently ARMED (`if (!ARMING_FLAG(ARMED)) { writeEEPROM(); ...
+    # } else return MSP_RESULT_ERROR`).
+    MSP_REBOOT = 68  # write, empty payload = normal reboot (nonzero payload byte = DFU mode, not used here).
+    # FC sends its ACK first, then reboots as a post-process step - expect the serial connection to die right
+    # after. Also replies $M! instead of ACK if ARMED, same guard as MSP_EEPROM_WRITE.
 
 
 @dataclass

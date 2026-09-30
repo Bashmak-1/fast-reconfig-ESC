@@ -145,4 +145,50 @@ QSlider::handle:horizontal:hover {{
 QSlider:disabled::sub-page:horizontal, QSlider:disabled::handle:horizontal {{
     background: {TEXT_MUTED};
 }}
+QSlider::groove:vertical {{
+    width: 4px;
+    background: transparent;
+    border-radius: 2px;
+}}
+QSlider::sub-page:vertical {{
+    background: {ACCENT_RED};
+    border-radius: 2px;
+    margin: 0px;
+}}
+QSlider::add-page:vertical {{
+    background: {BORDER};
+    border-radius: 2px;
+    margin: 0px;
+}}
+QSlider::handle:vertical {{
+    background: {ACCENT_RED};
+    border: 2px solid {BG_MAIN};
+    width: 14px;
+    height: 14px;
+    margin: 0px -6px;
+    border-radius: 8px;
+}}
+QSlider::handle:vertical:hover {{
+    background: {ACCENT_RED_HOVER};
+}}
+QSlider:disabled::sub-page:vertical, QSlider:disabled::handle:vertical {{
+    background: {TEXT_MUTED};
+}}
+QSlider#motorFader {{
+    min-height: 0px;
+    max-height: 16777215px;
+    min-width: 0px;
+    max-width: 16777215px;
+}}
+QProgressBar {{
+    background-color: {BG_MAIN};
+    border: 1px solid {BORDER};
+    border-radius: 4px;
+    text-align: center;
+    color: {TEXT_MAIN};
+}}
+QProgressBar::chunk {{
+    background-color: {ACCENT_RED};
+    border-radius: 3px;
+}}
 """
