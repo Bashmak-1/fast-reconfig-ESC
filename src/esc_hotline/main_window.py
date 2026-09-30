@@ -42,6 +42,7 @@ from .hotspot_widget import HotspotFlashPage
 from .serial_transport import list_fc_ports
 from .settings_store import load_last_config_path, save_last_config_path
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
+from .uid_lab_widget import UidLabPage
 
 BAUD_RATES = [1000000, 500000, 256000, 115200, 57600, 38400, 19200, 14400, 9600]
 GRID_COLUMNS = 4
@@ -101,6 +102,10 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._build_config_tab(), "")
         self._tabs.addTab(self._build_hotspot_tab(), "")
         self._tabs.addTab(self._build_hotspot_line_tab(), "")
+        # Not retranslated in _retranslate_ui like the other four tab titles
+        # below - see uid_lab_widget.py's own docstring for why this whole
+        # experimental feature isn't wired through i18n.py.
+        self._tabs.addTab(self._build_uid_lab_tab(), "🧪 UID Lab")
         root.addWidget(self._tabs, 1)
 
         root.addWidget(self._build_log_panel())
@@ -132,6 +137,10 @@ class MainWindow(QMainWindow):
     def _build_hotspot_line_tab(self) -> QWidget:
         self.hotspot_line_page = HotspotLinePage()
         return self.hotspot_line_page
+
+    def _build_uid_lab_tab(self) -> QWidget:
+        self.uid_lab_page = UidLabPage()
+        return self.uid_lab_page
 
     def _build_top_bar(self) -> QFrame:
         bar = QFrame()
@@ -273,6 +282,16 @@ class MainWindow(QMainWindow):
         self.hotspot_line_page.set_port_busy_checker(self._is_port_busy_for_hotspot_line)
         self.hotspot_page.armed_changed.connect(lambda *_: self.hotspot_line_page.recheck_availability())
         self.hotspot_line_page.controller.armed_changed.connect(lambda *_: self.hotspot_page.recheck_availability())
+
+        # uid_lab_page (UidLabPage) is likewise NOT wired into the shared
+        # request_*/EscManager signals - own private connection, see its own
+        # docstring. It only needs the same port-collision guard as the two
+        # Хотспот tabs above (real-hardware-confirmed risk, same comment).
+        self.uid_lab_page.set_port_busy_checker(self._is_port_busy_for_uid_lab)
+        self.uid_lab_page.connection_changed.connect(lambda *_: self.hotspot_page.recheck_availability())
+        self.uid_lab_page.connection_changed.connect(lambda *_: self.hotspot_line_page.recheck_availability())
+        self.hotspot_page.armed_changed.connect(lambda *_: self.uid_lab_page.recheck_availability())
+        self.hotspot_line_page.controller.armed_changed.connect(lambda *_: self.uid_lab_page.recheck_availability())
 
     # ---- i18n ------------------------------------------------
 
@@ -507,10 +526,23 @@ class MainWindow(QMainWindow):
             return True
         if self._connected and not self._hotspot_armed and self._port_combo.currentData() == port:
             return True
+        if self.uid_lab_page.connected_port() == port:
+            return True
         return False
 
     def _is_port_busy_for_hotspot_line(self, port: str) -> bool:
         if self._hotspot_armed and self.hotspot_page._selected_port_device() == port:
+            return True
+        if self._connected and not self._hotspot_armed and self._port_combo.currentData() == port:
+            return True
+        if self.uid_lab_page.connected_port() == port:
+            return True
+        return False
+
+    def _is_port_busy_for_uid_lab(self, port: str) -> bool:
+        if self._hotspot_armed and self.hotspot_page._selected_port_device() == port:
+            return True
+        if self.hotspot_line_page.controller.armed and self.hotspot_line_page._selected_port_device() == port:
             return True
         if self._connected and not self._hotspot_armed and self._port_combo.currentData() == port:
             return True
@@ -542,4 +574,5 @@ class MainWindow(QMainWindow):
             self.esc_manager.disconnect()
         self.worker.stop()
         self.hotspot_line_page.shutdown()
+        self.uid_lab_page.shutdown()
         super().closeEvent(event)

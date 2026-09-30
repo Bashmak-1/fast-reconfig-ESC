@@ -21,6 +21,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from enum import IntEnum
+from typing import Callable, Optional
 
 from .serial_transport import SerialTransport, remaining_time
 
@@ -209,6 +210,45 @@ class FourWayClient:
 
     def write(self, address: int, data: bytes, retries: int = 10, timeout_s: float = 0.3) -> FourWayResponse:
         return self.send(FourWayCommand.DeviceWrite, data, address=address, retries=retries, timeout_s=timeout_s)
+
+    def write_image(
+        self,
+        start_address: int,
+        image: bytes,
+        chunk_size: int = 0x100,
+        timeout_s: float = 3.0,
+        progress_cb: Optional[Callable[[int, int], None]] = None,
+    ) -> None:
+        """Write an arbitrary firmware image in chunks, starting at
+        start_address (a FourWay wire address, same units as read()/write()).
+
+        Chunking/timeout verified against am32-configurator's
+        src/communication/four_way.ts (FourWay.writePages) - not
+        guessed: 256-byte chunks (cmd_DeviceWrite's length byte maxes out at
+        256 anyway - 0 means 256), each chunk padded with 0xFF up to the next
+        8-byte boundary if needed (some MCUs, e.g. STM32G4, program flash in
+        8-byte doublewords and reject a write whose length isn't a multiple
+        of 8 with ACK_D_GENERAL_ERROR), and a much longer per-chunk timeout
+        than a config write - the reference client uses 3s minimum, since a
+        256-byte chunk over a ~19200 baud passthrough link plus the FC's own
+        set-address/set-buffer/program relay sequence can't complete within
+        the ~0.2-0.3s used for small config reads/writes.
+
+        Unlike write()/read() (config-block operations, config/EEPROM-sized
+        and already covered by EscManager's own verify-after-write), this is
+        for the separate, experimental "UID Lab" firmware-flashing workflow
+        (see uid_lab_manager.py) - it does not read anything back itself;
+        the caller decides whether/how to verify.
+        """
+        total = len(image)
+        for offset in range(0, total, chunk_size):
+            chunk = image[offset : offset + chunk_size]
+            if len(chunk) % 8 != 0:
+                pad_len = (-len(chunk)) % 8
+                chunk = chunk + b"\xff" * pad_len
+            self.write(start_address + offset, chunk, timeout_s=timeout_s)
+            if progress_cb is not None:
+                progress_cb(min(offset + len(chunk), total), total)
 
     def reset(self, esc_index: int) -> None:
         try:
