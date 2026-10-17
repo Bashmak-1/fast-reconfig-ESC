@@ -60,6 +60,7 @@ _DEFAULT_ESC_INDICES = (0, 1)  # ESC 1 + ESC 2 - the common case is a 2-in-1 ESC
 
 _FIRMWARE_FILTER = "Firmware (*.hex *.bin);;All files (*)"
 _CONFIG_FILTER = "Binary config (*.bin);;All files (*)"
+_DEFAULT_PROTOCOL_INDEX = MOTOR_PROTOCOLS.index("DSHOT300")
 
 
 class FcFlashPage(QWidget):
@@ -358,7 +359,7 @@ class FcFlashPage(QWidget):
         self.controller.set_esc_indices(self._selected_esc_indices())
         self._update_esc_menu_button_text()
 
-        protocol_index = load_int(_PROTOCOL_INDEX_KEY, 0)
+        protocol_index = load_int(_PROTOCOL_INDEX_KEY, _DEFAULT_PROTOCOL_INDEX)
         if 0 <= protocol_index < self._protocol_combo.count():
             self._protocol_combo.setCurrentIndex(protocol_index)
 
