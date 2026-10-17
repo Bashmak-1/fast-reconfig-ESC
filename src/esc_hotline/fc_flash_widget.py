@@ -510,7 +510,10 @@ class FcFlashPage(QWidget):
     def _update_start_stop_button(self) -> None:
         if self.controller.armed:
             self._start_stop_btn.setText("Стоп")
-            busy_phase = self.controller.phase in ("flashing_fc", "resetting_fc", "flashing", "writing_protocol")
+            busy_phase = self.controller.phase in (
+                "flashing_fc", "resetting_fc", "flashing", "writing_protocol",
+                "connecting_motor_test", "checking_motor_armed", "running_motor_test",
+            )
             self._start_stop_btn.setEnabled(not busy_phase)
             self._set_start_hint("Неможливо зупинити під час прошивки." if busy_phase else "")
             return

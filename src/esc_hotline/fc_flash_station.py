@@ -53,12 +53,25 @@ ONE-SHOT terminal step for this tab specifically: the moment every
 watched slot is confirmed good, it moves on to the protocol write and
 then stops, rather than looping back to watch for a swap.
 
-Real-hardware verification note: like the DFU-flash step itself (still
-unverified against a real STM32_Programmer_CLI.exe at the time of
-writing), this protocol-write tail has not yet been exercised against a
-real FC through this tab - log everything verbosely (see file_logger
-usage throughout) so the first real run's log can show exactly what
-happened if something doesn't match what's assumed here.
+Confirmed working end-to-end on real hardware (2026-10): DFU detection,
+flash+verify, exiting DFU (see dfu_flash_manager.reset_to_app - "-g
+<address>", not "-rst"), ESC flashing, and the protocol write+reboot all
+completed successfully through this tab.
+
+After the protocol reboot, this controller goes one step further: it
+waits for the FC to come back up under its new protocol (same
+snapshot/new-port-detection trick as the DFU reset above), connects to
+it with a plain MSP connection, and automatically runs a motor spin test
+- reusing MotorTestManager (the exact class "Прогон мотором" itself
+uses) as a private worker on its own thread, with whatever ramp/test-mode
+settings the operator already has configured on that tab (read fresh
+from settings_store at the moment each one is needed, never cached here
+- this tab doesn't duplicate those controls, it just reuses them). This
+is the one place in this file that doesn't follow the "every workflow
+owns its own state machine" convention: a live motor spin test has
+enough safety-critical logic (disarm check, bounded ramp, panic stop)
+that re-running it exactly as-is, instead of reimplementing it a second
+time, is the safer choice.
 """
 from __future__ import annotations
 
@@ -73,10 +86,27 @@ from .connection_worker import ConnectionWorker
 from .file_logger import get_logger
 from .fourway import FourWayClient
 from .motor_ramp import MOTOR_PROTOCOLS, build_advanced_config_payload
-from .motor_test_manager import ARMED_BIT
+from .motor_test_manager import ARMED_BIT, PHASE_IDLE as MOTOR_PHASE_IDLE, RAMP_LINEAR, TEST_MODE_ALL, MotorTestManager
 from .msp import MspClient, MspCommand, MspError
 from .serial_transport import PortInfo, SerialTransport, list_fc_ports
+from .settings_store import load_int, load_str
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, BG_PANEL, TEXT_MAIN, TEXT_MUTED
+
+# Reuses "Прогон мотором"'s own persisted settings (motor_test_widget.py) -
+# same keys, read fresh here each time rather than cached, deliberately not
+# re-exposed as new controls on this tab (see module docstring above).
+_MOTOR_UP_DURATION_KEY = "motor_test_up_duration_s"
+_MOTOR_HOLD_DURATION_KEY = "motor_test_hold_duration_s"
+_MOTOR_DOWN_DURATION_KEY = "motor_test_down_duration_s"
+_MOTOR_RAMP_MODE_KEY = "motor_test_ramp_mode"
+_MOTOR_TEST_MODE_KEY = "motor_test_mode"
+_MOTOR_MIN_BOUND_KEY = "motor_test_min_percent"
+_MOTOR_MAX_BOUND_KEY = "motor_test_max_percent"
+DEFAULT_MOTOR_UP_DURATION_S = 4
+DEFAULT_MOTOR_HOLD_DURATION_S = 0
+DEFAULT_MOTOR_DOWN_DURATION_S = 4
+DEFAULT_MOTOR_MIN_BOUND = 0
+DEFAULT_MOTOR_MAX_BOUND = 100
 
 DEFAULT_BAUD = 115200
 MAX_CONNECT_ATTEMPTS = 5
@@ -108,7 +138,10 @@ DFU_PHASES = (
 # a reader already familiar with "Хотспот (лінія)" recognizes them
 # immediately, even though this is a separate implementation.
 WATCH_PHASES = {"watching", "esc_ready", "esc_error"}
-RETRY_PHASES = {"error_connect", "fc_flash_error", "protocol_error"}
+RETRY_PHASES = {"error_connect", "fc_flash_error", "protocol_error", "motor_test_error"}
+# Phases where a motor-test worker call (or its reply) is in flight - used by
+# stop()/shutdown() to know when _motor_disconnect_requested is also needed.
+MOTOR_TEST_PHASES = {"waiting_fc_for_motor_test", "connecting_motor_test", "checking_motor_armed", "running_motor_test", "motor_test_error", "all_done"}
 
 PHASE_STYLE = {
     "idle": (BG_PANEL, TEXT_MUTED),
@@ -124,7 +157,12 @@ PHASE_STYLE = {
     "esc_error": (ACCENT_ERROR, "white"),
     "error_connect": (ACCENT_ERROR, "white"),
     "writing_protocol": (ACCENT_AMBER, "white"),
-    "done": (ACCENT_GREEN, "white"),
+    "waiting_fc_for_motor_test": (BG_PANEL, TEXT_MAIN),
+    "connecting_motor_test": (ACCENT_AMBER, "white"),
+    "checking_motor_armed": (ACCENT_AMBER, "white"),
+    "running_motor_test": (ACCENT_AMBER, "white"),
+    "all_done": (ACCENT_GREEN, "white"),
+    "motor_test_error": (ACCENT_ERROR, "white"),
     "protocol_error": (ACCENT_ERROR, "white"),
 }
 PHASE_LABEL = {
@@ -141,7 +179,12 @@ PHASE_LABEL = {
     "esc_error": "Помилка прошивки ESC",
     "error_connect": "Помилка підключення",
     "writing_protocol": "Запис протоколу й перезавантаження FC...",
-    "done": "Готово! FC і ESC прошиті, протокол встановлено.",
+    "waiting_fc_for_motor_test": "Очікування перезавантаження FC після зміни протоколу...",
+    "connecting_motor_test": "Підключення для тесту моторів...",
+    "checking_motor_armed": "Перевірка стану FC (має бути disarmed)...",
+    "running_motor_test": "Тест моторів...",
+    "all_done": "Готово! FC і ESC прошиті, протокол встановлено, мотори перевірено.",
+    "motor_test_error": "Помилка тесту моторів",
     "protocol_error": "Помилка запису протоколу",
 }
 
@@ -327,6 +370,23 @@ class _ProtocolWorkerThread:
         self.thread.wait(2000)
 
 
+class _MotorTestWorkerThread:
+    """Mirrors _DfuWorkerThread's own moveToThread pattern, but around a
+    real MotorTestManager instance - deliberately reused as-is (see module
+    docstring) rather than duplicated."""
+
+    def __init__(self) -> None:
+        self.thread = QThread()
+        self.thread.setObjectName("FcFlashMotorTestThread")
+        self.manager = MotorTestManager()
+        self.manager.moveToThread(self.thread)
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.thread.quit()
+        self.thread.wait(2000)
+
+
 class FcFlashStationController(QObject):
     """Owns a private ConnectionWorker (EscManager + its own QThread, for
     the ESC phase), a private _DfuWorkerThread (for the DFU-flash phase),
@@ -367,6 +427,15 @@ class FcFlashStationController(QObject):
     _flash_fc_requested = pyqtSignal(str, str, str)
     _reset_fc_requested = pyqtSignal(str, str)
 
+    # Internal-only: reach the private MotorTestManager (final motor-test step).
+    _motor_connect_requested = pyqtSignal(str, int)
+    _motor_disconnect_requested = pyqtSignal()
+    _motor_check_disarmed_requested = pyqtSignal()
+    _motor_start_sweep_requested = pyqtSignal(float, float, float)
+    _motor_set_ramp_mode_requested = pyqtSignal(str)
+    _motor_set_test_mode_requested = pyqtSignal(str)
+    _motor_set_speed_bounds_requested = pyqtSignal(float, float)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._flog = get_logger()
@@ -395,6 +464,21 @@ class FcFlashStationController(QObject):
         self._write_protocol_requested.connect(self._protocol_worker_thread.worker.write_protocol_and_reboot)
         self._protocol_worker_thread.worker.done.connect(self._on_protocol_write_done)
 
+        self._motor_test_worker_thread = _MotorTestWorkerThread()
+        motor_mgr = self._motor_test_worker_thread.manager
+        self._motor_connect_requested.connect(motor_mgr.connect)
+        self._motor_disconnect_requested.connect(motor_mgr.disconnect)
+        self._motor_check_disarmed_requested.connect(motor_mgr.check_disarmed)
+        self._motor_start_sweep_requested.connect(motor_mgr.start_sweep)
+        self._motor_set_ramp_mode_requested.connect(motor_mgr.set_ramp_mode)
+        self._motor_set_test_mode_requested.connect(motor_mgr.set_test_mode)
+        self._motor_set_speed_bounds_requested.connect(motor_mgr.set_speed_bounds)
+        motor_mgr.connection_state_changed.connect(self._on_motor_connection_state_changed)
+        motor_mgr.motor_count_detected.connect(self._on_motor_count_detected)
+        motor_mgr.armed_check_result.connect(self._on_motor_armed_check_result)
+        motor_mgr.phase_changed.connect(self._on_motor_phase_changed)
+        motor_mgr.log_message.connect(self._on_motor_log_message)
+
         self._firmware_path: Optional[str] = None
         self._cli_path_override: Optional[str] = None
         self._config_bytes: Optional[bytes] = None
@@ -411,6 +495,7 @@ class FcFlashStationController(QObject):
         self._dfu_port_id: Optional[str] = None
         self._dfu_poll_count = 0  # how many `-l usb` ticks since armed - visible proof the search loop is actually running
         self._pre_dfu_port_snapshot: set[str] = set()
+        self._motor_count_for_test = 0
         self._counter_flashed = 0
         self._counter_ok = 0
         self._counter_errors = 0
@@ -481,6 +566,7 @@ class FcFlashStationController(QObject):
         self._dfu_port_id = None
         self._dfu_poll_count = 0
         self._pre_dfu_port_snapshot = set()
+        self._motor_count_for_test = 0
         self._last_esc_states = {}
         self._tick_seen_states = {}
         self._consecutive_not_found = 0
@@ -502,8 +588,10 @@ class FcFlashStationController(QObject):
         self.armed_changed.emit(False)
         self._poll_timer.stop()
         self._flog.info("=== FC flash station disarmed (was in phase %s) ===", self._phase)
-        if self._phase not in DFU_PHASES:
+        if self._phase not in DFU_PHASES and self._phase not in MOTOR_TEST_PHASES:
             self._disconnect_requested.emit()
+        if self._phase in MOTOR_TEST_PHASES:
+            self._motor_disconnect_requested.emit()
         self._set_phase("idle")
 
     def retry(self) -> None:
@@ -516,6 +604,10 @@ class FcFlashStationController(QObject):
             self._attempt_connect()
         elif self._phase == "protocol_error":
             self._begin_protocol_write()
+        elif self._phase == "motor_test_error":
+            self._motor_disconnect_requested.emit()
+            self._set_phase("connecting_motor_test")
+            self._motor_connect_requested.emit(self._port_device or "", DEFAULT_BAUD)
 
     def reset_counters(self) -> None:
         self._counter_flashed = 0
@@ -531,6 +623,7 @@ class FcFlashStationController(QObject):
         self._esc_worker.stop()
         self._dfu_worker_thread.stop()
         self._protocol_worker_thread.stop()
+        self._motor_test_worker_thread.stop()
 
     # ---- polling ------------------------------------------------
 
@@ -626,9 +719,30 @@ class FcFlashStationController(QObject):
                 self._disconnect_requested.emit()
                 self._set_phase("waiting_fc_normal")
             return
+
+        if self._phase == "waiting_fc_for_motor_test":
+            # Same re-enumeration trick as "waiting_fc_normal" above, just
+            # after the protocol-write reboot instead of the DFU one -
+            # _pre_dfu_port_snapshot was refreshed right before that reboot
+            # was triggered (see _on_connection_state_changed).
+            new_ports = [info for info in list_fc_ports() if info.device not in self._pre_dfu_port_snapshot]
+            chosen = self._pick_reenumerated_port(new_ports)
+            if chosen is not None:
+                if chosen != self._port_device:
+                    self._flog.info(
+                        "FC flash station: FC re-enumerated after protocol reboot: %s -> %s",
+                        self._port_device, chosen,
+                    )
+                    self._port_device = chosen
+                    self.port_changed.emit(chosen)
+                self._set_phase("connecting_motor_test")
+                self._motor_connect_requested.emit(self._port_device, DEFAULT_BAUD)
+            return
         # "flashing_fc"/"resetting_fc"/"flashing"/"fc_flash_error"/
-        # "writing_protocol"/"done"/"protocol_error": no polling action,
-        # waits for the relevant *_done signal or a manual retry().
+        # "writing_protocol"/"connecting_motor_test"/"checking_motor_armed"/
+        # "running_motor_test"/"all_done"/"protocol_error"/
+        # "motor_test_error": no polling action, waits for the relevant
+        # *_done signal or a manual retry().
 
     def _resolved_cli_path(self) -> str:
         path = dfu_flash_manager.find_cli_path(self._cli_path_override)
@@ -745,6 +859,10 @@ class FcFlashStationController(QObject):
             # AFTER transport.close() has already returned, so only once
             # THIS arrives is it safe to reopen the port elsewhere.
             self._flog.info("FC flash station: FourWay confirmed disconnected - starting protocol write")
+            # Fresh snapshot right before the MSP_REBOOT this triggers, so
+            # "waiting_fc_for_motor_test" can tell the FC's new port apart
+            # from whatever was already there - same trick as the DFU reset.
+            self._pre_dfu_port_snapshot = {info.device for info in list_fc_ports()}
             self._write_protocol_requested.emit(self._port_device or "", DEFAULT_BAUD, self._protocol_index)
             return
         if self._phase != "connecting":
@@ -835,4 +953,60 @@ class FcFlashStationController(QObject):
             return
         self._flog.info("FC flash station: protocol write done: success=%s, message=%s", success, message)
         self.dfu_detail_changed.emit(message)
-        self._set_phase("done" if success else "protocol_error")
+        if not success:
+            self._set_phase("protocol_error")
+            return
+        self._set_phase("waiting_fc_for_motor_test")
+
+    # ---- final motor-test phase (reuses MotorTestManager as-is) ---------
+
+    def _on_motor_connection_state_changed(self, connected: bool) -> None:
+        if not self._armed or self._phase != "connecting_motor_test":
+            return
+        if not connected:
+            self.dfu_detail_changed.emit("Не вдалось підключитись для тесту моторів.")
+            self._set_phase("motor_test_error")
+            return
+        self._motor_set_ramp_mode_requested.emit(load_str(_MOTOR_RAMP_MODE_KEY, RAMP_LINEAR))
+        self._motor_set_test_mode_requested.emit(load_str(_MOTOR_TEST_MODE_KEY, TEST_MODE_ALL))
+        self._motor_set_speed_bounds_requested.emit(
+            float(load_int(_MOTOR_MIN_BOUND_KEY, DEFAULT_MOTOR_MIN_BOUND)),
+            float(load_int(_MOTOR_MAX_BOUND_KEY, DEFAULT_MOTOR_MAX_BOUND)),
+        )
+        self._set_phase("checking_motor_armed")
+        self._motor_check_disarmed_requested.emit()
+
+    def _on_motor_count_detected(self, count: int) -> None:
+        self._motor_count_for_test = count
+
+    def _on_motor_armed_check_result(self, disarmed: bool, detail: str) -> None:
+        if not self._armed or self._phase != "checking_motor_armed":
+            return
+        if not disarmed:
+            self.dfu_detail_changed.emit(f"Тест моторів заблоковано: {detail or 'не вдалось підтвердити стан disarmed'}")
+            self._set_phase("motor_test_error")
+            return
+        if self._motor_count_for_test == 0:
+            self.dfu_detail_changed.emit("FC не повідомляє жодного мотора - нема що тестувати.")
+            self._set_phase("motor_test_error")
+            return
+        self._flog.info("FC flash station: starting final motor test (%d motor(s))", self._motor_count_for_test)
+        self._set_phase("running_motor_test")
+        self._motor_start_sweep_requested.emit(
+            float(load_int(_MOTOR_UP_DURATION_KEY, DEFAULT_MOTOR_UP_DURATION_S)),
+            float(load_int(_MOTOR_HOLD_DURATION_KEY, DEFAULT_MOTOR_HOLD_DURATION_S)),
+            float(load_int(_MOTOR_DOWN_DURATION_KEY, DEFAULT_MOTOR_DOWN_DURATION_S)),
+        )
+
+    def _on_motor_phase_changed(self, phase: str) -> None:
+        if not self._armed or self._phase != "running_motor_test":
+            return
+        if phase == MOTOR_PHASE_IDLE:
+            self._flog.info("FC flash station: final motor test finished - all done")
+            self._motor_disconnect_requested.emit()
+            self._set_phase("all_done")
+
+    def _on_motor_log_message(self, level: str, text: str) -> None:
+        if not self._armed or self._phase not in MOTOR_TEST_PHASES:
+            return
+        self.dfu_detail_changed.emit(text)
