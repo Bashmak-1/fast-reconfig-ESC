@@ -545,15 +545,22 @@ class FcFlashStationController(QObject):
             # a stale snapshot from whenever this phase happened to begin -
             # see this file's module docstring for why this snapshot exists.
             self._pre_dfu_port_snapshot = {info.device for info in current_ports}
-            normal_present = bool(self._port_device) and self._port_device in self._pre_dfu_port_snapshot
-            if normal_present:
-                # FC is already in normal mode - no DFU flash needed this
-                # round, skip straight to the ESC-watching workflow.
-                self._flog.info("FC flash station: normal-mode port %s already present - skipping DFU flash this round", self._port_device)
-                self._connect_attempts = 0
-                self._set_phase("connecting")
-                self._attempt_connect()
-                return
+            # IMPORTANT, confirmed on real hardware: a `-l usb` check is
+            # dispatched on EVERY tick here, even when the operator's
+            # remembered port name already happens to be present - that
+            # "normal_present" shortcut used to short-circuit straight to
+            # "connecting" before ever checking for DFU at all, which is
+            # wrong whenever the remembered port is stale (e.g. left over
+            # from an earlier session, while the real FC has since
+            # re-enumerated under a completely different, unrelated COM
+            # number after repeated DFU cycles) or simply coincides with
+            # some OTHER, unrelated serial device that happens to share
+            # that exact port name right now. The actual FC genuinely
+            # sitting in DFU mode is a far stronger signal than "a port
+            # with this name exists" and must always win - see
+            # _on_devices_listed(), where the "already normal" fallback now
+            # only applies once a tick's `-l usb` has confirmed no DFU
+            # device is present.
             if not self._dfu_op_in_flight:
                 cli_path = self._resolved_cli_path()
                 if not cli_path:
@@ -658,6 +665,25 @@ class FcFlashStationController(QObject):
         self._dfu_poll_count += 1
         self._flog.info("FC flash station: `-l usb` tick #%d -> %d DFU device(s)", self._dfu_poll_count, len(devices))
         if not devices:
+            # No DFU device found THIS tick - only now consider "maybe the
+            # FC is already in normal mode, no flash needed this round".
+            # Checked here, after confirming no DFU device is present,
+            # rather than unconditionally at the top of the poll tick -
+            # see _on_poll_tick()'s own comment for why a DFU device
+            # actually being there must always take priority over a
+            # same-named port that merely happens to exist.
+            normal_present = bool(self._port_device) and self._port_device in {
+                info.device for info in list_fc_ports()
+            }
+            if normal_present:
+                self._flog.info(
+                    "FC flash station: normal-mode port %s already present (no DFU device found) - "
+                    "skipping DFU flash this round", self._port_device,
+                )
+                self._connect_attempts = 0
+                self._set_phase("connecting")
+                self._attempt_connect()
+                return
             # Visible, constantly-updating proof the search loop is really
             # running - previously this tick was entirely silent in the
             # GUI when nothing was found, which looked indistinguishable
