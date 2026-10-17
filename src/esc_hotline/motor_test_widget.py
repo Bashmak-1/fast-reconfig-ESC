@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
 from .manual_counter_widget import ManualCounterWidget
 from .motor_ramp import MOTOR_PROTOCOLS, MSP_MAX, MSP_MIN, msp_to_percent
 from .motor_test_manager import PHASE_DOWN, PHASE_IDLE, PHASE_UP, RAMP_BEZIER, RAMP_LINEAR, MotorTestManager
+from .ramp_chart_widget import RampChartWidget
 from .serial_transport import list_fc_ports
 from .settings_store import load_int, load_str, save_int, save_str
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
@@ -42,8 +43,12 @@ _PORT_KEY = "motor_test_port"
 _UP_RATE_KEY = "motor_test_up_rate"
 _DOWN_RATE_KEY = "motor_test_down_rate"
 _RAMP_MODE_KEY = "motor_test_ramp_mode"
+_MIN_BOUND_KEY = "motor_test_min_percent"
+_MAX_BOUND_KEY = "motor_test_max_percent"
 DEFAULT_BAUD = 115200
 DEFAULT_RATE = 10  # %/s
+DEFAULT_MIN_BOUND = 0
+DEFAULT_MAX_BOUND = 100
 _SLIDER_HEIGHT = 70
 _SLIDER_WIDTH = 22
 _RAMP_MODE_LABELS = {RAMP_LINEAR: "Лінійна", RAMP_BEZIER: "Безе"}
@@ -68,6 +73,7 @@ class MotorTestPage(QWidget):
     _stop_sweep_requested = pyqtSignal()
     _set_protocol_requested = pyqtSignal(int)
     _set_ramp_mode_requested = pyqtSignal(str)
+    _set_speed_bounds_requested = pyqtSignal(float, float)
 
     # GUI-thread-affinity signal for MainWindow's cross-tab port-collision guard.
     connection_changed = pyqtSignal(bool)
@@ -203,6 +209,10 @@ class MotorTestPage(QWidget):
         rate_row.addStretch(1)
         root.addLayout(rate_row)
 
+        self._ramp_chart = RampChartWidget()
+        self._ramp_chart.setMinimumHeight(180)
+        root.addWidget(self._ramp_chart)
+
         btn_row = QHBoxLayout()
         self._start_btn = QPushButton("Старт")
         self._start_btn.setObjectName("connectButton")
@@ -299,6 +309,18 @@ class MotorTestPage(QWidget):
         self._stop_sweep_requested.connect(self.manager.stop_sweep)
         self._set_protocol_requested.connect(self.manager.set_protocol)
         self._set_ramp_mode_requested.connect(self.manager.set_ramp_mode)
+        self._set_speed_bounds_requested.connect(self.manager.set_speed_bounds)
+
+        self._ramp_chart.bounds_changed.connect(self._on_chart_bounds_changed)
+        self._ramp_mode_combo.currentIndexChanged.connect(
+            lambda _i: self._ramp_chart.set_curve_mode(self._ramp_mode_combo.currentData())
+        )
+        self._up_rate_stepper.value_changed.connect(
+            lambda v: self._ramp_chart.set_rates(v, self._down_rate_stepper.value())
+        )
+        self._down_rate_stepper.value_changed.connect(
+            lambda v: self._ramp_chart.set_rates(self._up_rate_stepper.value(), v)
+        )
 
         self.manager.connection_state_changed.connect(self._on_connection_state_changed)
         self.manager.motor_count_detected.connect(self._rebuild_motor_sliders)
@@ -341,6 +363,18 @@ class MotorTestPage(QWidget):
         if idx >= 0:
             self._ramp_mode_combo.setCurrentIndex(idx)
         self._set_ramp_mode_requested.emit(self._ramp_mode_combo.currentData())
+
+        # Push the restored state into the chart explicitly - setCurrentIndex()
+        # above only fires currentIndexChanged (and this page's lambda-wired
+        # chart update) when the index actually CHANGES, so a restored value
+        # that happens to match the combo/stepper's just-constructed default
+        # would otherwise never reach the freshly-built RampChartWidget.
+        self._ramp_chart.set_curve_mode(self._ramp_mode_combo.currentData())
+        self._ramp_chart.set_rates(self._up_rate_stepper.value(), self._down_rate_stepper.value())
+        min_pct = load_int(_MIN_BOUND_KEY, DEFAULT_MIN_BOUND)
+        max_pct = load_int(_MAX_BOUND_KEY, DEFAULT_MAX_BOUND)
+        self._ramp_chart.set_bounds(min_pct, max_pct)
+        self._set_speed_bounds_requested.emit(min_pct, max_pct)
 
     # ---- port-collision guard (same real-hardware-confirmed risk as the
     # two Хотспот tabs - see main_window.py's _is_port_busy_for_* methods) --
@@ -389,14 +423,20 @@ class MotorTestPage(QWidget):
             self._master_progress.setValue(0)
             self._master_pct_label.setText("0%")
             self._phase_label.setText(_PHASE_LABELS[PHASE_IDLE])
+            self._ramp_chart.set_phase(PHASE_IDLE)
         self.connection_changed.emit(connected)
 
-    # ---- ramp mode ------------------------------------------------
+    # ---- ramp mode / sweep bounds ------------------------------------------------
 
     def _on_ramp_mode_changed(self, _index: int) -> None:
         mode = self._ramp_mode_combo.currentData()
         save_str(_RAMP_MODE_KEY, mode)
         self._set_ramp_mode_requested.emit(mode)
+
+    def _on_chart_bounds_changed(self, min_percent: float, max_percent: float) -> None:
+        save_int(_MIN_BOUND_KEY, round(min_percent))
+        save_int(_MAX_BOUND_KEY, round(max_percent))
+        self._set_speed_bounds_requested.emit(min_percent, max_percent)
 
     # ---- start / stop ------------------------------------------------
 
@@ -468,6 +508,7 @@ class MotorTestPage(QWidget):
 
     def _on_phase_changed(self, phase: str) -> None:
         self._phase_label.setText(_PHASE_LABELS.get(phase, phase))
+        self._ramp_chart.set_phase(phase)
         if phase == PHASE_IDLE:
             self._start_btn.setEnabled(self._connected)
             self._stop_btn.setEnabled(False)
@@ -488,6 +529,7 @@ class MotorTestPage(QWidget):
         pct = msp_to_percent(values[0])
         self._master_progress.setValue(round(pct))
         self._master_pct_label.setText(f"{pct:.0f}%")
+        self._ramp_chart.set_current_value(values[0])
         for slider, label, v in zip(self._motor_sliders, self._motor_labels, values):
             slider.setValue(v)
             label.setText(f"{msp_to_percent(v):.0f}%")

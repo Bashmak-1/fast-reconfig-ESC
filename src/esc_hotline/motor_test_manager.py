@@ -48,8 +48,19 @@ from typing import Optional
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
-from .motor_ramp import MOTOR_PROTOCOLS, MSP_MIN, count_active_motors, next_value, next_value_bezier, protocol_name
+from .motor_ramp import (
+    MOTOR_PROTOCOLS,
+    MSP_MAX,
+    MSP_MIN,
+    count_active_motors,
+    msp_to_percent,
+    next_value,
+    next_value_bezier,
+    percent_to_msp,
+    protocol_name,
+)
 from .msp import MspClient, MspCommand, MspError
+from .ramp_chart_math import clamp_bound_pair
 from .serial_transport import SerialTransport
 
 MOTOR_SLOTS = 8  # hard MSP_SET_MOTOR/MSP_MOTOR wire-format limit (for (i = 0; i < 8; i++) in fc_msp.c) -
@@ -89,6 +100,8 @@ class MotorTestManager(QObject):
         self._target = MSP_MIN
         self._up_rate = 10.0  # percent/s
         self._down_rate = 10.0
+        self._min_target = MSP_MIN  # configurable sweep floor (operator-draggable on the ramp chart, idle-only)
+        self._max_target = MSP_MAX  # configurable sweep ceiling
         self._phase = PHASE_IDLE
         self._ramp_mode = RAMP_LINEAR
         self._phase_start_time = 0.0  # monotonic() when the current leg (up or down) began - RAMP_BEZIER only
@@ -297,6 +310,20 @@ class MotorTestManager(QObject):
         self._phase_start_time = time.monotonic()
         self._phase_start_value = self._current
 
+    def set_speed_bounds(self, min_percent: float, max_percent: float) -> None:
+        """Configurable sweep floor/ceiling - operator-draggable on the
+        ramp chart, idle-only (the chart itself only allows dragging while
+        PHASE_IDLE, but this guards independently rather than trusting the
+        caller). Takes effect on the NEXT sweep start, never retroactively
+        mid-sweep."""
+        if self._phase != PHASE_IDLE:
+            self._log("warning", "Зміна межі розгону під час прогону ігнорується.")
+            return
+        min_p, max_p = clamp_bound_pair(min_percent, max_percent)
+        self._min_target = percent_to_msp(min_p)
+        self._max_target = percent_to_msp(max_p)
+        self._log("info", f"Межі розгону: {min_p:.0f}%–{max_p:.0f}%.")
+
     def start_sweep(self, up_rate_percent_per_s: float, down_rate_percent_per_s: float) -> None:
         if self._msp is None:
             self._log("error", "Не підключено.")
@@ -308,8 +335,8 @@ class MotorTestManager(QObject):
             return  # already running - Start is a no-op mid-sweep
         self._up_rate = max(up_rate_percent_per_s, 0.1)
         self._down_rate = max(down_rate_percent_per_s, 0.1)
-        self._current = MSP_MIN
-        self._target = 2000  # MSP_MAX, avoids importing it twice under two names
+        self._current = self._min_target
+        self._target = self._max_target
         self._phase = PHASE_UP
         self._begin_leg()
         self.phase_changed.emit(PHASE_UP)
@@ -321,17 +348,18 @@ class MotorTestManager(QObject):
     def stop_sweep(self) -> None:
         """Used by both the Stop button and the any-key panic handler -
         deliberately identical behaviour for both (no separate "faster"
-        emergency path): switch to ramping down to MSP_MIN, from whatever
-        the current value actually is right now, at the same down_rate
-        already configured for a normal sweep."""
+        emergency path): switch to ramping down to the configured sweep
+        floor (_min_target - MSP_MIN unless the operator narrowed the
+        bounds), from whatever the current value actually is right now,
+        at the same down_rate already configured for a normal sweep."""
         if self._phase == PHASE_IDLE:
             return
-        self._target = MSP_MIN
+        self._target = self._min_target
         if self._phase != PHASE_DOWN:
             self._phase = PHASE_DOWN
             self._begin_leg()
             self.phase_changed.emit(PHASE_DOWN)
-            self._log("info", "Зупинка: плавний спад до 0%.")
+            self._log("info", f"Зупинка: плавний спад до {msp_to_percent(self._min_target):.0f}%.")
 
     def _begin_leg(self) -> None:
         """Mark the start of a new ramp leg (up or down) - RAMP_BEZIER
@@ -364,14 +392,14 @@ class MotorTestManager(QObject):
         if self._current == self._target:
             if self._phase == PHASE_UP:
                 self._phase = PHASE_DOWN
-                self._target = MSP_MIN
+                self._target = self._min_target
                 self._begin_leg()
                 self.phase_changed.emit(PHASE_DOWN)
             elif self._phase == PHASE_DOWN:
                 self._timer.stop()
                 self._phase = PHASE_IDLE
                 self.phase_changed.emit(PHASE_IDLE)
-                self._log("success", "Прогон завершено, мотори на 0%.")
+                self._log("success", f"Прогон завершено, мотори на {msp_to_percent(self._min_target):.0f}%.")
 
     def _send_all(self, value: int) -> None:
         # MSP_SET_MOTOR's wire format always needs exactly 8 values
