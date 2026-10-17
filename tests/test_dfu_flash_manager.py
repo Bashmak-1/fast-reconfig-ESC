@@ -146,6 +146,41 @@ def test_flash_and_verify_success(monkeypatch, tmp_path):
     assert result.success is True
 
 
+def test_flash_and_verify_bin_file_gets_explicit_address(monkeypatch, tmp_path):
+    # Confirmed on real hardware: a raw .bin needs FLASH_BASE_ADDRESS as an
+    # explicit extra argument, or the CLI refuses with "You must enter the
+    # write address..." - .hex (tested above) needs no such argument.
+    firmware = tmp_path / "fw.bin"
+    firmware.write_bytes(b"\x00" * 16)
+    seen_args = []
+
+    def fake_run(cmd, **kwargs):
+        seen_args.append(cmd)
+        return _fake_completed(0, "Verified successfully.\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = dfu_flash_manager.flash_and_verify(Path("fake_cli.exe"), "usb1", str(firmware))
+    assert result.success is True
+    assert dfu_flash_manager.FLASH_BASE_ADDRESS in seen_args[0]
+    # address must come right after the file path, before -v
+    w_index = seen_args[0].index(str(firmware))
+    assert seen_args[0][w_index + 1] == dfu_flash_manager.FLASH_BASE_ADDRESS
+
+
+def test_flash_and_verify_hex_file_gets_no_address(monkeypatch, tmp_path):
+    firmware = tmp_path / "fw.hex"
+    firmware.write_text(":0\n")
+    seen_args = []
+
+    def fake_run(cmd, **kwargs):
+        seen_args.append(cmd)
+        return _fake_completed(0, "Verified successfully.\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    dfu_flash_manager.flash_and_verify(Path("fake_cli.exe"), "usb1", str(firmware))
+    assert dfu_flash_manager.FLASH_BASE_ADDRESS not in seen_args[0]
+
+
 def test_flash_and_verify_fails_on_nonzero_exit_even_with_verified_text(monkeypatch, tmp_path):
     # exit code must agree with the text - never trust one signal alone,
     # same "never trust a single signal" stance as esc_manager.py's own

@@ -10,21 +10,19 @@ for this job today. All this module does is shell out to it and interpret
 its output - same "never trust a write without an explicit check" stance
 as esc_manager.py's own readback-verify for the ESC side of this app.
 
-Confirmed on real hardware (2026-10): the write+verify path
-(`flash_and_verify`'s "verified successfully" check) matches the real
-tool's output exactly. Listing DFU devices did NOT work with the
-initially-assumed `-l` flag - per UM2237 and ST's own forum examples,
-bare `-l` (`--list`) enumerates RS232 serial ports, not USB DFU devices;
-the correct call is `-l usb`, a distinct, documented listing mode for the
-USB interface specifically. `list_devices` was fixed accordingly.
+Confirmed on real hardware (2026-10, STM32CubeProgrammer v2.23.0, an
+STM32H7xx FC): `-l usb` correctly lists a connected DFU device (exact
+captured block: "Device Index : USB1", "Serial number", "Firmware
+version", "Device ID" - no "0483:df11"-style VID:PID text anywhere, as
+list_devices()'s tolerant usbN-token parsing already expected) - bare
+`-l` would NOT have shown it at all (per UM2237, it lists RS232 serial
+ports instead). `flash_and_verify`'s "verified successfully" check also
+matches the real tool's output exactly.
 
-STILL a known unknown: the exact per-line/block text `-l usb` prints for
-a found device has not been captured from a real run yet, so
-`list_devices`'s parsing is deliberately tolerant (any line containing a
-`usbN` index token counts as one found device, with no further text
-filtering) rather than matching an unverified exact shape. Tighten this
-once a real `-l usb` capture is available - see fc_flash_station.py's
-module docstring for the real-hardware-verification status.
+Also confirmed and fixed from that same real run: writing a raw `.bin`
+file needs an explicit address argument (`FLASH_BASE_ADDRESS`) - unlike
+`.hex`, which embeds its own; omitting it failed with "Error: You must
+enter the write address to download binary file for STM32 MCU devices."
 """
 from __future__ import annotations
 
@@ -51,6 +49,14 @@ DEFAULT_CLI_CANDIDATES = (
 
 LIST_TIMEOUT_S = 10.0
 FLASH_TIMEOUT_S = 120.0
+# STM32 internal flash always starts here (standard Cortex-M flash origin)
+# - confirmed by the operator's own STM32CubeProgrammer GUI screenshots
+# showing "Start address: 0x08000000". A raw .bin file has no embedded
+# address (unlike .hex, which carries its own and needs none of this), so
+# the CLI refuses to write one without it - confirmed on real hardware:
+# "-w <file>.bin -v" alone failed with "Error: You must enter the write
+# address to download binary file for STM32 MCU devices."
+FLASH_BASE_ADDRESS = "0x08000000"
 RESET_TIMEOUT_S = 10.0
 
 
@@ -151,8 +157,15 @@ def flash_and_verify(
         flog.error("DFU: firmware file not found: %s", firmware_path)
         return FlashResult(False, f"Файл прошивки не знайдено: {firmware_path}")
     flog.info("DFU: --- flashing FC: port=%s, firmware=%s ---", port_id, firmware_path)
+    args = ["-c", f"port={port_id}", "-w", firmware_path]
+    if Path(firmware_path).suffix.lower() == ".bin":
+        # .hex carries its own address and needs none of this; a raw .bin
+        # does not, and the CLI refuses to write one without an explicit
+        # address - see FLASH_BASE_ADDRESS's own comment.
+        args.append(FLASH_BASE_ADDRESS)
+    args.append("-v")
     try:
-        result = _run(cli_path, ["-c", f"port={port_id}", "-w", firmware_path, "-v"], timeout_s)
+        result = _run(cli_path, args, timeout_s)
     except subprocess.TimeoutExpired:
         flog.error("DFU: flash timed out after %.0fs", timeout_s)
         return FlashResult(False, f"Прошивка не завершилась за {timeout_s:.0f}с (timeout).")
