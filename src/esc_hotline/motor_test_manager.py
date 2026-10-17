@@ -55,13 +55,11 @@ from .motor_ramp import (
     build_advanced_config_payload,
     count_active_motors,
     msp_to_percent,
-    next_value,
-    next_value_bezier,
     percent_to_msp,
     protocol_name,
 )
 from .msp import MspClient, MspCommand, MspError
-from .ramp_chart_math import clamp_bound_pair
+from .ramp_chart_math import MAX_PHASE_DURATION_S, clamp_bound_pair, clamp_duration_s, segment_value
 from .serial_transport import SerialTransport
 
 MOTOR_SLOTS = 8  # hard MSP_SET_MOTOR/MSP_MOTOR wire-format limit (for (i = 0; i < 8; i++) in fc_msp.c) -
@@ -72,14 +70,23 @@ TICK_MS = 100
 
 PHASE_IDLE = "idle"
 PHASE_UP = "up"
+PHASE_HOLD = "hold"  # plateau at the ceiling, between ramp-up and ramp-down - 0-duration is valid (skips straight to DOWN)
 PHASE_DOWN = "down"
 
-# Ramp shape: RAMP_LINEAR (next_value(), constant %/s, the original and
-# still-default behavior) or RAMP_BEZIER (next_value_bezier(), eased
-# start/stop - "Безе", offered as a CHOICE alongside linear, never a
-# replacement - see motor_ramp.py's cubic_bezier_ease() docstring).
+# Ramp shape: RAMP_LINEAR (straight line, the original and still-default
+# behavior) or RAMP_BEZIER (eased start/stop - "Безе", offered as a CHOICE
+# alongside linear, never a replacement - see
+# ramp_chart_math.segment_value()/motor_ramp.cubic_bezier_ease()).
 RAMP_LINEAR = "linear"
 RAMP_BEZIER = "bezier"
+
+# Test mode: TEST_MODE_ALL (every real motor moves together, the original
+# and still-default behavior) or TEST_MODE_SEQUENTIAL (one motor at a
+# time, a full up->hold->down cycle each, advancing automatically through
+# every motor once and then stopping) - added because a bench lab power
+# supply often can't source enough current for two motors at once.
+TEST_MODE_ALL = "all"
+TEST_MODE_SEQUENTIAL = "sequential"
 
 
 class MotorTestManager(QObject):
@@ -88,7 +95,7 @@ class MotorTestManager(QObject):
     motor_count_detected = pyqtSignal(int)  # how many of the 8 MSP_MOTOR slots are real, right after connect
     armed_check_result = pyqtSignal(bool, str)  # disarmed_confirmed, detail
     value_changed = pyqtSignal(list)  # `motor_count` raw MSP values (1000-2000), one per real motor slot
-    phase_changed = pyqtSignal(str)  # PHASE_IDLE / PHASE_UP / PHASE_DOWN
+    phase_changed = pyqtSignal(str)  # PHASE_IDLE / PHASE_UP / PHASE_HOLD / PHASE_DOWN
     protocol_detected = pyqtSignal(int, str)  # index, display name - -1/"" means unknown (right after connect)
     protocol_change_result = pyqtSignal(bool, str)  # success, detail - success implies the FC is rebooting
 
@@ -99,14 +106,18 @@ class MotorTestManager(QObject):
         self._motor_count = 0
         self._current = MSP_MIN
         self._target = MSP_MIN
-        self._up_rate = 10.0  # percent/s
-        self._down_rate = 10.0
+        self._up_duration_s = 4.0
+        self._hold_duration_s = 0.0  # 0 is a real, meaningful value - no plateau, straight up->down
+        self._down_duration_s = 4.0
         self._min_target = MSP_MIN  # configurable sweep floor (operator-draggable on the ramp chart, idle-only)
         self._max_target = MSP_MAX  # configurable sweep ceiling
         self._phase = PHASE_IDLE
         self._ramp_mode = RAMP_LINEAR
-        self._phase_start_time = 0.0  # monotonic() when the current leg (up or down) began - RAMP_BEZIER only
-        self._phase_start_value = MSP_MIN  # self._current at that same moment - RAMP_BEZIER only
+        self._test_mode = TEST_MODE_ALL
+        self._active_motor_index: Optional[int] = None  # which single motor is running, TEST_MODE_SEQUENTIAL only
+        self._manual_stop_requested = False  # Stop/panic-key pressed - suppress auto-advance to the next motor
+        self._phase_start_time = 0.0  # monotonic() when the current phase (up/hold/down) began
+        self._phase_start_value = MSP_MIN  # self._current at that same moment
         self._protocol_index: Optional[int] = None
         self._motor_pwm_rate = 0  # cached from the last MSP_ADVANCED_CONFIG read - must be echoed back
         self._servo_pwm_rate = 0  # unchanged on write, see set_protocol()
@@ -114,7 +125,6 @@ class MotorTestManager(QObject):
         self._timer = QTimer(self)
         self._timer.setInterval(TICK_MS)
         self._timer.timeout.connect(self._on_tick)
-        self._last_tick_time = 0.0
 
     def _log(self, level: str, text: str) -> None:
         self.log_message.emit(level, text)
@@ -153,6 +163,8 @@ class MotorTestManager(QObject):
         self._current = MSP_MIN
         self._target = MSP_MIN
         self._phase = PHASE_IDLE
+        self._active_motor_index = None
+        self._manual_stop_requested = False
         self._log("info", "Підключено (звичайний MSP, без passthrough).")
 
         try:
@@ -317,7 +329,13 @@ class MotorTestManager(QObject):
         self._max_target = percent_to_msp(max_p)
         self._log("info", f"Межі розгону: {min_p:.0f}%–{max_p:.0f}%.")
 
-    def start_sweep(self, up_rate_percent_per_s: float, down_rate_percent_per_s: float) -> None:
+    def set_test_mode(self, mode: str) -> None:
+        """TEST_MODE_ALL (default) or TEST_MODE_SEQUENTIAL - safe to call
+        any time; takes effect on the next Start, never retroactively
+        mid-sweep."""
+        self._test_mode = mode if mode in (TEST_MODE_ALL, TEST_MODE_SEQUENTIAL) else TEST_MODE_ALL
+
+    def start_sweep(self, up_duration_s: float, hold_duration_s: float, down_duration_s: float) -> None:
         if self._msp is None:
             self._log("error", "Не підключено.")
             return
@@ -326,16 +344,23 @@ class MotorTestManager(QObject):
             return
         if self._phase != PHASE_IDLE:
             return  # already running - Start is a no-op mid-sweep
-        self._up_rate = max(up_rate_percent_per_s, 0.1)
-        self._down_rate = max(down_rate_percent_per_s, 0.1)
+        self._up_duration_s = clamp_duration_s(up_duration_s)
+        self._hold_duration_s = max(0.0, min(MAX_PHASE_DURATION_S, hold_duration_s))  # 0 is valid - no plateau
+        self._down_duration_s = clamp_duration_s(down_duration_s)
+        self._manual_stop_requested = False
+        self._active_motor_index = 0 if self._test_mode == TEST_MODE_SEQUENTIAL else None
         self._current = self._min_target
         self._target = self._max_target
         self._phase = PHASE_UP
         self._begin_leg()
         self.phase_changed.emit(PHASE_UP)
         shape = "Безе" if self._ramp_mode == RAMP_BEZIER else "лінійний"
-        self._log("info", f"Старт розгону ({shape}): набір {self._up_rate:.1f}%/с, спад {self._down_rate:.1f}%/с.")
-        self._last_tick_time = time.monotonic()
+        mode_text = f"по черзі, мотор 1 з {self._motor_count}" if self._test_mode == TEST_MODE_SEQUENTIAL else "всі одночасно"
+        self._log(
+            "info",
+            f"Старт розгону ({shape}, {mode_text}): розгін {self._up_duration_s:.1f}с, "
+            f"утримання {self._hold_duration_s:.1f}с, спад {self._down_duration_s:.1f}с.",
+        )
         self._timer.start()
 
     def stop_sweep(self) -> None:
@@ -343,10 +368,13 @@ class MotorTestManager(QObject):
         deliberately identical behaviour for both (no separate "faster"
         emergency path): switch to ramping down to the configured sweep
         floor (_min_target - MSP_MIN unless the operator narrowed the
-        bounds), from whatever the current value actually is right now,
-        at the same down_rate already configured for a normal sweep."""
+        bounds), from whatever the current value actually is right now.
+        Also suppresses TEST_MODE_SEQUENTIAL's auto-advance to the next
+        motor once this down-leg finishes - a manual Stop halts the whole
+        run, it never just skips ahead to the next motor."""
         if self._phase == PHASE_IDLE:
             return
+        self._manual_stop_requested = True
         self._target = self._min_target
         if self._phase != PHASE_DOWN:
             self._phase = PHASE_DOWN
@@ -355,25 +383,25 @@ class MotorTestManager(QObject):
             self._log("info", f"Зупинка: плавний спад до {msp_to_percent(self._min_target):.0f}%.")
 
     def _begin_leg(self) -> None:
-        """Mark the start of a new ramp leg (up or down) - RAMP_BEZIER
-        computes position purely from elapsed time since THIS moment, so
-        every direction change needs a fresh time/value baseline, not just
-        the very first Start."""
+        """Mark the start of a new phase (up/hold/down) - position is
+        always computed purely from elapsed time since THIS moment, so
+        every phase change needs a fresh time/value baseline."""
         self._phase_start_time = time.monotonic()
         self._phase_start_value = self._current
 
     def _on_tick(self) -> None:
         now = time.monotonic()
-        tick_s = now - self._last_tick_time
-        self._last_tick_time = now
+        elapsed_s = now - self._phase_start_time
 
-        rate = self._up_rate if self._phase == PHASE_UP else self._down_rate
-        if self._ramp_mode == RAMP_BEZIER:
-            elapsed_s = now - self._phase_start_time
-            duration_s = 100.0 / rate if rate > 0 else 0.0
-            self._current = next_value_bezier(self._phase_start_value, self._target, elapsed_s, duration_s)
+        if self._phase == PHASE_HOLD:
+            self._current = self._target
         else:
-            self._current = next_value(self._current, self._target, rate, tick_s)
+            duration_s = self._up_duration_s if self._phase == PHASE_UP else self._down_duration_s
+            start_percent = msp_to_percent(self._phase_start_value)
+            target_percent = msp_to_percent(self._target)
+            use_bezier = self._ramp_mode == RAMP_BEZIER
+            value_percent = segment_value(use_bezier, elapsed_s, duration_s, start_percent, target_percent)
+            self._current = percent_to_msp(value_percent)
 
         try:
             self._send_all(self._current)
@@ -382,17 +410,51 @@ class MotorTestManager(QObject):
             self._stop_timer_and_settle()
             return
 
-        if self._current == self._target:
-            if self._phase == PHASE_UP:
+        if self._phase == PHASE_HOLD:
+            if elapsed_s >= self._hold_duration_s:
                 self._phase = PHASE_DOWN
                 self._target = self._min_target
                 self._begin_leg()
                 self.phase_changed.emit(PHASE_DOWN)
-            elif self._phase == PHASE_DOWN:
-                self._timer.stop()
-                self._phase = PHASE_IDLE
-                self.phase_changed.emit(PHASE_IDLE)
-                self._log("success", f"Прогон завершено, мотори на {msp_to_percent(self._min_target):.0f}%.")
+        elif self._phase == PHASE_UP and self._current == self._target:
+            if self._hold_duration_s > 0:
+                self._phase = PHASE_HOLD
+                self._begin_leg()
+                self.phase_changed.emit(PHASE_HOLD)
+            else:
+                self._phase = PHASE_DOWN
+                self._target = self._min_target
+                self._begin_leg()
+                self.phase_changed.emit(PHASE_DOWN)
+        elif self._phase == PHASE_DOWN and self._current == self._target:
+            self._advance_or_stop()
+
+    def _advance_or_stop(self) -> None:
+        """Called once a down-leg completes: in TEST_MODE_SEQUENTIAL
+        (and not manually stopped), moves on to the next motor's own
+        up->hold->down cycle; otherwise this is the end of the whole run."""
+        if (
+            not self._manual_stop_requested
+            and self._test_mode == TEST_MODE_SEQUENTIAL
+            and self._active_motor_index is not None
+        ):
+            next_index = self._active_motor_index + 1
+            if next_index < self._motor_count:
+                self._active_motor_index = next_index
+                self._current = self._min_target
+                self._target = self._max_target
+                self._phase = PHASE_UP
+                self._begin_leg()
+                self.phase_changed.emit(PHASE_UP)
+                self._log("info", f"Перехід до мотора {next_index + 1} з {self._motor_count}.")
+                return
+
+        self._timer.stop()
+        self._phase = PHASE_IDLE
+        self._active_motor_index = None
+        self._manual_stop_requested = False
+        self.phase_changed.emit(PHASE_IDLE)
+        self._log("success", f"Прогон завершено, мотори на {msp_to_percent(self._min_target):.0f}%.")
 
     def _send_all(self, value: int) -> None:
         # MSP_SET_MOTOR's wire format always needs exactly 8 values
@@ -400,7 +462,16 @@ class MotorTestManager(QObject):
         # real - slots beyond motor_count go out as MSP_MIN (a harmless,
         # already-idle command) and are never reported to the UI.
         assert self._msp is not None
-        payload = b"".join(value.to_bytes(2, "little") for _ in range(self._motor_count))
+        if self._test_mode == TEST_MODE_SEQUENTIAL and self._active_motor_index is not None:
+            # Only the active motor moves - every other real slot stays at
+            # a harmless stop command, so a lab power supply that can't
+            # source enough current for two motors at once never has to.
+            values = [MSP_MIN] * self._motor_count
+            if 0 <= self._active_motor_index < self._motor_count:
+                values[self._active_motor_index] = value
+        else:
+            values = [value] * self._motor_count
+        payload = b"".join(v.to_bytes(2, "little") for v in values)
         payload += b"".join(MSP_MIN.to_bytes(2, "little") for _ in range(MOTOR_SLOTS - self._motor_count))
         self._msp.send(MspCommand.MSP_SET_MOTOR, payload, timeout_s=0.3, retries=2)
-        self.value_changed.emit([value] * self._motor_count)
+        self.value_changed.emit(values)

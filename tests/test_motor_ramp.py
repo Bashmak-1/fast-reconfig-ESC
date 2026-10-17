@@ -1,8 +1,8 @@
-"""Tests for motor_ramp.py - the rate-limiting math behind "Прогон мотором"
-(no Qt/serial dependency). This is the actual safety mechanism for the
-feature (never let commanded throttle jump by more than a bounded amount),
-so its edge cases - never overshooting, never stalling with a slow rate,
-landing exactly on the target - matter more than usual.
+"""Tests for motor_ramp.py - generic MSP-value/protocol helpers behind
+"Прогон мотором" (no Qt/serial dependency). The ramp-shape safety math
+itself (never overshooting, bounded movement) now lives in
+ramp_chart_math.py (see test_ramp_chart_math.py) - this file only covers
+value conversion and the motor-protocol byte format.
 """
 from __future__ import annotations
 
@@ -14,8 +14,6 @@ from esc_hotline.motor_ramp import (
     count_active_motors,
     cubic_bezier_ease,
     msp_to_percent,
-    next_value,
-    next_value_bezier,
     percent_to_msp,
     protocol_name,
 )
@@ -50,68 +48,11 @@ def test_percent_msp_round_trip_is_consistent():
         assert round(msp_to_percent(percent_to_msp(pct))) == pct
 
 
-# ---- next_value: the actual rate limiter ------------------------------------------------
-
-
-def test_next_value_steps_up_towards_target():
-    # rate=10%/s over a 0.1s tick should move by 10% of (MSP_MAX-MSP_MIN)*0.1/1.0 = 1% of range
-    value = next_value(MSP_MIN, MSP_MAX, rate_percent_per_s=10.0, tick_s=0.1)
-    assert MSP_MIN < value < MSP_MAX
-
-
-def test_next_value_never_overshoots_target_going_up():
-    # a huge rate/tick combo must clamp to target exactly, not step past it
-    value = next_value(MSP_MIN, MSP_MAX, rate_percent_per_s=1000.0, tick_s=1.0)
-    assert value == MSP_MAX
-
-
-def test_next_value_never_overshoots_target_going_down():
-    value = next_value(MSP_MAX, MSP_MIN, rate_percent_per_s=1000.0, tick_s=1.0)
-    assert value == MSP_MIN
-
-
-def test_next_value_reaches_target_exactly_eventually():
-    current = MSP_MIN
-    for _ in range(10_000):  # generous upper bound - must terminate well before this
-        if current == MSP_MAX:
-            break
-        current = next_value(current, MSP_MAX, rate_percent_per_s=5.0, tick_s=0.1)
-    assert current == MSP_MAX
-
-
-def test_next_value_already_at_target_is_a_no_op():
-    assert next_value(1500, 1500, rate_percent_per_s=10.0, tick_s=0.1) == 1500
-
-
-def test_next_value_zero_rate_never_moves():
-    assert next_value(MSP_MIN, MSP_MAX, rate_percent_per_s=0.0, tick_s=1.0) == MSP_MIN
-
-
-def test_next_value_negative_rate_never_moves():
-    assert next_value(MSP_MIN, MSP_MAX, rate_percent_per_s=-5.0, tick_s=1.0) == MSP_MIN
-
-
-def test_next_value_tiny_tick_still_makes_progress():
-    # even a very small tick_s must move at least 1 raw MSP unit, never stall
-    value = next_value(MSP_MIN, MSP_MAX, rate_percent_per_s=1.0, tick_s=0.001)
-    assert value == MSP_MIN + 1
-
-
-def test_next_value_moves_down_towards_lower_target():
-    value = next_value(MSP_MAX, MSP_MIN, rate_percent_per_s=10.0, tick_s=0.1)
-    assert MSP_MIN < value < MSP_MAX
-
-
-def test_next_value_higher_rate_moves_further_per_tick():
-    slow = next_value(MSP_MIN, MSP_MAX, rate_percent_per_s=5.0, tick_s=0.1)
-    fast = next_value(MSP_MIN, MSP_MAX, rate_percent_per_s=50.0, tick_s=0.1)
-    assert fast > slow
-
-
-# ---- cubic_bezier_ease / next_value_bezier ------------------------------------------------
-# The alternative "Безе" ramp mode offered alongside (never replacing) the
-# linear next_value() above - see motor_ramp.py's docstring for why 3t^2-2t^3
-# genuinely is a cubic Bezier curve here, not just S-shaped-looking math.
+# ---- cubic_bezier_ease ------------------------------------------------
+# The "Безе" ramp mode's eased curve, offered alongside (never replacing)
+# a straight-line ramp - see ramp_chart_math.segment_value(), which uses
+# this directly. See motor_ramp.py's docstring for why 3t^2-2t^3 genuinely
+# is a cubic Bezier curve here, not just S-shaped-looking math.
 
 
 def test_cubic_bezier_ease_endpoints():
@@ -135,40 +76,6 @@ def test_cubic_bezier_ease_is_monotonic():
 
 def test_cubic_bezier_ease_is_symmetric_around_midpoint():
     assert round(cubic_bezier_ease(0.3) + cubic_bezier_ease(0.7), 9) == 1.0
-
-
-def test_next_value_bezier_at_start_is_start_value():
-    assert next_value_bezier(MSP_MIN, MSP_MAX, elapsed_s=0.0, duration_s=10.0) == MSP_MIN
-
-
-def test_next_value_bezier_at_duration_is_target_exactly():
-    assert next_value_bezier(MSP_MIN, MSP_MAX, elapsed_s=10.0, duration_s=10.0) == MSP_MAX
-
-
-def test_next_value_bezier_at_half_duration_is_exact_midpoint():
-    expected = MSP_MIN + (MSP_MAX - MSP_MIN) // 2
-    assert next_value_bezier(MSP_MIN, MSP_MAX, elapsed_s=5.0, duration_s=10.0) == expected
-
-
-def test_next_value_bezier_never_overshoots_past_duration():
-    assert next_value_bezier(MSP_MIN, MSP_MAX, elapsed_s=999.0, duration_s=10.0) == MSP_MAX
-
-
-def test_next_value_bezier_negative_elapsed_clamps_to_start():
-    assert next_value_bezier(MSP_MIN, MSP_MAX, elapsed_s=-5.0, duration_s=10.0) == MSP_MIN
-
-
-def test_next_value_bezier_zero_duration_is_safe_and_reaches_target():
-    assert next_value_bezier(MSP_MIN, MSP_MAX, elapsed_s=0.0, duration_s=0.0) == MSP_MAX
-
-
-def test_next_value_bezier_negative_duration_is_safe_and_reaches_target():
-    assert next_value_bezier(MSP_MIN, MSP_MAX, elapsed_s=1.0, duration_s=-1.0) == MSP_MAX
-
-
-def test_next_value_bezier_moves_down_towards_lower_target():
-    value = next_value_bezier(MSP_MAX, MSP_MIN, elapsed_s=5.0, duration_s=10.0)
-    assert MSP_MIN < value < MSP_MAX
 
 
 # ---- count_active_motors ------------------------------------------------

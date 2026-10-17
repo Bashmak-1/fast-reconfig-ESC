@@ -33,29 +33,45 @@ from PyQt6.QtWidgets import (
 
 from .manual_counter_widget import ManualCounterWidget
 from .motor_ramp import MOTOR_PROTOCOLS, MSP_MAX, MSP_MIN, msp_to_percent
-from .motor_test_manager import PHASE_DOWN, PHASE_IDLE, PHASE_UP, RAMP_BEZIER, RAMP_LINEAR, MotorTestManager
+from .motor_test_manager import (
+    PHASE_DOWN,
+    PHASE_HOLD,
+    PHASE_IDLE,
+    PHASE_UP,
+    RAMP_BEZIER,
+    RAMP_LINEAR,
+    TEST_MODE_ALL,
+    TEST_MODE_SEQUENTIAL,
+    MotorTestManager,
+)
 from .ramp_chart_widget import RampChartWidget
 from .serial_transport import list_fc_ports
 from .settings_store import load_int, load_str, save_int, save_str
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
 
 _PORT_KEY = "motor_test_port"
-_UP_RATE_KEY = "motor_test_up_rate"
-_DOWN_RATE_KEY = "motor_test_down_rate"
+_UP_DURATION_KEY = "motor_test_up_duration_s"
+_HOLD_DURATION_KEY = "motor_test_hold_duration_s"
+_DOWN_DURATION_KEY = "motor_test_down_duration_s"
 _RAMP_MODE_KEY = "motor_test_ramp_mode"
+_TEST_MODE_KEY = "motor_test_mode"
 _MIN_BOUND_KEY = "motor_test_min_percent"
 _MAX_BOUND_KEY = "motor_test_max_percent"
 DEFAULT_BAUD = 115200
-DEFAULT_RATE = 10  # %/s
+DEFAULT_UP_DURATION_S = 4
+DEFAULT_HOLD_DURATION_S = 0
+DEFAULT_DOWN_DURATION_S = 4
 DEFAULT_MIN_BOUND = 0
 DEFAULT_MAX_BOUND = 100
 _SLIDER_HEIGHT = 70
 _SLIDER_WIDTH = 22
 _RAMP_MODE_LABELS = {RAMP_LINEAR: "Лінійна", RAMP_BEZIER: "Безе"}
+_TEST_MODE_LABELS = {TEST_MODE_ALL: "Всі одночасно", TEST_MODE_SEQUENTIAL: "По черзі"}
 
 _PHASE_LABELS = {
     PHASE_IDLE: "Очікування",
     PHASE_UP: "Розгін...",
+    PHASE_HOLD: "Утримання...",
     PHASE_DOWN: "Спад...",
 }
 _STATUS_COLORS = {"info": TEXT_MUTED, "warning": ACCENT_AMBER, "error": ACCENT_ERROR, "success": ACCENT_GREEN}
@@ -69,10 +85,11 @@ class MotorTestPage(QWidget):
     _connect_requested = pyqtSignal(str, int)
     _disconnect_requested = pyqtSignal()
     _check_disarmed_requested = pyqtSignal()
-    _start_sweep_requested = pyqtSignal(float, float)
+    _start_sweep_requested = pyqtSignal(float, float, float)
     _stop_sweep_requested = pyqtSignal()
     _set_protocol_requested = pyqtSignal(int)
     _set_ramp_mode_requested = pyqtSignal(str)
+    _set_test_mode_requested = pyqtSignal(str)
     _set_speed_bounds_requested = pyqtSignal(float, float)
 
     # GUI-thread-affinity signal for MainWindow's cross-tab port-collision guard.
@@ -191,23 +208,41 @@ class MotorTestPage(QWidget):
         self._ramp_mode_combo.addItem(_RAMP_MODE_LABELS[RAMP_LINEAR], RAMP_LINEAR)
         self._ramp_mode_combo.addItem(_RAMP_MODE_LABELS[RAMP_BEZIER], RAMP_BEZIER)
         self._ramp_mode_combo.setToolTip(
-            "Лінійна - стала швидкість (як і раніше). Безе - плавний розгін/спад "
-            "без різкого старту й зупинки, та самі %/с задають загальну тривалість руху."
+            "Лінійна - стала швидкість (як і раніше). Безе - плавний розгін/спад без різкого старту й зупинки."
         )
         self._ramp_mode_combo.currentIndexChanged.connect(self._on_ramp_mode_changed)
         rate_row.addWidget(self._ramp_mode_combo)
         rate_row.addSpacing(24)
-        rate_row.addWidget(QLabel("Швидкість набору, %/с:"))
-        self._up_rate_stepper = ManualCounterWidget(min_value=1, max_value=100, step=1)
-        self._up_rate_stepper.value_changed.connect(lambda v: save_int(_UP_RATE_KEY, v))
-        rate_row.addWidget(self._up_rate_stepper)
-        rate_row.addSpacing(24)
-        rate_row.addWidget(QLabel("Швидкість спаду, %/с:"))
-        self._down_rate_stepper = ManualCounterWidget(min_value=1, max_value=100, step=1)
-        self._down_rate_stepper.value_changed.connect(lambda v: save_int(_DOWN_RATE_KEY, v))
-        rate_row.addWidget(self._down_rate_stepper)
+        rate_row.addWidget(QLabel("Режим тесту:"))
+        self._test_mode_combo = QComboBox()
+        self._test_mode_combo.addItem(_TEST_MODE_LABELS[TEST_MODE_ALL], TEST_MODE_ALL)
+        self._test_mode_combo.addItem(_TEST_MODE_LABELS[TEST_MODE_SEQUENTIAL], TEST_MODE_SEQUENTIAL)
+        self._test_mode_combo.setToolTip(
+            "«По черзі» прогонить кожен мотор окремо (розгін-утримання-спад), один раз по черзі, й зупиниться - "
+            "корисно, якщо лабораторного блока живлення не вистачає на кілька моторів одразу."
+        )
+        self._test_mode_combo.currentIndexChanged.connect(self._on_test_mode_changed)
+        rate_row.addWidget(self._test_mode_combo)
         rate_row.addStretch(1)
         root.addLayout(rate_row)
+
+        duration_row = QHBoxLayout()
+        duration_row.addWidget(QLabel("Розгін, с:"))
+        self._up_duration_stepper = ManualCounterWidget(min_value=1, max_value=60, step=1)
+        self._up_duration_stepper.value_changed.connect(self._on_duration_changed)
+        duration_row.addWidget(self._up_duration_stepper)
+        duration_row.addSpacing(16)
+        duration_row.addWidget(QLabel("Утримання, с:"))
+        self._hold_duration_stepper = ManualCounterWidget(min_value=0, max_value=60, step=1)
+        self._hold_duration_stepper.value_changed.connect(self._on_duration_changed)
+        duration_row.addWidget(self._hold_duration_stepper)
+        duration_row.addSpacing(16)
+        duration_row.addWidget(QLabel("Спад, с:"))
+        self._down_duration_stepper = ManualCounterWidget(min_value=1, max_value=60, step=1)
+        self._down_duration_stepper.value_changed.connect(self._on_duration_changed)
+        duration_row.addWidget(self._down_duration_stepper)
+        duration_row.addStretch(1)
+        root.addLayout(duration_row)
 
         self._ramp_chart = RampChartWidget()
         self._ramp_chart.setMinimumHeight(180)
@@ -309,17 +344,12 @@ class MotorTestPage(QWidget):
         self._stop_sweep_requested.connect(self.manager.stop_sweep)
         self._set_protocol_requested.connect(self.manager.set_protocol)
         self._set_ramp_mode_requested.connect(self.manager.set_ramp_mode)
+        self._set_test_mode_requested.connect(self.manager.set_test_mode)
         self._set_speed_bounds_requested.connect(self.manager.set_speed_bounds)
 
-        self._ramp_chart.bounds_changed.connect(self._on_chart_bounds_changed)
+        self._ramp_chart.profile_changed.connect(self._on_chart_profile_changed)
         self._ramp_mode_combo.currentIndexChanged.connect(
             lambda _i: self._ramp_chart.set_curve_mode(self._ramp_mode_combo.currentData())
-        )
-        self._up_rate_stepper.value_changed.connect(
-            lambda v: self._ramp_chart.set_rates(v, self._down_rate_stepper.value())
-        )
-        self._down_rate_stepper.value_changed.connect(
-            lambda v: self._ramp_chart.set_rates(self._up_rate_stepper.value(), v)
         )
 
         self.manager.connection_state_changed.connect(self._on_connection_state_changed)
@@ -356,21 +386,30 @@ class MotorTestPage(QWidget):
             idx = self._port_combo.findData(port)
             if idx >= 0:
                 self._port_combo.setCurrentIndex(idx)
-        self._up_rate_stepper.set_value(load_int(_UP_RATE_KEY, DEFAULT_RATE))
-        self._down_rate_stepper.set_value(load_int(_DOWN_RATE_KEY, DEFAULT_RATE))
+        self._apply_durations(
+            load_int(_UP_DURATION_KEY, DEFAULT_UP_DURATION_S),
+            load_int(_HOLD_DURATION_KEY, DEFAULT_HOLD_DURATION_S),
+            load_int(_DOWN_DURATION_KEY, DEFAULT_DOWN_DURATION_S),
+        )
         ramp_mode = load_str(_RAMP_MODE_KEY, RAMP_LINEAR)
         idx = self._ramp_mode_combo.findData(ramp_mode if ramp_mode in _RAMP_MODE_LABELS else RAMP_LINEAR)
         if idx >= 0:
             self._ramp_mode_combo.setCurrentIndex(idx)
         self._set_ramp_mode_requested.emit(self._ramp_mode_combo.currentData())
 
-        # Push the restored state into the chart explicitly - setCurrentIndex()
-        # above only fires currentIndexChanged (and this page's lambda-wired
-        # chart update) when the index actually CHANGES, so a restored value
-        # that happens to match the combo/stepper's just-constructed default
-        # would otherwise never reach the freshly-built RampChartWidget.
+        test_mode = load_str(_TEST_MODE_KEY, TEST_MODE_ALL)
+        idx = self._test_mode_combo.findData(test_mode if test_mode in _TEST_MODE_LABELS else TEST_MODE_ALL)
+        if idx >= 0:
+            self._test_mode_combo.setCurrentIndex(idx)
+        self._set_test_mode_requested.emit(self._test_mode_combo.currentData())
+
+        # Push the restored curve mode into the chart explicitly -
+        # setCurrentIndex() above only fires currentIndexChanged when the
+        # index actually CHANGES, so a restored value that happens to
+        # match the combo's just-constructed default would otherwise
+        # never reach the freshly-built RampChartWidget (durations were
+        # already pushed by _apply_durations() above).
         self._ramp_chart.set_curve_mode(self._ramp_mode_combo.currentData())
-        self._ramp_chart.set_rates(self._up_rate_stepper.value(), self._down_rate_stepper.value())
         min_pct = load_int(_MIN_BOUND_KEY, DEFAULT_MIN_BOUND)
         max_pct = load_int(_MAX_BOUND_KEY, DEFAULT_MAX_BOUND)
         self._ramp_chart.set_bounds(min_pct, max_pct)
@@ -433,7 +472,53 @@ class MotorTestPage(QWidget):
         save_str(_RAMP_MODE_KEY, mode)
         self._set_ramp_mode_requested.emit(mode)
 
-    def _on_chart_bounds_changed(self, min_percent: float, max_percent: float) -> None:
+    def _on_test_mode_changed(self, _index: int) -> None:
+        mode = self._test_mode_combo.currentData()
+        save_str(_TEST_MODE_KEY, mode)
+        self._set_test_mode_requested.emit(mode)
+
+    def _on_duration_changed(self, _value: int) -> None:
+        save_int(_UP_DURATION_KEY, self._up_duration_stepper.value())
+        save_int(_HOLD_DURATION_KEY, self._hold_duration_stepper.value())
+        save_int(_DOWN_DURATION_KEY, self._down_duration_stepper.value())
+        self._ramp_chart.set_durations(
+            self._up_duration_stepper.value(), self._hold_duration_stepper.value(), self._down_duration_stepper.value()
+        )
+
+    def _apply_durations(self, up_s: int, hold_s: int, down_s: int) -> None:
+        """Set all three steppers at once with their own value_changed
+        signals blocked, then save/push once - setting them one at a time
+        WITHOUT blocking would fire _on_duration_changed() after the
+        first stepper alone, which reads the other two steppers' still-
+        not-yet-updated values and saves them prematurely, corrupting
+        settings_store with a stale intermediate value (confirmed: this
+        actually happened during development - restoring up_duration
+        first caused hold/down's then-current constructor defaults to get
+        saved over whatever was really in settings_store)."""
+        for stepper, value in (
+            (self._up_duration_stepper, up_s),
+            (self._hold_duration_stepper, hold_s),
+            (self._down_duration_stepper, down_s),
+        ):
+            stepper.blockSignals(True)
+            stepper.set_value(value)
+            stepper.blockSignals(False)
+        save_int(_UP_DURATION_KEY, self._up_duration_stepper.value())
+        save_int(_HOLD_DURATION_KEY, self._hold_duration_stepper.value())
+        save_int(_DOWN_DURATION_KEY, self._down_duration_stepper.value())
+        self._ramp_chart.set_durations(
+            self._up_duration_stepper.value(), self._hold_duration_stepper.value(), self._down_duration_stepper.value()
+        )
+
+    def _on_chart_profile_changed(
+        self, up_s: float, hold_s: float, down_s: float, min_percent: float, max_percent: float
+    ) -> None:
+        # Dragging a chart point moves BOTH a duration and a bound at once
+        # (see ramp_chart_widget.py's module docstring) - reflect the new
+        # durations back into the steppers (snapping the chart's continuous
+        # drag to whole seconds, since the steppers are int-only) and push
+        # the new bounds to the manager, same as before this feature.
+        self._apply_durations(round(up_s), round(hold_s), round(down_s))
         save_int(_MIN_BOUND_KEY, round(min_percent))
         save_int(_MAX_BOUND_KEY, round(max_percent))
         self._set_speed_bounds_requested.emit(min_percent, max_percent)
@@ -447,7 +532,11 @@ class MotorTestPage(QWidget):
 
     def _on_armed_check_result(self, disarmed_confirmed: bool, detail: str) -> None:
         if disarmed_confirmed:
-            self._start_sweep_requested.emit(self._up_rate_stepper.value(), self._down_rate_stepper.value())
+            self._start_sweep_requested.emit(
+                self._up_duration_stepper.value(),
+                self._hold_duration_stepper.value(),
+                self._down_duration_stepper.value(),
+            )
         else:
             self._on_log_message("error", f"Старт заблоковано: {detail or 'не вдалось підтвердити стан disarmed'}")
             self._start_btn.setEnabled(self._connected)

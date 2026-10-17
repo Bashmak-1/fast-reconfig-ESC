@@ -1,8 +1,11 @@
-"""Pure ramp-stepping math for the "Прогон мотором" motor-spin-test tab -
-no Qt/serial dependency, so the rate-limiting logic (the whole point of this
-feature: never let commanded throttle jump by more than a bounded amount per
-tick, since an abrupt drop already burned two FC controllers) is directly
-unit-testable without a QTimer or real hardware.
+"""Generic MSP-value/protocol helpers for the "Прогон мотором" motor-spin-
+test tab - no Qt/serial dependency, directly unit-testable without a
+QTimer or real hardware. The actual ramp-shape math (never let commanded
+throttle jump abruptly - an abrupt drop already burned two FC controllers)
+lives in ramp_chart_math.py, the shared source of truth between the real
+motor control (motor_test_manager.py) and the ramp chart
+(ramp_chart_widget.py); this file stays scoped to value conversion
+(percent<->MSP) and the motor-protocol byte format.
 
 Value range (1000-2000) matches the MSP wire protocol's own convention for
 MSP_SET_MOTOR, confirmed against a real MSP_MOTOR dump earlier in this
@@ -84,8 +87,9 @@ def count_active_motors(raw_motor_values: list[int]) -> int:
 
 def cubic_bezier_ease(t: float) -> float:
     """Ease-in-out progress curve for the "Безе" ramp mode, offered as an
-    alternative to next_value()'s constant-speed linear ramp (never a
-    replacement for it - see motor_test_manager.py/motor_test_widget.py).
+    alternative to a constant-speed linear ramp (never a replacement for
+    it - see ramp_chart_math.segment_value(), the shared function both
+    motor_test_manager.py's real motor control and the ramp chart use).
 
     This is a genuine cubic Bezier curve, not just a vaguely S-shaped
     approximation: with control points P0=0, P1=0, P2=1, P3=1, the
@@ -101,46 +105,3 @@ def cubic_bezier_ease(t: float) -> float:
     """
     clamped = max(0.0, min(1.0, t))
     return 3.0 * clamped**2 - 2.0 * clamped**3
-
-
-def next_value_bezier(start: int, target: int, elapsed_s: float, duration_s: float) -> int:
-    """Where the ramp should be `elapsed_s` seconds into a `duration_s`
-    -long move from `start` to `target`, following cubic_bezier_ease()
-    instead of a constant rate. Unlike next_value() (which steps forward
-    from the previous tick's own result), this is computed directly from
-    elapsed wall-clock time since the move began - time-based, not
-    step-based, since the eased rate of travel isn't constant, so there's
-    no single "step size" to carry between ticks.
-
-    Degenerate `duration_s <= 0` (nothing to divide by) safely returns
-    `target` outright - an instantaneous move, not a crash. Negative
-    `elapsed_s` (shouldn't happen, but never trust a caller blindly) is
-    clamped to the start of the curve, same spirit as next_value()'s own
-    zero/negative-rate handling.
-    """
-    if duration_s <= 0:
-        return target
-    t = max(0.0, elapsed_s) / duration_s
-    eased = cubic_bezier_ease(t)
-    return round(start + (target - start) * eased)
-
-
-def next_value(current: int, target: int, rate_percent_per_s: float, tick_s: float) -> int:
-    """One ramp step from `current` towards `target`, moving at most
-    `rate_percent_per_s` percent of the full 1000-2000 range per second of
-    wall-clock time (`tick_s` since the last step). Never overshoots target
-    - the final step lands exactly on it rather than stepping past.
-
-    Pure integer MSP units in, pure integer MSP units out, so the caller
-    (MotorTestManager) can feed this straight into MSP_SET_MOTOR without
-    further rounding surprises.
-    """
-    if rate_percent_per_s <= 0:
-        return current
-    max_step = round(rate_percent_per_s / 100.0 * MSP_RANGE * tick_s)
-    max_step = max(max_step, 1)  # a nonzero rate must always make *some* progress
-    if current < target:
-        return min(current + max_step, target)
-    if current > target:
-        return max(current - max_step, target)
-    return current
