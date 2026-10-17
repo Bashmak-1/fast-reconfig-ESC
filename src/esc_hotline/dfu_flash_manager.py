@@ -182,18 +182,34 @@ def flash_and_verify(
 
 
 def reset_to_app(cli_path: Path, port_id: str, timeout_s: float = RESET_TIMEOUT_S) -> bool:
-    """Reset the device out of DFU mode back into normal firmware
-    execution. Call ONLY after flash_and_verify() has reported success -
-    see fc_flash_station.py."""
+    """Exit the DFU bootloader and start running the just-flashed
+    firmware. Call ONLY after flash_and_verify() has reported success -
+    see fc_flash_station.py.
+
+    Confirmed on real hardware: `-rst` does NOT work over a USB DFU
+    connection - it failed outright with "Error: Reset command is only
+    available with JTAG/SWD debug interface" (that flag pulls the NRST
+    pin, which isn't wired up at all over plain USB DFU). The correct
+    command here is `-g <address>` ("Go" - start code execution at the
+    given address), the same command STM32CubeProgrammer's own GUI issues
+    for its "Run after programming" checkbox - confirmed in an earlier
+    captured GUI log: "RUNNING Program ... Address: 0x08000000 ... Start
+    operation achieved successfully ... Warning: Connection to device
+    ... is lost". That final "connection lost" line is the EXPECTED,
+    SUCCESSFUL outcome, not a failure - once the app starts running, the
+    device leaves DFU mode entirely and the connection naturally drops,
+    which is exactly why success here is judged purely by exit code, not
+    by requiring the connection to still be alive afterward.
+    """
     flog = get_logger()
-    flog.info("DFU: --- resetting FC: port=%s ---", port_id)
+    flog.info("DFU: --- starting application (exiting DFU): port=%s, address=%s ---", port_id, FLASH_BASE_ADDRESS)
     try:
-        result = _run(cli_path, ["-c", f"port={port_id}", "-rst"], timeout_s)
+        result = _run(cli_path, ["-c", f"port={port_id}", "-g", FLASH_BASE_ADDRESS], timeout_s)
     except (OSError, subprocess.TimeoutExpired) as e:
-        flog.error("DFU: reset failed to run: %s", e)
+        flog.error("DFU: starting application failed to run: %s", e)
         return False
     ok = result.returncode == 0
-    flog.info("DFU: reset verdict: success=%s (exit=%d)", ok, result.returncode)
+    flog.info("DFU: start-application verdict: success=%s (exit=%d)", ok, result.returncode)
     return ok
 
 

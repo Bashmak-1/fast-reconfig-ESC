@@ -223,6 +223,24 @@ def test_reset_to_app_success(monkeypatch):
     assert dfu_flash_manager.reset_to_app(Path("fake_cli.exe"), "usb1") is True
 
 
+def test_reset_to_app_uses_go_command_not_rst(monkeypatch):
+    # Confirmed on real hardware: "-rst" fails over USB DFU ("Reset command
+    # is only available with JTAG/SWD debug interface") - the correct
+    # command is "-g <address>" (same as STM32CubeProgrammer GUI's own
+    # "Run after programming").
+    seen_args = []
+
+    def fake_run(cmd, **kwargs):
+        seen_args.append(cmd)
+        return _fake_completed(0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    dfu_flash_manager.reset_to_app(Path("fake_cli.exe"), "usb1")
+    assert "-rst" not in seen_args[0]
+    assert "-g" in seen_args[0]
+    assert dfu_flash_manager.FLASH_BASE_ADDRESS in seen_args[0]
+
+
 def test_reset_to_app_nonzero_exit_is_failure(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_completed(1))
     assert dfu_flash_manager.reset_to_app(Path("fake_cli.exe"), "usb1") is False
