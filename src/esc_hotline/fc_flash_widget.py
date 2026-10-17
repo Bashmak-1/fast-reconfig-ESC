@@ -496,7 +496,7 @@ class FcFlashPage(QWidget):
         if phase in ("flashing", "flashing_fc", "resetting_fc") or remaining_ms < 0:
             self._countdown_label.setText("")
             return
-        self._countdown_label.setText(f"Наступна перевірка через {remaining_ms / 1000:.1f}с")
+        self._countdown_label.setText(f"Наступна перевірка через {remaining_ms / 1000:.3f}с")
 
     def _render_banner(self) -> None:
         bg, fg = PHASE_STYLE[self.controller.phase]

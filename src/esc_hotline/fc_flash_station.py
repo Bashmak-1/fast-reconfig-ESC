@@ -409,6 +409,7 @@ class FcFlashStationController(QObject):
         self._connect_in_flight = False
         self._dfu_op_in_flight = False
         self._dfu_port_id: Optional[str] = None
+        self._dfu_poll_count = 0  # how many `-l usb` ticks since armed - visible proof the search loop is actually running
         self._pre_dfu_port_snapshot: set[str] = set()
         self._counter_flashed = 0
         self._counter_ok = 0
@@ -478,6 +479,7 @@ class FcFlashStationController(QObject):
         self._connect_in_flight = False
         self._dfu_op_in_flight = False
         self._dfu_port_id = None
+        self._dfu_poll_count = 0
         self._pre_dfu_port_snapshot = set()
         self._last_esc_states = {}
         self._tick_seen_states = {}
@@ -553,8 +555,19 @@ class FcFlashStationController(QObject):
                 self._attempt_connect()
                 return
             if not self._dfu_op_in_flight:
+                cli_path = self._resolved_cli_path()
+                if not cli_path:
+                    # A clearly different message from "DFU not found yet" -
+                    # this means the search can never succeed until the
+                    # path is fixed, not just "keep waiting".
+                    self._dfu_poll_count += 1
+                    self.dfu_detail_changed.emit(
+                        f"STM32_Programmer_CLI.exe не знайдено на диску (спроба {self._dfu_poll_count}) - "
+                        "вкажіть шлях вручну в налаштуваннях."
+                    )
+                    return
                 self._dfu_op_in_flight = True
-                self._list_devices_requested.emit(self._resolved_cli_path())
+                self._list_devices_requested.emit(cli_path)
             return
 
         if self._phase == "waiting_fc_normal":
@@ -642,8 +655,14 @@ class FcFlashStationController(QObject):
         self._dfu_op_in_flight = False
         if not self._armed or self._phase != "waiting_device":
             return
-        self._flog.info("FC flash station: `-l` tick -> %d DFU device(s)", len(devices))
+        self._dfu_poll_count += 1
+        self._flog.info("FC flash station: `-l usb` tick #%d -> %d DFU device(s)", self._dfu_poll_count, len(devices))
         if not devices:
+            # Visible, constantly-updating proof the search loop is really
+            # running - previously this tick was entirely silent in the
+            # GUI when nothing was found, which looked indistinguishable
+            # from "stuck"/"not even trying" to an operator watching.
+            self.dfu_detail_changed.emit(f"DFU не знайдено (спроба {self._dfu_poll_count}) - шукаю далі...")
             return
         if not self._firmware_path:
             self._flog.warning("FC flash station: DFU device present but no firmware file selected - not flashing.")
