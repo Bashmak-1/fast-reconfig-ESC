@@ -11,8 +11,10 @@ from esc_hotline.motor_ramp import (
     MSP_MAX,
     MSP_MIN,
     count_active_motors,
+    cubic_bezier_ease,
     msp_to_percent,
     next_value,
+    next_value_bezier,
     percent_to_msp,
     protocol_name,
 )
@@ -103,6 +105,69 @@ def test_next_value_higher_rate_moves_further_per_tick():
     slow = next_value(MSP_MIN, MSP_MAX, rate_percent_per_s=5.0, tick_s=0.1)
     fast = next_value(MSP_MIN, MSP_MAX, rate_percent_per_s=50.0, tick_s=0.1)
     assert fast > slow
+
+
+# ---- cubic_bezier_ease / next_value_bezier ------------------------------------------------
+# The alternative "Безе" ramp mode offered alongside (never replacing) the
+# linear next_value() above - see motor_ramp.py's docstring for why 3t^2-2t^3
+# genuinely is a cubic Bezier curve here, not just S-shaped-looking math.
+
+
+def test_cubic_bezier_ease_endpoints():
+    assert cubic_bezier_ease(0.0) == 0.0
+    assert cubic_bezier_ease(1.0) == 1.0
+
+
+def test_cubic_bezier_ease_exact_midpoint():
+    # 3*(0.5)^2 - 2*(0.5)^3 = 0.75 - 0.25 = 0.5 exactly
+    assert cubic_bezier_ease(0.5) == 0.5
+
+
+def test_cubic_bezier_ease_clamps_out_of_range():
+    assert cubic_bezier_ease(-1.0) == 0.0
+    assert cubic_bezier_ease(2.0) == 1.0
+
+
+def test_cubic_bezier_ease_is_monotonic():
+    assert cubic_bezier_ease(0.2) < cubic_bezier_ease(0.5) < cubic_bezier_ease(0.8)
+
+
+def test_cubic_bezier_ease_is_symmetric_around_midpoint():
+    assert round(cubic_bezier_ease(0.3) + cubic_bezier_ease(0.7), 9) == 1.0
+
+
+def test_next_value_bezier_at_start_is_start_value():
+    assert next_value_bezier(MSP_MIN, MSP_MAX, elapsed_s=0.0, duration_s=10.0) == MSP_MIN
+
+
+def test_next_value_bezier_at_duration_is_target_exactly():
+    assert next_value_bezier(MSP_MIN, MSP_MAX, elapsed_s=10.0, duration_s=10.0) == MSP_MAX
+
+
+def test_next_value_bezier_at_half_duration_is_exact_midpoint():
+    expected = MSP_MIN + (MSP_MAX - MSP_MIN) // 2
+    assert next_value_bezier(MSP_MIN, MSP_MAX, elapsed_s=5.0, duration_s=10.0) == expected
+
+
+def test_next_value_bezier_never_overshoots_past_duration():
+    assert next_value_bezier(MSP_MIN, MSP_MAX, elapsed_s=999.0, duration_s=10.0) == MSP_MAX
+
+
+def test_next_value_bezier_negative_elapsed_clamps_to_start():
+    assert next_value_bezier(MSP_MIN, MSP_MAX, elapsed_s=-5.0, duration_s=10.0) == MSP_MIN
+
+
+def test_next_value_bezier_zero_duration_is_safe_and_reaches_target():
+    assert next_value_bezier(MSP_MIN, MSP_MAX, elapsed_s=0.0, duration_s=0.0) == MSP_MAX
+
+
+def test_next_value_bezier_negative_duration_is_safe_and_reaches_target():
+    assert next_value_bezier(MSP_MIN, MSP_MAX, elapsed_s=1.0, duration_s=-1.0) == MSP_MAX
+
+
+def test_next_value_bezier_moves_down_towards_lower_target():
+    value = next_value_bezier(MSP_MAX, MSP_MIN, elapsed_s=5.0, duration_s=10.0)
+    assert MSP_MIN < value < MSP_MAX
 
 
 # ---- count_active_motors ------------------------------------------------

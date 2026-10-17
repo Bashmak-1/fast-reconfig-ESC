@@ -48,7 +48,7 @@ from typing import Optional
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
-from .motor_ramp import MOTOR_PROTOCOLS, MSP_MIN, count_active_motors, next_value, protocol_name
+from .motor_ramp import MOTOR_PROTOCOLS, MSP_MIN, count_active_motors, next_value, next_value_bezier, protocol_name
 from .msp import MspClient, MspCommand, MspError
 from .serial_transport import SerialTransport
 
@@ -61,6 +61,13 @@ TICK_MS = 100
 PHASE_IDLE = "idle"
 PHASE_UP = "up"
 PHASE_DOWN = "down"
+
+# Ramp shape: RAMP_LINEAR (next_value(), constant %/s, the original and
+# still-default behavior) or RAMP_BEZIER (next_value_bezier(), eased
+# start/stop - "Безе", offered as a CHOICE alongside linear, never a
+# replacement - see motor_ramp.py's cubic_bezier_ease() docstring).
+RAMP_LINEAR = "linear"
+RAMP_BEZIER = "bezier"
 
 
 class MotorTestManager(QObject):
@@ -83,6 +90,9 @@ class MotorTestManager(QObject):
         self._up_rate = 10.0  # percent/s
         self._down_rate = 10.0
         self._phase = PHASE_IDLE
+        self._ramp_mode = RAMP_LINEAR
+        self._phase_start_time = 0.0  # monotonic() when the current leg (up or down) began - RAMP_BEZIER only
+        self._phase_start_value = MSP_MIN  # self._current at that same moment - RAMP_BEZIER only
         self._protocol_index: Optional[int] = None
         self._motor_pwm_rate = 0  # cached from the last MSP_ADVANCED_CONFIG read - must be echoed back
         self._servo_pwm_rate = 0  # unchanged on write, see set_protocol()
@@ -278,6 +288,15 @@ class MotorTestManager(QObject):
 
     # ---- ramp control ------------------------------------------------
 
+    def set_ramp_mode(self, mode: str) -> None:
+        """RAMP_LINEAR (default) or RAMP_BEZIER - safe to call any time,
+        including mid-sweep (takes effect from the next tick, restarting
+        the eased curve's own elapsed-time baseline at the CURRENT value
+        rather than jumping, if switched to RAMP_BEZIER mid-move)."""
+        self._ramp_mode = mode if mode in (RAMP_LINEAR, RAMP_BEZIER) else RAMP_LINEAR
+        self._phase_start_time = time.monotonic()
+        self._phase_start_value = self._current
+
     def start_sweep(self, up_rate_percent_per_s: float, down_rate_percent_per_s: float) -> None:
         if self._msp is None:
             self._log("error", "Не підключено.")
@@ -292,8 +311,10 @@ class MotorTestManager(QObject):
         self._current = MSP_MIN
         self._target = 2000  # MSP_MAX, avoids importing it twice under two names
         self._phase = PHASE_UP
+        self._begin_leg()
         self.phase_changed.emit(PHASE_UP)
-        self._log("info", f"Старт розгону: набір {self._up_rate:.1f}%/с, спад {self._down_rate:.1f}%/с.")
+        shape = "Безе" if self._ramp_mode == RAMP_BEZIER else "лінійний"
+        self._log("info", f"Старт розгону ({shape}): набір {self._up_rate:.1f}%/с, спад {self._down_rate:.1f}%/с.")
         self._last_tick_time = time.monotonic()
         self._timer.start()
 
@@ -308,8 +329,17 @@ class MotorTestManager(QObject):
         self._target = MSP_MIN
         if self._phase != PHASE_DOWN:
             self._phase = PHASE_DOWN
+            self._begin_leg()
             self.phase_changed.emit(PHASE_DOWN)
             self._log("info", "Зупинка: плавний спад до 0%.")
+
+    def _begin_leg(self) -> None:
+        """Mark the start of a new ramp leg (up or down) - RAMP_BEZIER
+        computes position purely from elapsed time since THIS moment, so
+        every direction change needs a fresh time/value baseline, not just
+        the very first Start."""
+        self._phase_start_time = time.monotonic()
+        self._phase_start_value = self._current
 
     def _on_tick(self) -> None:
         now = time.monotonic()
@@ -317,7 +347,12 @@ class MotorTestManager(QObject):
         self._last_tick_time = now
 
         rate = self._up_rate if self._phase == PHASE_UP else self._down_rate
-        self._current = next_value(self._current, self._target, rate, tick_s)
+        if self._ramp_mode == RAMP_BEZIER:
+            elapsed_s = now - self._phase_start_time
+            duration_s = 100.0 / rate if rate > 0 else 0.0
+            self._current = next_value_bezier(self._phase_start_value, self._target, elapsed_s, duration_s)
+        else:
+            self._current = next_value(self._current, self._target, rate, tick_s)
 
         try:
             self._send_all(self._current)
@@ -330,6 +365,7 @@ class MotorTestManager(QObject):
             if self._phase == PHASE_UP:
                 self._phase = PHASE_DOWN
                 self._target = MSP_MIN
+                self._begin_leg()
                 self.phase_changed.emit(PHASE_DOWN)
             elif self._phase == PHASE_DOWN:
                 self._timer.stop()

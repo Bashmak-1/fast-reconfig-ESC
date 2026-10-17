@@ -103,6 +103,25 @@ def test_discover_all_continues_past_missing_esc(monkeypatch):
     assert finished == [(4, 5)]
 
 
+def test_discover_many_probes_only_the_given_indices(monkeypatch):
+    # fc_flash_station.py's multi-slot watch (e.g. both halves of a 2-in-1
+    # ESC board) - must never touch indices outside the given list.
+    events = []
+    mgr, _fake = _make_manager_with_fake(monkeypatch, bad_indices={2}, expected_count=5)
+    mgr.esc_status_changed.connect(lambda i, s, d, info: events.append((i, s)))
+    finished = []
+    mgr.discovery_finished.connect(lambda found, expected: finished.append((found, expected)))
+
+    mgr.discover_many([0, 2, 3])  # must not raise; index 1/4 untouched
+
+    states_by_index = {i: s for i, s in events}
+    assert states_by_index[0] == "ok"
+    assert 2 not in states_by_index  # the missing one - quiet, no GUI event at all
+    assert states_by_index[3] == "ok"
+    assert 1 not in states_by_index and 4 not in states_by_index  # never probed
+    assert finished == [(2, 3)]
+
+
 def test_flash_all_continues_past_failing_esc(monkeypatch, tmp_path):
     config_path = tmp_path / "cfg.bin"
     config_path.write_bytes(bytes([0x42]) * LAYOUT_SIZE)

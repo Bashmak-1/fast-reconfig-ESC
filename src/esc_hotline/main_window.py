@@ -35,6 +35,7 @@ from .esc_manager import (
     MIN_ESC_CONNECT_RETRIES,
 )
 from .esc_status_widget import EscStatusWidget
+from .fc_flash_widget import FcFlashPage
 from .file_logger import LOG_FILE
 from .flag_icons import FLAG_ICON_BUILDERS
 from .hotspot_line_widget import HotspotLinePage
@@ -107,6 +108,9 @@ class MainWindow(QMainWindow):
         # motor_test_widget.py's own docstring), matching the same
         # not-worth-i18n-upkeep call made for the (separate, shelved) UID Lab tab.
         self._tabs.addTab(self._build_motor_test_tab(), "Прогон мотором")
+        # Also plain-Ukrainian-literal, not retranslated - same rationale
+        # as the "Прогон мотором" tab above.
+        self._tabs.addTab(self._build_fc_flash_tab(), "Прошивка FC")
         root.addWidget(self._tabs, 1)
 
         root.addWidget(self._build_log_panel())
@@ -142,6 +146,10 @@ class MainWindow(QMainWindow):
     def _build_motor_test_tab(self) -> QWidget:
         self.motor_test_page = MotorTestPage()
         return self.motor_test_page
+
+    def _build_fc_flash_tab(self) -> QWidget:
+        self.fc_flash_page = FcFlashPage()
+        return self.fc_flash_page
 
     def _build_top_bar(self) -> QFrame:
         bar = QFrame()
@@ -293,6 +301,20 @@ class MainWindow(QMainWindow):
         self.motor_test_page.connection_changed.connect(lambda *_: self.hotspot_line_page.recheck_availability())
         self.hotspot_page.armed_changed.connect(lambda *_: self.motor_test_page.recheck_availability())
         self.hotspot_line_page.controller.armed_changed.connect(lambda *_: self.motor_test_page.recheck_availability())
+
+        # fc_flash_page (FcFlashPage) is likewise NOT wired into the shared
+        # request_*/EscManager signals - own private connections (own
+        # EscManager for the ESC phase, own DFU worker), see
+        # fc_flash_station.py's docstring. Same cross-tab port-collision
+        # guard as every other private-connection tab above, wired
+        # symmetrically with all three of them.
+        self.fc_flash_page.set_port_busy_checker(self._is_port_busy_for_fc_flash)
+        self.fc_flash_page.controller.armed_changed.connect(lambda *_: self.hotspot_page.recheck_availability())
+        self.fc_flash_page.controller.armed_changed.connect(lambda *_: self.hotspot_line_page.recheck_availability())
+        self.fc_flash_page.controller.armed_changed.connect(lambda *_: self.motor_test_page.recheck_availability())
+        self.hotspot_page.armed_changed.connect(lambda *_: self.fc_flash_page.recheck_availability())
+        self.hotspot_line_page.controller.armed_changed.connect(lambda *_: self.fc_flash_page.recheck_availability())
+        self.motor_test_page.connection_changed.connect(lambda *_: self.fc_flash_page.recheck_availability())
 
     # ---- i18n ------------------------------------------------
 
@@ -529,6 +551,8 @@ class MainWindow(QMainWindow):
             return True
         if self.motor_test_page.connected_port() == port:
             return True
+        if self.fc_flash_page.controller.armed and self.fc_flash_page._selected_port_device() == port:
+            return True
         return False
 
     def _is_port_busy_for_hotspot_line(self, port: str) -> bool:
@@ -538,6 +562,8 @@ class MainWindow(QMainWindow):
             return True
         if self.motor_test_page.connected_port() == port:
             return True
+        if self.fc_flash_page.controller.armed and self.fc_flash_page._selected_port_device() == port:
+            return True
         return False
 
     def _is_port_busy_for_motor_test(self, port: str) -> bool:
@@ -546,6 +572,19 @@ class MainWindow(QMainWindow):
         if self.hotspot_line_page.controller.armed and self.hotspot_line_page._selected_port_device() == port:
             return True
         if self._connected and not self._hotspot_armed and self._port_combo.currentData() == port:
+            return True
+        if self.fc_flash_page.controller.armed and self.fc_flash_page._selected_port_device() == port:
+            return True
+        return False
+
+    def _is_port_busy_for_fc_flash(self, port: str) -> bool:
+        if self._hotspot_armed and self.hotspot_page._selected_port_device() == port:
+            return True
+        if self.hotspot_line_page.controller.armed and self.hotspot_line_page._selected_port_device() == port:
+            return True
+        if self._connected and not self._hotspot_armed and self._port_combo.currentData() == port:
+            return True
+        if self.motor_test_page.connected_port() == port:
             return True
         return False
 
@@ -576,4 +615,5 @@ class MainWindow(QMainWindow):
         self.worker.stop()
         self.hotspot_line_page.shutdown()
         self.motor_test_page.shutdown()
+        self.fc_flash_page.shutdown()
         super().closeEvent(event)

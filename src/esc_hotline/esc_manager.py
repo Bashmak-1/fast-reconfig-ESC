@@ -322,6 +322,46 @@ class EscManager(QObject):
         self.esc_status_changed.emit(index, state.value, detail, result.esc_info)
         self.discovery_finished.emit(1, 1)
 
+    def discover_many(self, indices: list[int]) -> None:
+        """Probe and classify exactly the given ESC indices - the multi-slot
+        sibling of discover_one(), for a board with more than one ESC wired
+        to more than one specific output at once (e.g. a 2-in-1 ESC board
+        that shows up as two separate ESC indices on the same physical
+        board). Same quiet-about-absence rationale as discover_one(): a
+        currently-unplugged watched index is the normal steady state here,
+        not an error, so it's only logged at info level, not surfaced to the
+        GUI panel.
+        """
+        if self._fourway is None:
+            self._log("error", tr("not_connected_log"))
+            return
+
+        found = 0
+        for index in indices:
+            try:
+                result = self._probe_one(index)
+            except Exception as e:  # noqa: BLE001 - one missing slot must never abort the rest
+                self._probe_results[index] = ProbeResult(ok=False, error=str(e))
+                self._flog.info("ESC #%d: not found/no response (%s)", index + 1, e)
+                continue
+
+            self._probe_results[index] = result
+            found += 1
+            state, detail = self._classify(result)
+            self._flog.info(
+                "ESC #%d: found - %s | settings (%d bytes): %s",
+                index + 1, self._describe_esc_info(result.esc_info), len(result.settings or b""), hex_dump(result.settings or b""),
+            )
+            if result.settings is not None:
+                decoded = decode_settings(result.settings)
+                self._flog.info(
+                    "ESC #%d: decoded settings: %s",
+                    index + 1, "; ".join(f"{d.label}={d.value}" for d in decoded),
+                )
+            self.esc_status_changed.emit(index, state.value, detail, result.esc_info)
+
+        self.discovery_finished.emit(found, len(indices))
+
     @staticmethod
     def _describe_esc_info(info: Optional[EscInfo]) -> str:
         if info is None:

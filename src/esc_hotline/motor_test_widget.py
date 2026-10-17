@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
 
 from .manual_counter_widget import ManualCounterWidget
 from .motor_ramp import MOTOR_PROTOCOLS, MSP_MAX, MSP_MIN, msp_to_percent
-from .motor_test_manager import PHASE_DOWN, PHASE_IDLE, PHASE_UP, MotorTestManager
+from .motor_test_manager import PHASE_DOWN, PHASE_IDLE, PHASE_UP, RAMP_BEZIER, RAMP_LINEAR, MotorTestManager
 from .serial_transport import list_fc_ports
 from .settings_store import load_int, load_str, save_int, save_str
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
@@ -41,10 +41,12 @@ from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
 _PORT_KEY = "motor_test_port"
 _UP_RATE_KEY = "motor_test_up_rate"
 _DOWN_RATE_KEY = "motor_test_down_rate"
+_RAMP_MODE_KEY = "motor_test_ramp_mode"
 DEFAULT_BAUD = 115200
 DEFAULT_RATE = 10  # %/s
 _SLIDER_HEIGHT = 70
 _SLIDER_WIDTH = 22
+_RAMP_MODE_LABELS = {RAMP_LINEAR: "Лінійна", RAMP_BEZIER: "Безе"}
 
 _PHASE_LABELS = {
     PHASE_IDLE: "Очікування",
@@ -65,6 +67,7 @@ class MotorTestPage(QWidget):
     _start_sweep_requested = pyqtSignal(float, float)
     _stop_sweep_requested = pyqtSignal()
     _set_protocol_requested = pyqtSignal(int)
+    _set_ramp_mode_requested = pyqtSignal(str)
 
     # GUI-thread-affinity signal for MainWindow's cross-tab port-collision guard.
     connection_changed = pyqtSignal(bool)
@@ -177,6 +180,17 @@ class MotorTestPage(QWidget):
         root.addWidget(self._phase_label)
 
         rate_row = QHBoxLayout()
+        rate_row.addWidget(QLabel("Графік рампи:"))
+        self._ramp_mode_combo = QComboBox()
+        self._ramp_mode_combo.addItem(_RAMP_MODE_LABELS[RAMP_LINEAR], RAMP_LINEAR)
+        self._ramp_mode_combo.addItem(_RAMP_MODE_LABELS[RAMP_BEZIER], RAMP_BEZIER)
+        self._ramp_mode_combo.setToolTip(
+            "Лінійна - стала швидкість (як і раніше). Безе - плавний розгін/спад "
+            "без різкого старту й зупинки, та самі %/с задають загальну тривалість руху."
+        )
+        self._ramp_mode_combo.currentIndexChanged.connect(self._on_ramp_mode_changed)
+        rate_row.addWidget(self._ramp_mode_combo)
+        rate_row.addSpacing(24)
         rate_row.addWidget(QLabel("Швидкість набору, %/с:"))
         self._up_rate_stepper = ManualCounterWidget(min_value=1, max_value=100, step=1)
         self._up_rate_stepper.value_changed.connect(lambda v: save_int(_UP_RATE_KEY, v))
@@ -284,6 +298,7 @@ class MotorTestPage(QWidget):
         self._start_sweep_requested.connect(self.manager.start_sweep)
         self._stop_sweep_requested.connect(self.manager.stop_sweep)
         self._set_protocol_requested.connect(self.manager.set_protocol)
+        self._set_ramp_mode_requested.connect(self.manager.set_ramp_mode)
 
         self.manager.connection_state_changed.connect(self._on_connection_state_changed)
         self.manager.motor_count_detected.connect(self._rebuild_motor_sliders)
@@ -321,6 +336,11 @@ class MotorTestPage(QWidget):
                 self._port_combo.setCurrentIndex(idx)
         self._up_rate_stepper.set_value(load_int(_UP_RATE_KEY, DEFAULT_RATE))
         self._down_rate_stepper.set_value(load_int(_DOWN_RATE_KEY, DEFAULT_RATE))
+        ramp_mode = load_str(_RAMP_MODE_KEY, RAMP_LINEAR)
+        idx = self._ramp_mode_combo.findData(ramp_mode if ramp_mode in _RAMP_MODE_LABELS else RAMP_LINEAR)
+        if idx >= 0:
+            self._ramp_mode_combo.setCurrentIndex(idx)
+        self._set_ramp_mode_requested.emit(self._ramp_mode_combo.currentData())
 
     # ---- port-collision guard (same real-hardware-confirmed risk as the
     # two Хотспот tabs - see main_window.py's _is_port_busy_for_* methods) --
@@ -370,6 +390,13 @@ class MotorTestPage(QWidget):
             self._master_pct_label.setText("0%")
             self._phase_label.setText(_PHASE_LABELS[PHASE_IDLE])
         self.connection_changed.emit(connected)
+
+    # ---- ramp mode ------------------------------------------------
+
+    def _on_ramp_mode_changed(self, _index: int) -> None:
+        mode = self._ramp_mode_combo.currentData()
+        save_str(_RAMP_MODE_KEY, mode)
+        self._set_ramp_mode_requested.emit(mode)
 
     # ---- start / stop ------------------------------------------------
 

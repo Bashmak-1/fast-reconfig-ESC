@@ -58,6 +58,49 @@ def count_active_motors(raw_motor_values: list[int]) -> int:
     return sum(1 for v in raw_motor_values if v != 0)
 
 
+def cubic_bezier_ease(t: float) -> float:
+    """Ease-in-out progress curve for the "Безе" ramp mode, offered as an
+    alternative to next_value()'s constant-speed linear ramp (never a
+    replacement for it - see motor_test_manager.py/motor_test_widget.py).
+
+    This is a genuine cubic Bezier curve, not just a vaguely S-shaped
+    approximation: with control points P0=0, P1=0, P2=1, P3=1, the
+    standard Bezier formula B(t) = (1-t)^3*P0 + 3(1-t)^2*t*P1 +
+    3(1-t)*t^2*P2 + t^3*P3 reduces algebraically to 3t^2 - 2t^3 - the
+    well-known "smoothstep" curve. Starts and ends with zero slope (no
+    abrupt jerk at either end, unlike the linear ramp's constant rate,
+    which is exactly the "gentler" shape requested), monotonic over
+    [0, 1], and symmetric around t=0.5.
+
+    `t` is clamped to [0, 1] first, so the result is always in [0, 1] too
+    - callers never need to clamp the output themselves.
+    """
+    clamped = max(0.0, min(1.0, t))
+    return 3.0 * clamped**2 - 2.0 * clamped**3
+
+
+def next_value_bezier(start: int, target: int, elapsed_s: float, duration_s: float) -> int:
+    """Where the ramp should be `elapsed_s` seconds into a `duration_s`
+    -long move from `start` to `target`, following cubic_bezier_ease()
+    instead of a constant rate. Unlike next_value() (which steps forward
+    from the previous tick's own result), this is computed directly from
+    elapsed wall-clock time since the move began - time-based, not
+    step-based, since the eased rate of travel isn't constant, so there's
+    no single "step size" to carry between ticks.
+
+    Degenerate `duration_s <= 0` (nothing to divide by) safely returns
+    `target` outright - an instantaneous move, not a crash. Negative
+    `elapsed_s` (shouldn't happen, but never trust a caller blindly) is
+    clamped to the start of the curve, same spirit as next_value()'s own
+    zero/negative-rate handling.
+    """
+    if duration_s <= 0:
+        return target
+    t = max(0.0, elapsed_s) / duration_s
+    eased = cubic_bezier_ease(t)
+    return round(start + (target - start) * eased)
+
+
 def next_value(current: int, target: int, rate_percent_per_s: float, tick_s: float) -> int:
     """One ramp step from `current` towards `target`, moving at most
     `rate_percent_per_s` percent of the full 1000-2000 range per second of
