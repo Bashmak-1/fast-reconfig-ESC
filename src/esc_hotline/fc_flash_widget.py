@@ -40,6 +40,9 @@ from .eeprom_config import ConfigFileError, load_config_file
 from .esc_manager import MAX_ESC_COUNT
 from .fc_flash_station import (
     MAX_CONNECT_ATTEMPTS,
+    MAX_POLL_INTERVAL_MS,
+    MIN_POLL_INTERVAL_MS,
+    POLL_INTERVAL_STEP_MS,
     PHASE_LABEL,
     PHASE_STYLE,
     RETRY_PHASES,
@@ -57,6 +60,7 @@ _PORT_KEY = "fc_flash_port"
 _ESC_INDICES_KEY = "fc_flash_esc_indices"  # comma-separated 0-based indices, e.g. "0,1"
 _PROTOCOL_INDEX_KEY = "fc_flash_protocol_index"
 _CLI_PATH_OVERRIDE_KEY = "fc_flash_cli_path_override"
+_POLL_INTERVAL_KEY = "fc_flash_poll_interval_ms"
 _DEFAULT_ESC_INDICES = (0, 1)  # ESC 1 + ESC 2 - the common case is a 2-in-1 ESC board on one FC
 
 _FIRMWARE_FILTER = "Firmware (*.hex *.bin);;All files (*)"
@@ -176,6 +180,31 @@ class FcFlashPage(QWidget):
         self._countdown_label.setStyleSheet(f"color: {TEXT_MUTED};")
         self._countdown_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self._countdown_label)
+
+        # Grouped with the countdown above (the thing it controls), not
+        # with the port/ESC/config row - like hotspot_line_widget.py's
+        # identical control, this stays enabled while armed (see
+        # _on_armed_changed): it only touches QTimer.setInterval(), no
+        # protocol/connection-state implication, so an operator watching a
+        # slow-booting ESC can raise it live without stopping and losing
+        # the current watch.
+        poll_interval_row = QHBoxLayout()
+        poll_interval_row.addStretch(1)
+        poll_interval_row.addWidget(QLabel("Інтервал опиту ESC, мс:"))
+        self._poll_interval_stepper = ManualCounterWidget(
+            min_value=MIN_POLL_INTERVAL_MS, max_value=MAX_POLL_INTERVAL_MS, step=POLL_INTERVAL_STEP_MS
+        )
+        self._poll_interval_stepper.setToolTip(
+            "Як часто перевіряти, чи відповідає ESC. Збільшіть, якщо ESC довго прокидається "
+            "після підключення живлення - занадто часті спроби можуть заклинити bootloader."
+        )
+        self._poll_interval_stepper.value_changed.connect(self._on_poll_interval_changed)
+        poll_interval_row.addWidget(self._poll_interval_stepper)
+        self._poll_interval_seconds_label = QLabel()
+        self._poll_interval_seconds_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        poll_interval_row.addWidget(self._poll_interval_seconds_label)
+        poll_interval_row.addStretch(1)
+        root.addLayout(poll_interval_row)
 
         self._retry_btn = QPushButton("Повторити")
         self._retry_btn.clicked.connect(self.controller.retry)
@@ -326,6 +355,15 @@ class FcFlashPage(QWidget):
         save_int(_PROTOCOL_INDEX_KEY, index)
         self.controller.set_protocol_index(index)
 
+    def _on_poll_interval_changed(self, value: int) -> None:
+        self.controller.set_poll_interval_ms(value)
+        save_int(_POLL_INTERVAL_KEY, value)
+        self._update_poll_interval_seconds_label()
+
+    def _update_poll_interval_seconds_label(self) -> None:
+        seconds = self._poll_interval_stepper.value() / 1000
+        self._poll_interval_seconds_label.setText(f"{seconds:.1f}с")
+
     def _restore_settings(self) -> None:
         firmware_path = load_str(_FIRMWARE_PATH_KEY)
         if firmware_path and Path(firmware_path).is_file():
@@ -378,6 +416,10 @@ class FcFlashPage(QWidget):
         # bounds restores elsewhere in this method.
         self.controller.set_protocol_index(self._protocol_combo.currentIndex())
 
+        self._poll_interval_stepper.set_value(load_int(_POLL_INTERVAL_KEY, self.controller.poll_interval_ms()))
+        self.controller.set_poll_interval_ms(self._poll_interval_stepper.value())
+        self._update_poll_interval_seconds_label()
+
     # ---- start/stop ------------------------------------------------
 
     def set_port_busy_checker(self, checker: Callable[[str], bool]) -> None:
@@ -418,7 +460,10 @@ class FcFlashPage(QWidget):
 
     def _on_power_cycle_hint_changed(self, show: bool) -> None:
         self._power_cycle_hint_shown = show
-        self._power_cycle_hint_label.setText("Можливо варто перепідключити ESC по живленню." if show else "")
+        self._power_cycle_hint_label.setText(
+            "Досі не бачу ESC — перевірте, що лабораторний блок живлення підключено й увімкнено, "
+            "або спробуйте перепідключити ESC по живленню." if show else ""
+        )
         self._power_cycle_hint_label.setVisible(show)
 
     def _on_armed_changed(self, armed: bool) -> None:

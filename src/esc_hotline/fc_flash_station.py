@@ -81,6 +81,17 @@ from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, BG_PANEL, TEXT_MAIN
 DEFAULT_BAUD = 115200
 MAX_CONNECT_ATTEMPTS = 5
 POLL_INTERVAL_MS = 1000
+# Operator-adjustable via FcFlashStationController.set_poll_interval_ms() -
+# same values/rationale as hotspot_station.py's own constants: a
+# freshly-powered-up ESC can take a few seconds to boot, and re-probing it
+# too eagerly while it's still booting risks wedging a BLHeli/AM32
+# bootloader until a full power cycle (see docs/PROTOCOL_NOTES.md,
+# "Known gotchas"). Duplicated here rather than imported, same as
+# EMPTY_PROBES_BEFORE_POWER_CYCLE_HINT below - this project's convention
+# is separate workflows own their own tuning constants.
+MIN_POLL_INTERVAL_MS = 1000
+MAX_POLL_INTERVAL_MS = 10_000
+POLL_INTERVAL_STEP_MS = 100
 EMPTY_PROBES_BEFORE_POWER_CYCLE_HINT = 20  # same rationale as hotspot_station.py's own constant
 
 # DFU-phase-only states, checked before ever reaching the ESC-watching
@@ -426,6 +437,18 @@ class FcFlashStationController(QObject):
 
     def poll_timer_remaining_ms(self) -> int:
         return self._poll_timer.remainingTime() if self._poll_timer.isActive() else -1
+
+    def poll_interval_ms(self) -> int:
+        return self._poll_timer.interval()
+
+    def set_poll_interval_ms(self, value: int) -> None:
+        """How often to re-probe the watched ESC slot(s) - safe to call at
+        any time, including while armed (QTimer.setInterval() on an
+        already-running timer restarts its remaining-time countdown from
+        the new value immediately, same as hotspot_station.py's own
+        identical method)."""
+        clamped = max(MIN_POLL_INTERVAL_MS, min(int(value), MAX_POLL_INTERVAL_MS))
+        self._poll_timer.setInterval(clamped)
 
     def set_firmware_path(self, path: Optional[str]) -> None:
         self._firmware_path = path or None
