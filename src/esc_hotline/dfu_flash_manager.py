@@ -10,15 +10,21 @@ for this job today. All this module does is shell out to it and interpret
 its output - same "never trust a write without an explicit check" stance
 as esc_manager.py's own readback-verify for the ESC side of this app.
 
-KNOWN UNKNOWN, flag for whoever next has the real tool installed: the
-exact text STM32_Programmer_CLI.exe prints for `-l` (list connected
-ST-Link/USB-DFU interfaces) and for a successful `-w ... -v` (write +
-verify) has NOT been verified against a real run (the tool isn't
-installed on the machine this was written on). The parsing below follows
-ST's documented CLI output shape - confirm against a real run and adjust
-`list_devices`/`flash_and_verify` if the real text differs. If the parsing
-is wrong, prefer failing safe: report "not found"/"not verified" rather
-than guessing success.
+Confirmed on real hardware (2026-10): the write+verify path
+(`flash_and_verify`'s "verified successfully" check) matches the real
+tool's output exactly. Listing DFU devices did NOT work with the
+initially-assumed `-l` flag - per UM2237 and ST's own forum examples,
+bare `-l` (`--list`) enumerates RS232 serial ports, not USB DFU devices;
+the correct call is `-l usb`, a distinct, documented listing mode for the
+USB interface specifically. `list_devices` was fixed accordingly.
+
+STILL a known unknown: the exact per-line/block text `-l usb` prints for
+a found device has not been captured from a real run yet, so
+`list_devices`'s parsing is deliberately tolerant (any line containing a
+`usbN` index token counts as one found device, with no further text
+filtering) rather than matching an unverified exact shape. Tighten this
+once a real `-l usb` capture is available - see fc_flash_station.py's
+module docstring for the real-hardware-verification status.
 """
 from __future__ import annotations
 
@@ -37,12 +43,6 @@ from .file_logger import get_logger
 # real output has never been seen on the machine this was written on (see
 # module docstring), the first real run's log is what will actually
 # explain whether the parsing assumptions below hold up.
-
-# STMicroelectronics' own USB DFU bootloader VID:PID - the same one Windows
-# Device Manager shows as "STM Device in DFU Mode". This is what tells a
-# "FC sitting in DFU, ready to flash" line apart from an ST-Link debug
-# probe or anything else STM32_Programmer_CLI's own device list might show.
-DFU_VID_PID = "0483:df11"
 
 DEFAULT_CLI_CANDIDATES = (
     r"C:\Program Files\STMicroelectronics\STM32Cube\STM32CubeProgrammer\bin\STM32_Programmer_CLI.exe",
@@ -103,26 +103,38 @@ def _run(cli_path: Path, args: list[str], timeout_s: float) -> subprocess.Comple
 
 
 def list_devices(cli_path: Path) -> list[DfuDeviceInfo]:
-    """Run `-l` and return only the DFU-mode entries (VID:PID 0483:df11) -
-    an ST-Link debug probe can show up in the same list and must never be
-    mistaken for a DFU-ready FC. Any failure to even run the tool is
-    reported as "no devices", not an exception - this is called from a
-    poll loop, where a single bad tick must not break the loop."""
+    """Run `-l usb` - NOT bare `-l`, which lists RS232 serial ports instead
+    (see this module's docstring) - and return the USB-DFU entries found.
+    `-l usb` only ever enumerates devices already sitting in the DFU
+    bootloader (an ST-Link/JTAG debug probe shows up under the separate
+    bare `-l` listing instead, never here), so every entry it returns is
+    treated as a DFU-ready FC - no extra VID:PID text filter on top of
+    that (an earlier version additionally required a literal "0483:df11"
+    substring per line, which real-hardware testing showed never appears
+    in this tool's actual output; removed).
+
+    Any failure to even run the tool is reported as "no devices", not an
+    exception - this is called from a poll loop, where a single bad tick
+    must not break the loop."""
     flog = get_logger()
     try:
-        result = _run(cli_path, ["-l"], LIST_TIMEOUT_S)
+        result = _run(cli_path, ["-l", "usb"], LIST_TIMEOUT_S)
     except (OSError, subprocess.TimeoutExpired) as e:
-        flog.warning("DFU: `-l` failed to run: %s", e)
+        flog.warning("DFU: `-l usb` failed to run: %s", e)
         return []
 
     devices: list[DfuDeviceInfo] = []
+    seen_ports: set[str] = set()
     for line in result.stdout.splitlines():
-        if DFU_VID_PID not in line.lower():
-            continue
         match = re.search(r"\b(usb\d+)\b", line, re.IGNORECASE)
-        port_id = match.group(1).lower() if match else "usb1"
+        if not match:
+            continue
+        port_id = match.group(1).lower()
+        if port_id in seen_ports:
+            continue  # the same index can legitimately appear on more than one line of a multi-line device block
+        seen_ports.add(port_id)
         devices.append(DfuDeviceInfo(port_id=port_id, raw_line=line.strip()))
-    flog.info("DFU: `-l` parsed %d DFU device(s): %s", len(devices), [d.raw_line for d in devices])
+    flog.info("DFU: `-l usb` parsed %d DFU device(s): %s", len(devices), [d.raw_line for d in devices])
     return devices
 
 

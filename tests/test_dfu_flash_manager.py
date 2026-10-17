@@ -49,20 +49,61 @@ def test_find_cli_path_none_when_nothing_found(monkeypatch, tmp_path):
 # ---- list_devices ------------------------------------------------
 
 
-def test_list_devices_keeps_only_dfu_vid_pid(monkeypatch):
+def test_list_devices_calls_cli_with_l_usb_not_bare_l(monkeypatch):
+    # The actual bug reported from real hardware: bare `-l` lists RS232
+    # serial ports (per UM2237), not USB DFU devices - `-l usb` is the
+    # distinct, correct listing mode. Pin the exact args down so this
+    # never regresses back to the broken flag.
+    seen_args = []
+
+    def fake_run(cmd, **kwargs):
+        seen_args.append(cmd)
+        return _fake_completed(0, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    dfu_flash_manager.list_devices(Path("fake_cli.exe"))
+    assert seen_args[0][1:] == ["-l", "usb"]
+
+
+def test_list_devices_finds_device_from_realistic_multiline_block(monkeypatch):
+    # Shaped after a real captured STM32CubeProgrammer connection log (see
+    # dfu_flash_manager.py's module docstring) - no "0483:df11"-style
+    # VID:PID text anywhere, just an index token plus informational
+    # fields. The earlier VID:PID-substring filter would have found
+    # nothing here; this is exactly the regression it's guarding against.
     stdout = (
-        "-------- Connection list --------\n"
-        "USB1 : ST-LINK (0483:3748)\n"
-        "USB2 : STM32 BOOTLOADER (0483:DF11)\n"
+        "USB1\n"
+        "  Manuf. ID   : STMicroelectronics\n"
+        "  Product ID  : DFU in FS Mode\n"
+        "  SN          : 000000000000\n"
+        "  DFU protocol: 1.1\n"
+        "  Board       : --\n"
+        "  Device ID   : 0x450\n"
     )
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_completed(0, stdout))
     devices = dfu_flash_manager.list_devices(Path("fake_cli.exe"))
     assert len(devices) == 1
-    assert devices[0].port_id == "usb2"
+    assert devices[0].port_id == "usb1"
 
 
-def test_list_devices_empty_when_no_dfu_line(monkeypatch):
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_completed(0, "USB1 : ST-LINK (0483:3748)\n"))
+def test_list_devices_deduplicates_repeated_index_in_a_block(monkeypatch):
+    # The same "usb1" token legitimately showing up on more than one line
+    # of a single device's multi-line block must still count as ONE device.
+    stdout = "USB1 found\nconnected as usb1\n"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_completed(0, stdout))
+    devices = dfu_flash_manager.list_devices(Path("fake_cli.exe"))
+    assert len(devices) == 1
+
+
+def test_list_devices_two_devices(monkeypatch):
+    stdout = "USB1\n  SN: 111\nUSB2\n  SN: 222\n"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_completed(0, stdout))
+    devices = dfu_flash_manager.list_devices(Path("fake_cli.exe"))
+    assert {d.port_id for d in devices} == {"usb1", "usb2"}
+
+
+def test_list_devices_empty_when_no_usb_index_token(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_completed(0, "No STM32 device in DFU mode\n"))
     assert dfu_flash_manager.list_devices(Path("fake_cli.exe")) == []
 
 
