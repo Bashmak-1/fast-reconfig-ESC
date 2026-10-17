@@ -10,6 +10,7 @@ from esc_hotline.motor_ramp import (
     MOTOR_PROTOCOLS,
     MSP_MAX,
     MSP_MIN,
+    build_advanced_config_payload,
     count_active_motors,
     cubic_bezier_ease,
     msp_to_percent,
@@ -220,3 +221,24 @@ def test_protocol_name_unknown_index_does_not_crash():
     # defensive against an index outside the known table (older/future firmware)
     assert protocol_name(99) == "Невідомий (99)"
     assert protocol_name(-1) == "Невідомий (-1)"
+
+
+# ---- build_advanced_config_payload ------------------------------------------------
+# Shared byte-packing used by both motor_test_manager.py's own set_protocol()
+# and fc_flash_station.py's auto-provisioning protocol-write step - pinned
+# down exactly so the two call sites can never silently drift apart.
+
+
+def test_build_advanced_config_payload_exact_bytes():
+    payload = build_advanced_config_payload(protocol_index=5, motor_pwm_rate=480, servo_pwm_rate=50)
+    assert payload == bytes([1, 1, 1, 5]) + (480).to_bytes(2, "little") + (50).to_bytes(2, "little") + bytes([0])
+
+
+def test_build_advanced_config_payload_is_9_bytes():
+    assert len(build_advanced_config_payload(0, 0, 0)) == 9
+
+
+def test_build_advanced_config_payload_echoes_rates_unchanged():
+    payload = build_advanced_config_payload(protocol_index=0, motor_pwm_rate=1000, servo_pwm_rate=50)
+    assert payload[4:6] == (1000).to_bytes(2, "little")
+    assert payload[6:8] == (50).to_bytes(2, "little")

@@ -52,6 +52,7 @@ from .motor_ramp import (
     MOTOR_PROTOCOLS,
     MSP_MAX,
     MSP_MIN,
+    build_advanced_config_payload,
     count_active_motors,
     msp_to_percent,
     next_value,
@@ -266,15 +267,7 @@ class MotorTestManager(QObject):
 
         name = MOTOR_PROTOCOLS[index]
         try:
-            # Bytes 0-2/8 are read-and-discarded placeholders (see msp.py);
-            # motorPwmRate/servoPwmRate must be echoed back unchanged or the
-            # FC would silently overwrite them with whatever we send.
-            payload = (
-                bytes([1, 1, 1, index])
-                + self._motor_pwm_rate.to_bytes(2, "little")
-                + self._servo_pwm_rate.to_bytes(2, "little")
-                + bytes([0])
-            )
+            payload = build_advanced_config_payload(index, self._motor_pwm_rate, self._servo_pwm_rate)
             self._msp.send(MspCommand.MSP_SET_ADVANCED_CONFIG, payload, timeout_s=0.3, retries=2)
             self._log("info", f"Протокол записано: {name}. Зберігаю в EEPROM...")
             self._msp.send(MspCommand.MSP_EEPROM_WRITE, timeout_s=1.0, retries=2)

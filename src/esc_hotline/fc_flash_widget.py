@@ -4,18 +4,19 @@ resets it into normal run mode, then watches and flashes one or more
 operator-chosen ESC outputs at once (checkable "ESC" menu, defaults to
 ESC 1+2 - the common case is a 2-in-1 ESC board wired to two outputs on one
 FC) - the same spirit as "Хотспот (лінія)" uses for the ESC side, but
-generalized to a small chosen set instead of exactly one slot (see
-fc_flash_station.py's docstring for the full two-phase design and why it's
-a separate implementation rather than a shared one).
+generalized to a small chosen set instead of exactly one slot. Once every
+watched ESC slot is confirmed good, the motor-protocol dropdown here
+(defaults to DSHOT300) is written to the FC for real (MSP_SET_ADVANCED_
+CONFIG -> EEPROM -> reboot, "Save and Reboot") and the FC reboots - a
+one-shot full board-provisioning run, not an open-ended hot-swap line
+(see fc_flash_station.py's docstring for the full state machine and why
+it's a separate implementation rather than a shared one).
 
 Driven by its own private connections (FcFlashStationController -> its own
-ConnectionWorker/EscManager/thread for the ESC phase, plus its own DFU
-worker thread for the CLI calls) - nothing shared with the Main/Config/
-Хотспот tabs except the usual cross-tab port-busy check.
-
-The motor-protocol dropdown here is informational/persisted only in this
-first version, not wired to write anything to the FC - see
-fc_flash_station.py's module docstring for why.
+ConnectionWorker/EscManager/thread for the ESC phase, its own DFU worker
+thread for the CLI calls, and its own protocol-write worker thread for the
+final MSP step) - nothing shared with the Main/Config/Хотспот tabs except
+the usual cross-tab port-busy check.
 """
 from __future__ import annotations
 
@@ -186,6 +187,14 @@ class FcFlashPage(QWidget):
         self._dfu_detail_label.setWordWrap(True)
         root.addWidget(self._dfu_detail_label)
 
+        self._lab_power_hint_label = QLabel(
+            "⚡ Підключіть лабораторний блок живлення (силові) — без напруги на силові ESC не будуть видимі."
+        )
+        self._lab_power_hint_label.setStyleSheet(f"color: {ACCENT_AMBER}; font-weight: 600;")
+        self._lab_power_hint_label.setWordWrap(True)
+        self._lab_power_hint_label.setVisible(False)
+        root.addWidget(self._lab_power_hint_label)
+
         self._detail_label = QLabel()
         self._detail_label.setStyleSheet(f"color: {TEXT_MUTED};")
         self._detail_label.setWordWrap(True)
@@ -315,6 +324,7 @@ class FcFlashPage(QWidget):
 
     def _on_protocol_changed(self, index: int) -> None:
         save_int(_PROTOCOL_INDEX_KEY, index)
+        self.controller.set_protocol_index(index)
 
     def _restore_settings(self) -> None:
         firmware_path = load_str(_FIRMWARE_PATH_KEY)
@@ -362,6 +372,11 @@ class FcFlashPage(QWidget):
         protocol_index = load_int(_PROTOCOL_INDEX_KEY, _DEFAULT_PROTOCOL_INDEX)
         if 0 <= protocol_index < self._protocol_combo.count():
             self._protocol_combo.setCurrentIndex(protocol_index)
+        # Push explicitly - setCurrentIndex() above only fires
+        # currentIndexChanged (and _on_protocol_changed's controller push)
+        # when the index actually CHANGES, same reasoning as the ESC-slot/
+        # bounds restores elsewhere in this method.
+        self.controller.set_protocol_index(self._protocol_combo.currentIndex())
 
     # ---- start/stop ------------------------------------------------
 
@@ -387,10 +402,11 @@ class FcFlashPage(QWidget):
 
     # ---- rendering ------------------------------------------------
 
-    def _on_phase_changed(self, _phase: str) -> None:
+    def _on_phase_changed(self, phase: str) -> None:
         self._render_banner()
         self._update_start_stop_button()
         self._update_countdown()
+        self._lab_power_hint_label.setVisible(phase in ("watching", "esc_error"))
 
     def _on_esc_detail_changed(self, index: int, state: str, detail: str) -> None:
         self._esc_detail_by_index[index] = f"ESC {index + 1}: {detail}" if detail else f"ESC {index + 1}: -"
@@ -421,6 +437,7 @@ class FcFlashPage(QWidget):
             self._dfu_detail_label.setText("")
             self._countdown_label.setText("")
             self._on_power_cycle_hint_changed(False)
+            self._lab_power_hint_label.setVisible(False)
         self._update_start_stop_button()
 
     def _update_countdown(self) -> None:
@@ -448,7 +465,7 @@ class FcFlashPage(QWidget):
     def _update_start_stop_button(self) -> None:
         if self.controller.armed:
             self._start_stop_btn.setText("Стоп")
-            busy_phase = self.controller.phase in ("flashing_fc", "resetting_fc", "flashing")
+            busy_phase = self.controller.phase in ("flashing_fc", "resetting_fc", "flashing", "writing_protocol")
             self._start_stop_btn.setEnabled(not busy_phase)
             self._set_start_hint("Неможливо зупинити під час прошивки." if busy_phase else "")
             return

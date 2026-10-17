@@ -40,17 +40,29 @@ convention (see hotspot_station.py's docstring, and docs/PROTOCOL_NOTES.md
 classes, so a change meant for one can never accidentally reach the other.
 
 The motor-protocol dropdown this tab's widget exposes (DSHOT300 etc., from
-motor_ramp.MOTOR_PROTOCOLS) is informational/persisted only in this first
-version - it is NOT wired to actually write MSP_SET_ADVANCED_CONFIG and
-reboot the FC. motor_test_manager.py's set_protocol() is the proven
-reference for that write-and-reboot dance if it's ever needed here, but
-stacking a SECOND unverified reboot cycle on top of the also-unverified
-DFU-flash step (no real STM32_Programmer_CLI.exe available while writing
-this) is deliberately not done in the same change - add it as a focused
-follow-up once the DFU step itself is confirmed on real hardware.
+motor_ramp.MOTOR_PROTOCOLS) is wired for real: once every watched ESC
+slot is confirmed flashed/matching, this controller automatically exits
+the FourWay/ESC world, opens a plain-MSP connection on the same port, and
+writes the selected protocol via MSP_SET_ADVANCED_CONFIG ->
+MSP_EEPROM_WRITE -> MSP_REBOOT - the exact "Save and Reboot" dance
+motor_test_manager.py's own set_protocol() already does, run here by a
+dedicated _ProtocolWorker/_ProtocolWorkerThread (same isolated-worker
+pattern as _DfuWorker/_DfuWorkerThread below). This turns the ESC-watching
+phase from an open-ended hot-swap loop (like "Хотспот (лінія)") into a
+ONE-SHOT terminal step for this tab specifically: the moment every
+watched slot is confirmed good, it moves on to the protocol write and
+then stops, rather than looping back to watch for a swap.
+
+Real-hardware verification note: like the DFU-flash step itself (still
+unverified against a real STM32_Programmer_CLI.exe at the time of
+writing), this protocol-write tail has not yet been exercised against a
+real FC through this tab - log everything verbosely (see file_logger
+usage throughout) so the first real run's log can show exactly what
+happened if something doesn't match what's assumed here.
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -59,7 +71,11 @@ from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 from . import dfu_flash_manager
 from .connection_worker import ConnectionWorker
 from .file_logger import get_logger
-from .serial_transport import PortInfo, list_fc_ports
+from .fourway import FourWayClient
+from .motor_ramp import MOTOR_PROTOCOLS, build_advanced_config_payload
+from .motor_test_manager import ARMED_BIT
+from .msp import MspClient, MspCommand, MspError
+from .serial_transport import PortInfo, SerialTransport, list_fc_ports
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, BG_PANEL, TEXT_MAIN, TEXT_MUTED
 
 DEFAULT_BAUD = 115200
@@ -81,7 +97,7 @@ DFU_PHASES = (
 # a reader already familiar with "Хотспот (лінія)" recognizes them
 # immediately, even though this is a separate implementation.
 WATCH_PHASES = {"watching", "esc_ready", "esc_error"}
-RETRY_PHASES = {"error_connect", "fc_flash_error"}
+RETRY_PHASES = {"error_connect", "fc_flash_error", "protocol_error"}
 
 PHASE_STYLE = {
     "idle": (BG_PANEL, TEXT_MUTED),
@@ -96,6 +112,9 @@ PHASE_STYLE = {
     "esc_ready": (ACCENT_GREEN, "white"),
     "esc_error": (ACCENT_ERROR, "white"),
     "error_connect": (ACCENT_ERROR, "white"),
+    "writing_protocol": (ACCENT_AMBER, "white"),
+    "done": (ACCENT_GREEN, "white"),
+    "protocol_error": (ACCENT_ERROR, "white"),
 }
 PHASE_LABEL = {
     "idle": "Очікування",
@@ -110,6 +129,9 @@ PHASE_LABEL = {
     "esc_ready": "ESC готові",
     "esc_error": "Помилка прошивки ESC",
     "error_connect": "Помилка підключення",
+    "writing_protocol": "Запис протоколу й перезавантаження FC...",
+    "done": "Готово! FC і ESC прошиті, протокол встановлено.",
+    "protocol_error": "Помилка запису протоколу",
 }
 
 
@@ -197,14 +219,117 @@ class _DfuWorkerThread:
         self.thread.wait(2000)
 
 
+class _ProtocolWorker(QObject):
+    """Lives on its own QThread (see _ProtocolWorkerThread) - runs the
+    blocking plain-MSP write-protocol-and-reboot dance off the GUI thread,
+    once the ESC phase is fully done and FourWay/passthrough has already
+    been confirmed exited (EscManager.disconnect() already completed by
+    the time this is ever called - see FcFlashStationController's
+    _on_connection_state_changed).
+
+    Deliberately duplicates motor_test_manager.py's connect()+
+    set_protocol() CONNECTION dance (not the byte-packing itself, which is
+    the shared motor_ramp.build_advanced_config_payload()) rather than
+    importing MotorTestManager - this project's convention (see
+    hotspot_station.py's docstring) is that similar-but-separate
+    workflows each own their own state/orchestration, so a change meant
+    for the live spin-test tab's safety checks can never accidentally
+    reach this one-shot provisioning step, or vice versa.
+    """
+
+    done = pyqtSignal(bool, str)
+
+    def write_protocol_and_reboot(self, port: str, baud: int, protocol_index: int) -> None:
+        flog = get_logger()
+        if not port:
+            flog.error("Protocol write: no port given.")
+            self.done.emit(False, "Немає порту для запису протоколу.")
+            return
+        try:
+            transport = SerialTransport(port, baud)
+        except Exception as e:
+            flog.error("Protocol write: could not open %s: %s", port, e)
+            self.done.emit(False, f"Не вдалось відкрити {port}: {e}")
+            return
+
+        msp = MspClient(transport)
+        try:
+            try:
+                msp.send(MspCommand.MSP_API_VERSION)
+            except MspError:
+                # FC may still be latched in FourWay-relay mode right after
+                # EscManager.disconnect() - same recovery esc_manager.py/
+                # motor_test_manager.py already use for the same situation.
+                flog.warning("Protocol write: MSP_API_VERSION failed, trying FourWayClient.exit_interface() recovery")
+                FourWayClient(transport).exit_interface()
+                time.sleep(1.0)
+                msp.send(MspCommand.MSP_API_VERSION)
+
+            adv_resp = msp.send(MspCommand.MSP_ADVANCED_CONFIG, timeout_s=0.3, retries=3)
+            if len(adv_resp.payload) < 8:
+                raise MspError(f"занадто коротка відповідь MSP_ADVANCED_CONFIG ({len(adv_resp.payload)} байт)")
+            motor_pwm_rate = int.from_bytes(adv_resp.payload[4:6], "little")
+            servo_pwm_rate = int.from_bytes(adv_resp.payload[6:8], "little")
+            flog.info(
+                "Protocol write: current motor_pwm_rate=%d, servo_pwm_rate=%d (echoed back unchanged)",
+                motor_pwm_rate, servo_pwm_rate,
+            )
+
+            status_resp = msp.send(MspCommand.MSP_STATUS_EX, timeout_s=0.5, retries=3)
+            if len(status_resp.payload) < 15:
+                raise MspError(f"занадто коротка відповідь MSP_STATUS_EX ({len(status_resp.payload)} байт)")
+            arming_flags = int.from_bytes(status_resp.payload[13:15], "little")
+            if arming_flags & ARMED_BIT:
+                raise MspError("FC заармлений (ARMED) - запис протоколу заблоковано")
+
+            name = MOTOR_PROTOCOLS[protocol_index] if 0 <= protocol_index < len(MOTOR_PROTOCOLS) else str(protocol_index)
+            payload = build_advanced_config_payload(protocol_index, motor_pwm_rate, servo_pwm_rate)
+            flog.info("Protocol write: writing MSP_SET_ADVANCED_CONFIG, protocol=%s (index=%d)", name, protocol_index)
+            msp.send(MspCommand.MSP_SET_ADVANCED_CONFIG, payload, timeout_s=0.3, retries=2)
+            flog.info("Protocol write: saving to EEPROM (MSP_EEPROM_WRITE)...")
+            msp.send(MspCommand.MSP_EEPROM_WRITE, timeout_s=1.0, retries=2)
+            flog.info("Protocol write: rebooting FC (MSP_REBOOT)...")
+            msp.send(MspCommand.MSP_REBOOT, timeout_s=0.3, retries=1)
+        except Exception as e:
+            flog.error("Protocol write failed: %s", e)
+            transport.close()
+            self.done.emit(False, f"Не вдалось записати протокол: {e}")
+            return
+
+        transport.close()
+        flog.info("Protocol write: done successfully (%s)", name)
+        self.done.emit(True, f"Протокол {name} записано. FC перезавантажується...")
+
+
+class _ProtocolWorkerThread:
+    """Mirrors _DfuWorkerThread's own moveToThread pattern."""
+
+    def __init__(self) -> None:
+        self.thread = QThread()
+        self.thread.setObjectName("ProtocolWorkerThread")
+        self.worker = _ProtocolWorker()
+        self.worker.moveToThread(self.thread)
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.thread.quit()
+        self.thread.wait(2000)
+
+
 class FcFlashStationController(QObject):
     """Owns a private ConnectionWorker (EscManager + its own QThread, for
-    the ESC phase) and a private _DfuWorkerThread (for the DFU-flash
+    the ESC phase), a private _DfuWorkerThread (for the DFU-flash phase),
+    and a private _ProtocolWorkerThread (for the final protocol-write
     phase), and drives the combined loop:
     idle -> waiting_device -> [flashing_fc -> resetting_fc ->]
     waiting_fc_normal -> connecting -> watching -> [flashing ->]
-    esc_ready/esc_error, looping back to watching exactly like
-    hotspot_station.py once the FC is in normal mode.
+    esc_ready -> writing_protocol -> done/protocol_error.
+
+    Unlike hotspot_station.py, "esc_ready" here is NOT a steady state to
+    loop on - the moment every watched ESC slot is confirmed good for the
+    first time, this controller moves straight on to writing the FC's
+    motor protocol and rebooting it, then stops (a one-shot provisioning
+    run for one board, not an open-ended hot-swap line).
     """
 
     phase_changed = pyqtSignal(str)
@@ -222,6 +347,9 @@ class FcFlashStationController(QObject):
     _discover_many_requested = pyqtSignal(list)
     _flash_requested = pyqtSignal(bytes, object)
     _set_config_path_requested = pyqtSignal(str)
+
+    # Internal-only: reach the private _ProtocolWorker.
+    _write_protocol_requested = pyqtSignal(str, int, int)  # port, baud, protocol_index
 
     # Internal-only: reach the private _DfuWorker.
     _list_devices_requested = pyqtSignal(str)
@@ -252,11 +380,16 @@ class FcFlashStationController(QObject):
         dfu_worker.flash_done.connect(self._on_flash_fc_done)
         dfu_worker.reset_done.connect(self._on_reset_fc_done)
 
+        self._protocol_worker_thread = _ProtocolWorkerThread()
+        self._write_protocol_requested.connect(self._protocol_worker_thread.worker.write_protocol_and_reboot)
+        self._protocol_worker_thread.worker.done.connect(self._on_protocol_write_done)
+
         self._firmware_path: Optional[str] = None
         self._cli_path_override: Optional[str] = None
         self._config_bytes: Optional[bytes] = None
         self._port_device: Optional[str] = None
         self._esc_indices: list[int] = [0]
+        self._protocol_index: int = MOTOR_PROTOCOLS.index("DSHOT300")
         self._last_esc_states: dict[int, str] = {}
         self._tick_seen_states: dict[int, str] = {}
         self._armed = False
@@ -306,6 +439,9 @@ class FcFlashStationController(QObject):
     def set_esc_indices(self, indices: list[int]) -> None:
         self._esc_indices = list(indices)
 
+    def set_protocol_index(self, index: int) -> None:
+        self._protocol_index = index
+
     def set_config(self, path: str, config_bytes: bytes) -> None:
         self._config_bytes = config_bytes
         self._set_config_path_requested.emit(path)
@@ -326,10 +462,10 @@ class FcFlashStationController(QObject):
         self.power_cycle_hint_changed.emit(False)
         self.dfu_detail_changed.emit("")
         self._flog.info(
-            "=== FC flash station armed: firmware=%s, cli_override=%s, esc_config_bytes=%s, port=%s, esc_indices=%s ===",
+            "=== FC flash station armed: firmware=%s, cli_override=%s, esc_config_bytes=%s, port=%s, esc_indices=%s, protocol_index=%d ===",
             self._firmware_path, self._cli_path_override,
             len(self._config_bytes) if self._config_bytes is not None else None,
-            self._port_device, self._esc_indices,
+            self._port_device, self._esc_indices, self._protocol_index,
         )
         self._set_phase("waiting_device")
         self._poll_timer.start()
@@ -353,6 +489,8 @@ class FcFlashStationController(QObject):
             self._connect_attempts = 0
             self._set_phase("connecting")
             self._attempt_connect()
+        elif self._phase == "protocol_error":
+            self._begin_protocol_write()
 
     def reset_counters(self) -> None:
         self._counter_flashed = 0
@@ -367,6 +505,7 @@ class FcFlashStationController(QObject):
         self.stop()
         self._esc_worker.stop()
         self._dfu_worker_thread.stop()
+        self._protocol_worker_thread.stop()
 
     # ---- polling ------------------------------------------------
 
@@ -444,8 +583,9 @@ class FcFlashStationController(QObject):
                 self._disconnect_requested.emit()
                 self._set_phase("waiting_fc_normal")
             return
-        # "flashing_fc"/"resetting_fc"/"flashing"/"fc_flash_error": no
-        # polling action, waits for the relevant *_done signal or a manual retry().
+        # "flashing_fc"/"resetting_fc"/"flashing"/"fc_flash_error"/
+        # "writing_protocol"/"done"/"protocol_error": no polling action,
+        # waits for the relevant *_done signal or a manual retry().
 
     def _resolved_cli_path(self) -> str:
         path = dfu_flash_manager.find_cli_path(self._cli_path_override)
@@ -526,7 +666,20 @@ class FcFlashStationController(QObject):
 
     def _on_connection_state_changed(self, connected: bool, expected_count: int) -> None:
         self._connect_in_flight = False
-        if not self._armed or self._phase != "connecting":
+        if not self._armed:
+            return
+        if self._phase == "writing_protocol" and not connected:
+            # The point of synchronization that avoids a race between the
+            # ESC worker's transport.close() and the protocol worker's own
+            # SerialTransport() open on the same port, both on different
+            # threads - see this file's module docstring. EscManager.
+            # disconnect() always emits connection_state_changed(False)
+            # AFTER transport.close() has already returned, so only once
+            # THIS arrives is it safe to reopen the port elsewhere.
+            self._flog.info("FC flash station: FourWay confirmed disconnected - starting protocol write")
+            self._write_protocol_requested.emit(self._port_device or "", DEFAULT_BAUD, self._protocol_index)
+            return
+        if self._phase != "connecting":
             return
         if connected:
             self._last_esc_states = {}
@@ -558,10 +711,14 @@ class FcFlashStationController(QObject):
             self._set_phase("flashing")
             self._flash_requested.emit(self._config_bytes, need_flash)
             return
-        if self._phase != "esc_ready":
-            self._counter_ok += 1
-            self.counters_changed.emit(self._counter_flashed, self._counter_ok, self._counter_errors)
+        # Every watched ESC slot is confirmed present and already matching
+        # - unlike hotspot_station.py, this is NOT a steady state to keep
+        # watching from: move straight on to the one-shot protocol write,
+        # see _begin_protocol_write()'s own docstring for why.
+        self._counter_ok += 1
+        self.counters_changed.emit(self._counter_flashed, self._counter_ok, self._counter_errors)
         self._set_phase("esc_ready")
+        self._begin_protocol_write()
 
     def _on_flash_finished(self, success: int, attempted: int) -> None:
         if not self._armed or self._phase != "flashing":
@@ -572,6 +729,13 @@ class FcFlashStationController(QObject):
         self._counter_flashed += success
         self._counter_errors += max(attempted - success, 0)
         self.counters_changed.emit(self._counter_flashed, self._counter_ok, self._counter_errors)
+        # Deliberately does NOT trigger _begin_protocol_write() directly
+        # here even on full success - the next poll tick's own
+        # _discover_many_requested re-reads every watched slot fresh, and
+        # ONLY once that readback confirms every slot genuinely matches
+        # does _on_discovery_finished() move on to the protocol write -
+        # same "never trust a write without reading it back" principle as
+        # the write itself, just applied one level up.
         self._set_phase("esc_ready" if success == attempted and attempted > 0 else "esc_error")
 
     def _on_esc_status_changed(self, index: int, state: str, detail: str, esc_info) -> None:
@@ -580,3 +744,27 @@ class FcFlashStationController(QObject):
         self._last_esc_states[index] = state
         self._tick_seen_states[index] = state
         self.esc_detail_changed.emit(index, state, detail)
+
+    # ---- protocol-write phase (terminal step, once every watched ESC is ready) ---
+
+    def _begin_protocol_write(self) -> None:
+        """Every watched ESC slot just got confirmed good for the first
+        time - exit the FourWay/ESC world and write the FC's motor
+        protocol (MSP_SET_ADVANCED_CONFIG -> MSP_EEPROM_WRITE ->
+        MSP_REBOOT via _ProtocolWorker), the exact "Save and Reboot" dance
+        INAV Configurator does by hand. The actual write only happens once
+        _on_connection_state_changed() sees the resulting disconnect
+        confirmed - see that method for why the ordering matters."""
+        self._flog.info(
+            "FC flash station: all watched ESC slot(s) ready - disconnecting FourWay and writing protocol "
+            "(index=%d, port=%s)", self._protocol_index, self._port_device,
+        )
+        self._set_phase("writing_protocol")
+        self._disconnect_requested.emit()
+
+    def _on_protocol_write_done(self, success: bool, message: str) -> None:
+        if not self._armed or self._phase != "writing_protocol":
+            return
+        self._flog.info("FC flash station: protocol write done: success=%s, message=%s", success, message)
+        self.dfu_detail_changed.emit(message)
+        self._set_phase("done" if success else "protocol_error")

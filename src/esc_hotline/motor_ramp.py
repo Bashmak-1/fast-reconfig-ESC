@@ -45,6 +45,30 @@ def msp_to_percent(value: int) -> float:
     return (clamped - MSP_MIN) / MSP_RANGE * 100.0
 
 
+def build_advanced_config_payload(protocol_index: int, motor_pwm_rate: int, servo_pwm_rate: int) -> bytes:
+    """Exact 9-byte MSP_SET_ADVANCED_CONFIG payload for changing the motor
+    protocol while echoing motor_pwm_rate/servo_pwm_rate back unchanged -
+    the FC silently overwrites them with whatever is sent otherwise (see
+    motor_test_manager.py's module docstring). Bytes 0-2 and 8 are
+    read-and-discarded placeholders on the FC/INAV versions this project
+    targets.
+
+    Pure wire-format packing, not a state machine, so it's shared as-is
+    between motor_test_manager.py (the live spin-test tab's own protocol
+    change) and fc_flash_station.py (the auto-provisioning tab's final
+    protocol-write step) - unlike the state machines around each call
+    site, which deliberately stay separate, a byte-packing routine has no
+    behavioural coupling to share, only a single source of truth for the
+    offsets/order worth protecting from ever drifting apart.
+    """
+    return (
+        bytes([1, 1, 1, protocol_index])
+        + motor_pwm_rate.to_bytes(2, "little")
+        + servo_pwm_rate.to_bytes(2, "little")
+        + bytes([0])
+    )
+
+
 def count_active_motors(raw_motor_values: list[int]) -> int:
     """How many of MSP_MOTOR's (always 8) slots are actually configured
     outputs, vs. padding. INAV's fc_msp.c fills unconfigured slots with
