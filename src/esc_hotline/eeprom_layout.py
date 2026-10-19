@@ -69,6 +69,51 @@ EEPROM_LAYOUT: dict[str, EepromField] = {
     "CAN_SETTINGS": EepromField(0xB0, 16),
 }
 
+# Confirmed on real hardware (2026-10-19): these five header bytes
+# identify THIS specific ESC's bootloader/hardware/eeprom-layout revision
+# - they are NOT a user-configurable setting. A config file captured from
+# a different board (or a different firmware build of the same board)
+# legitimately carries different values here, and the firmware itself
+# does not accept an arbitrary overwrite of its own identity: writing a
+# stale BOOT_LOADER_REVISION from someone else's dumped config got
+# silently ignored by the ESC (the byte read back unchanged), which then
+# made esc_manager.py's own "did the write succeed" readback check fail
+# every single time with "readback mismatch after write", even though
+# every actual setting had been applied correctly. Never write or compare
+# these bytes - see with_identity_from()/settings_equal_ignoring_identity().
+IDENTITY_FIELD_NAMES = ("BOOT_BYTE", "LAYOUT_REVISION", "BOOT_LOADER_REVISION", "MAIN_REVISION", "SUB_REVISION")
+
+
+def with_identity_from(target: bytes, identity_source: bytes) -> bytes:
+    """Returns `target` with its identity/revision header bytes (see
+    IDENTITY_FIELD_NAMES) replaced by identity_source's own - use this on
+    the bytes about to be written, with the ESC's own freshly-read
+    current settings as identity_source, so a write never attempts to
+    change hardware/bootloader identity that was never really ours to
+    set in the first place."""
+    buf = bytearray(target)
+    for name in IDENTITY_FIELD_NAMES:
+        f = EEPROM_LAYOUT[name]
+        buf[f.offset : f.offset + f.size] = identity_source[f.offset : f.offset + f.size]
+    return bytes(buf)
+
+
+def _without_identity(data: bytes) -> bytes:
+    buf = bytearray(data)
+    for name in IDENTITY_FIELD_NAMES:
+        f = EEPROM_LAYOUT[name]
+        buf[f.offset : f.offset + f.size] = bytes(f.size)
+    return bytes(buf)
+
+
+def settings_equal_ignoring_identity(a: bytes, b: bytes) -> bool:
+    """Same as `a == b`, but ignoring the identity/revision header bytes
+    (see IDENTITY_FIELD_NAMES and with_identity_from()'s own docstring) -
+    use this for "does the ESC already match the target config" and "did
+    the write verify correctly" decisions, never a plain `==`."""
+    return _without_identity(a) == _without_identity(b)
+
+
 # Read separately at (eeprom_offset - 32), 32 bytes, NUL-terminated ASCII,
 # e.g. "ESCV_12S33mV" -> mcu_type "12S33mV" (text after the last '_').
 FILENAME_BLOCK_SIZE = 32

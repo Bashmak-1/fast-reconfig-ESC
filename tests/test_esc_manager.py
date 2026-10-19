@@ -10,7 +10,7 @@ import pytest
 from PyQt6.QtWidgets import QApplication
 
 from esc_hotline import esc_manager as esc_manager_module
-from esc_hotline.eeprom_layout import FILENAME_BLOCK_SIZE
+from esc_hotline.eeprom_layout import FILENAME_BLOCK_SIZE, with_identity_from
 from esc_hotline.fourway import DeviceInfo, FourWayAckError, FourWayAck
 from esc_hotline.i18n import tr
 from esc_hotline.mcu_profiles import LAYOUT_SIZE
@@ -124,7 +124,8 @@ def test_discover_many_probes_only_the_given_indices(monkeypatch):
 
 def test_flash_all_continues_past_failing_esc(monkeypatch, tmp_path):
     config_path = tmp_path / "cfg.bin"
-    config_path.write_bytes(bytes([0x42]) * LAYOUT_SIZE)
+    target = bytes([0x42]) * LAYOUT_SIZE
+    config_path.write_bytes(target)
 
     mgr, fake = _make_manager_with_fake(monkeypatch, bad_indices={1}, expected_count=3)
 
@@ -140,8 +141,12 @@ def test_flash_all_continues_past_failing_esc(monkeypatch, tmp_path):
     assert states_by_index[1] == "error"
     assert states_by_index[2] == "ok"
     assert finished == [(2, 3)]
-    assert fake.written[0] == bytes([0x42]) * LAYOUT_SIZE
-    assert fake.written[2] == bytes([0x42]) * LAYOUT_SIZE
+    # identity/revision header bytes come from each ESC's own current
+    # settings (here the fake's default, _settings_bytes(0x01)), not the
+    # config file's - see eeprom_layout.with_identity_from().
+    expected = with_identity_from(target, _settings_bytes(0x01))
+    assert fake.written[0] == expected
+    assert fake.written[2] == expected
     assert 1 not in fake.written
 
 
@@ -254,7 +259,8 @@ def test_flash_all_skips_escs_that_already_match_target_config(monkeypatch, tmp_
     mgr.flash_all(str(config_path))  # target_indices=None -> auto-select
 
     assert 0 not in fake.written  # already matched - must NOT be rewritten
-    assert fake.written[1] == target  # the differing one gets flashed
+    # the differing one gets flashed, identity bytes preserved from its own current settings
+    assert fake.written[1] == with_identity_from(target, needs_flashing)
 
     assert finished == [(1, 1)]  # only 1 ESC was actually attempted
     assert any("Skipping" in msg or "Пропускаю" in msg for msg in infos)
@@ -305,7 +311,37 @@ def test_flash_one_writes_when_explicit_target_actually_differs(monkeypatch, tmp
 
     mgr.flash_all(str(config_path), target_indices=[0])
 
-    assert fake.written[0] == target  # actually different -> gets written
+    # actually different -> gets written, but the identity/revision header
+    # bytes (BOOT_BYTE/LAYOUT_REVISION/BOOT_LOADER_REVISION/...) come from
+    # the ESC's OWN current settings, never the config file's - see
+    # eeprom_layout.with_identity_from()'s own docstring for why.
+    assert fake.written[0] == with_identity_from(target, current)
+
+
+def test_flash_one_skips_write_when_only_identity_bytes_differ(monkeypatch, tmp_path):
+    # Confirmed on real hardware (2026-10-19): a config file dumped from a
+    # different board/firmware build legitimately carries a different
+    # BOOT_LOADER_REVISION etc. - that alone must never be treated as
+    # "needs flashing" (every real setting already matches), and a write
+    # attempted anyway would fail verification outright, because the
+    # firmware itself silently refuses to accept an arbitrary identity
+    # overwrite (confirmed: the byte reads back unchanged).
+    target = bytearray(_settings_bytes(0x42))
+    current = bytearray(target)
+    current[0x01] = 4  # LAYOUT_REVISION
+    current[0x02] = 7  # BOOT_LOADER_REVISION
+    target, current = bytes(target), bytes(current)
+    config_path = tmp_path / "cfg.bin"
+    config_path.write_bytes(target)
+
+    mgr, fake = _make_manager_with_fake(
+        monkeypatch, bad_indices=set(), expected_count=1, settings_by_index={0: current}
+    )
+    mgr.discover_all()
+
+    mgr.flash_all(str(config_path), target_indices=[0])
+
+    assert 0 not in fake.written  # identity-only mismatch -> no write attempted
 
 
 def test_discover_all_decodes_esc_info(monkeypatch, tmp_path):

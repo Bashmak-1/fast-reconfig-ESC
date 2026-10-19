@@ -20,7 +20,14 @@ from typing import Optional
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from .eeprom_config import ConfigFileError, load_config_file
-from .eeprom_layout import EEPROM_LAYOUT, FILENAME_BLOCK_SIZE, parse_boot_loader_pin, parse_name_block
+from .eeprom_layout import (
+    EEPROM_LAYOUT,
+    FILENAME_BLOCK_SIZE,
+    parse_boot_loader_pin,
+    parse_name_block,
+    settings_equal_ignoring_identity,
+    with_identity_from,
+)
 from .eeprom_values import decode_settings
 from .file_logger import get_logger, hex_dump, log_at
 from .fourway import FourWayClient
@@ -109,7 +116,7 @@ class EscManager(QObject):
         if _is_blank(settings):
             return EscState.BLANK, label
         if self._loaded_config_bytes is not None:
-            if settings == self._loaded_config_bytes:
+            if settings_equal_ignoring_identity(settings, self._loaded_config_bytes):
                 return EscState.OK, tr("config_matches", mcu=label)
             return EscState.DIFF, tr("config_differs", mcu=label)
         return EscState.OK, label
@@ -449,7 +456,7 @@ class EscManager(QObject):
         targets: list[int] = []
         skipped: list[int] = []
         for i, r in ok_results:
-            if r.settings == config_bytes:
+            if settings_equal_ignoring_identity(r.settings, config_bytes):
                 skipped.append(i)
             else:
                 targets.append(i)
@@ -543,19 +550,32 @@ class EscManager(QObject):
         self._flog.info("ESC #%d: current settings (fresh read, before write decision): %s", index + 1, hex_dump(current))
 
         esc_info = previous.esc_info if previous is not None else None
-        if current == config_bytes:
+        if settings_equal_ignoring_identity(current, config_bytes):
             self._flog.info(
-                "ESC #%d: already matches target config - skipping cmd_DeviceWrite entirely (no flash wear)",
+                "ESC #%d: already matches target config (ignoring bootloader/hardware identity bytes - see "
+                "eeprom_layout.IDENTITY_FIELD_NAMES) - skipping cmd_DeviceWrite entirely (no flash wear)",
                 index + 1,
             )
             self._probe_results[index] = ProbeResult(ok=True, mcu_name=mcu.name, settings=current, esc_info=esc_info)
             return False
 
-        self._flog.info("ESC #%d: writing %d bytes to eeprom_offset=0x%X: %s", index + 1, len(config_bytes), mcu.eeprom_offset, hex_dump(config_bytes))
-        self._fourway.write(mcu.eeprom_offset, config_bytes)  # cmd_DeviceWrite, NOT DeviceWriteEEprom
+        # Confirmed on real hardware: never send the config file's own
+        # identity/revision header bytes (BOOT_LOADER_REVISION etc. - see
+        # eeprom_layout.py) - they describe THIS ESC's own bootloader/
+        # hardware, not a configurable setting, a stale value from a
+        # config dumped off a different board gets silently rejected by
+        # the firmware, and comparing the readback against the UNCHANGED
+        # request byte-for-byte then always "fails" even though every
+        # real setting was applied correctly.
+        outgoing = with_identity_from(config_bytes, current)
+        self._flog.info(
+            "ESC #%d: writing %d bytes to eeprom_offset=0x%X (identity bytes preserved from the ESC itself): %s",
+            index + 1, len(outgoing), mcu.eeprom_offset, hex_dump(outgoing),
+        )
+        self._fourway.write(mcu.eeprom_offset, outgoing)  # cmd_DeviceWrite, NOT DeviceWriteEEprom
         readback = self._fourway.read(mcu.eeprom_offset, LAYOUT_SIZE)
         self._flog.info("ESC #%d: readback after write: %s", index + 1, hex_dump(readback))
-        if readback != config_bytes:
+        if readback != outgoing:
             raise VerificationError("readback mismatch after write")
         self._flog.info("ESC #%d: write verified OK (readback matches what was written)", index + 1)
 
