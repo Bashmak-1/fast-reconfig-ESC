@@ -23,7 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -50,22 +50,40 @@ from .fc_flash_station import (
 )
 from .manual_counter_widget import ManualCounterWidget
 from .motor_ramp import MOTOR_PROTOCOLS
-from .motor_test_manager import PHASE_IDLE as MOTOR_PHASE_IDLE, RAMP_LINEAR
+from .motor_test_manager import (
+    PHASE_IDLE as MOTOR_PHASE_IDLE,
+    RAMP_BEZIER,
+    RAMP_LINEAR,
+    TEST_MODE_ALL,
+    TEST_MODE_SEQUENTIAL,
+)
+from .motor_test_widget import _make_duration_spinbox
+from .ramp_chart_math import MIN_PHASE_DURATION_S
 from .ramp_chart_widget import RampChartWidget
 from .serial_transport import list_fc_ports
-from .settings_store import load_int, load_str, save_int, save_str
+from .settings_store import load_float, load_int, load_str, save_float, save_int, save_str
 from .theme import ACCENT_AMBER, ACCENT_ERROR, TEXT_MUTED
 
-# Same persisted keys fc_flash_station.py reuses from "Прогон мотором" -
-# duplicated here too (this project's convention, see fc_flash_station.py's
-# own module docstring) just to draw the matching chart, never to drive
-# the actual test.
+# Same persisted keys "Прогон мотором" (motor_test_widget.py) owns -
+# deliberately the SAME keys, not a separate set, so changing the ramp
+# config from either tab affects both: fc_flash_station.py reads these
+# fresh right before it runs the automatic post-provision motor test, and
+# MainWindow wires each tab's ramp_settings_changed signal to the other's
+# apply_external_ramp_settings() for live sync while both are open.
 _MOTOR_UP_DURATION_KEY = "motor_test_up_duration_s"
 _MOTOR_HOLD_DURATION_KEY = "motor_test_hold_duration_s"
 _MOTOR_DOWN_DURATION_KEY = "motor_test_down_duration_s"
 _MOTOR_RAMP_MODE_KEY = "motor_test_ramp_mode"
+_MOTOR_TEST_MODE_KEY = "motor_test_mode"
 _MOTOR_MIN_BOUND_KEY = "motor_test_min_percent"
 _MOTOR_MAX_BOUND_KEY = "motor_test_max_percent"
+_DEFAULT_MOTOR_UP_DURATION_S = 4.0
+_DEFAULT_MOTOR_HOLD_DURATION_S = 0.0
+_DEFAULT_MOTOR_DOWN_DURATION_S = 4.0
+_DEFAULT_MOTOR_MIN_BOUND = 0
+_DEFAULT_MOTOR_MAX_BOUND = 100
+_RAMP_MODE_LABELS = {RAMP_LINEAR: "Лінійна", RAMP_BEZIER: "Безе"}
+_TEST_MODE_LABELS = {TEST_MODE_ALL: "Всі одночасно", TEST_MODE_SEQUENTIAL: "По черзі"}
 
 _FIRMWARE_PATH_KEY = "fc_flash_firmware_path"
 _CONFIG_PATH_KEY = "fc_flash_esc_config_path"
@@ -82,6 +100,12 @@ _DEFAULT_PROTOCOL_INDEX = MOTOR_PROTOCOLS.index("DSHOT300")
 
 
 class FcFlashPage(QWidget):
+    # Mirrors motor_test_widget.MotorTestPage's own identical signal -
+    # MainWindow wires each tab's ramp_settings_changed to the other's
+    # apply_external_ramp_settings() so both stay live-synced.
+    # Order: up_s, hold_s, down_s, ramp_mode, test_mode, min_percent, max_percent.
+    ramp_settings_changed = pyqtSignal(float, float, float, str, str, float, float)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.controller = FcFlashStationController(self)
@@ -244,14 +268,51 @@ class FcFlashPage(QWidget):
         self._detail_label.setWordWrap(True)
         root.addWidget(self._detail_label)
 
-        # Read-only mirror of "Прогон мотором"'s own chart, for the final
-        # automatic motor-test step this tab runs on its own (see
-        # fc_flash_station.py) - setEnabled(False) is enough to block
-        # dragging entirely (a disabled QWidget never gets mouse events),
-        # no separate "read-only" flag needed in RampChartWidget itself.
+        # Ramp config for the final automatic motor-test step this tab runs
+        # on its own (see fc_flash_station.py) - SAME shared settings as
+        # "Прогон мотором" (not a separate copy), kept in sync live via
+        # ramp_settings_changed/apply_external_ramp_settings (wired in
+        # main_window.py). Dragging stays blocked automatically while a
+        # test is actually running - RampChartWidget.set_phase() only
+        # allows it in PHASE_IDLE, same safeguard "Прогон мотором" has.
+        motor_rate_row = QHBoxLayout()
+        motor_rate_row.addWidget(QLabel("Графік рампи:"))
+        self._motor_ramp_mode_combo = QComboBox()
+        self._motor_ramp_mode_combo.addItem(_RAMP_MODE_LABELS[RAMP_LINEAR], RAMP_LINEAR)
+        self._motor_ramp_mode_combo.addItem(_RAMP_MODE_LABELS[RAMP_BEZIER], RAMP_BEZIER)
+        self._motor_ramp_mode_combo.currentIndexChanged.connect(self._on_motor_ramp_mode_changed)
+        motor_rate_row.addWidget(self._motor_ramp_mode_combo)
+        motor_rate_row.addSpacing(24)
+        motor_rate_row.addWidget(QLabel("Режим тесту:"))
+        self._motor_test_mode_combo = QComboBox()
+        self._motor_test_mode_combo.addItem(_TEST_MODE_LABELS[TEST_MODE_ALL], TEST_MODE_ALL)
+        self._motor_test_mode_combo.addItem(_TEST_MODE_LABELS[TEST_MODE_SEQUENTIAL], TEST_MODE_SEQUENTIAL)
+        self._motor_test_mode_combo.currentIndexChanged.connect(self._on_motor_test_mode_changed)
+        motor_rate_row.addWidget(self._motor_test_mode_combo)
+        motor_rate_row.addStretch(1)
+        root.addLayout(motor_rate_row)
+
+        motor_duration_row = QHBoxLayout()
+        motor_duration_row.addWidget(QLabel("Розгін, с:"))
+        self._motor_up_stepper = _make_duration_spinbox(MIN_PHASE_DURATION_S)
+        self._motor_up_stepper.valueChanged.connect(self._on_motor_duration_changed)
+        motor_duration_row.addWidget(self._motor_up_stepper)
+        motor_duration_row.addSpacing(16)
+        motor_duration_row.addWidget(QLabel("Утримання, с:"))
+        self._motor_hold_stepper = _make_duration_spinbox(0.0)
+        self._motor_hold_stepper.valueChanged.connect(self._on_motor_duration_changed)
+        motor_duration_row.addWidget(self._motor_hold_stepper)
+        motor_duration_row.addSpacing(16)
+        motor_duration_row.addWidget(QLabel("Спад, с:"))
+        self._motor_down_stepper = _make_duration_spinbox(MIN_PHASE_DURATION_S)
+        self._motor_down_stepper.valueChanged.connect(self._on_motor_duration_changed)
+        motor_duration_row.addWidget(self._motor_down_stepper)
+        motor_duration_row.addStretch(1)
+        root.addLayout(motor_duration_row)
+
         self._motor_chart = RampChartWidget()
-        self._motor_chart.setEnabled(False)
         self._motor_chart.setMinimumHeight(180)
+        self._motor_chart.profile_changed.connect(self._on_motor_chart_profile_changed)
         root.addWidget(self._motor_chart)
 
         self._power_cycle_hint_label = QLabel()
@@ -445,6 +506,26 @@ class FcFlashPage(QWidget):
         self.controller.set_poll_interval_ms(self._poll_interval_stepper.value())
         self._update_poll_interval_seconds_label()
 
+        self._apply_motor_durations(
+            load_float(_MOTOR_UP_DURATION_KEY, _DEFAULT_MOTOR_UP_DURATION_S),
+            load_float(_MOTOR_HOLD_DURATION_KEY, _DEFAULT_MOTOR_HOLD_DURATION_S),
+            load_float(_MOTOR_DOWN_DURATION_KEY, _DEFAULT_MOTOR_DOWN_DURATION_S),
+        )
+        ramp_mode = load_str(_MOTOR_RAMP_MODE_KEY, RAMP_LINEAR)
+        idx = self._motor_ramp_mode_combo.findData(ramp_mode if ramp_mode in _RAMP_MODE_LABELS else RAMP_LINEAR)
+        if idx >= 0:
+            self._motor_ramp_mode_combo.setCurrentIndex(idx)
+        self._motor_chart.set_curve_mode(self._motor_ramp_mode_combo.currentData())
+
+        test_mode = load_str(_MOTOR_TEST_MODE_KEY, TEST_MODE_ALL)
+        idx = self._motor_test_mode_combo.findData(test_mode if test_mode in _TEST_MODE_LABELS else TEST_MODE_ALL)
+        if idx >= 0:
+            self._motor_test_mode_combo.setCurrentIndex(idx)
+
+        min_pct = load_int(_MOTOR_MIN_BOUND_KEY, _DEFAULT_MOTOR_MIN_BOUND)
+        max_pct = load_int(_MOTOR_MAX_BOUND_KEY, _DEFAULT_MOTOR_MAX_BOUND)
+        self._motor_chart.set_bounds(min_pct, max_pct)
+
     # ---- start/stop ------------------------------------------------
 
     def set_port_busy_checker(self, checker: Callable[[str], bool]) -> None:
@@ -474,20 +555,6 @@ class FcFlashPage(QWidget):
         self._update_start_stop_button()
         self._update_countdown()
         self._lab_power_hint_label.setVisible(phase in ("watching", "esc_error"))
-        if phase == "connecting_motor_test":
-            # Pull in whatever's currently configured on "Прогон мотором" -
-            # read fresh here rather than cached, same as the controller
-            # itself does right before it actually runs the sweep.
-            self._motor_chart.set_durations(
-                load_int(_MOTOR_UP_DURATION_KEY, 4),
-                load_int(_MOTOR_HOLD_DURATION_KEY, 0),
-                load_int(_MOTOR_DOWN_DURATION_KEY, 4),
-            )
-            self._motor_chart.set_bounds(
-                load_int(_MOTOR_MIN_BOUND_KEY, 0),
-                load_int(_MOTOR_MAX_BOUND_KEY, 100),
-            )
-            self._motor_chart.set_curve_mode(load_str(_MOTOR_RAMP_MODE_KEY, RAMP_LINEAR))
 
     def _on_motor_test_phase_changed(self, phase: str) -> None:
         self._motor_chart.set_phase(phase)
@@ -495,6 +562,89 @@ class FcFlashPage(QWidget):
     def _on_motor_test_value_changed(self, values: list) -> None:
         if values:
             self._motor_chart.set_current_value(values[0])
+
+    # ---- ramp settings (shared with "Прогон мотором" - see module-level
+    # key constants above) ------------------------------------------------
+
+    def _current_motor_ramp_settings_tuple(self) -> tuple[float, float, float, str, str, float, float]:
+        return (
+            self._motor_up_stepper.value(),
+            self._motor_hold_stepper.value(),
+            self._motor_down_stepper.value(),
+            self._motor_ramp_mode_combo.currentData(),
+            self._motor_test_mode_combo.currentData(),
+            float(load_int(_MOTOR_MIN_BOUND_KEY, _DEFAULT_MOTOR_MIN_BOUND)),
+            float(load_int(_MOTOR_MAX_BOUND_KEY, _DEFAULT_MOTOR_MAX_BOUND)),
+        )
+
+    def _on_motor_ramp_mode_changed(self, _index: int) -> None:
+        mode = self._motor_ramp_mode_combo.currentData()
+        save_str(_MOTOR_RAMP_MODE_KEY, mode)
+        self._motor_chart.set_curve_mode(mode)
+        self.ramp_settings_changed.emit(*self._current_motor_ramp_settings_tuple())
+
+    def _on_motor_test_mode_changed(self, _index: int) -> None:
+        mode = self._motor_test_mode_combo.currentData()
+        save_str(_MOTOR_TEST_MODE_KEY, mode)
+        self.ramp_settings_changed.emit(*self._current_motor_ramp_settings_tuple())
+
+    def _on_motor_duration_changed(self, _value: float) -> None:
+        save_float(_MOTOR_UP_DURATION_KEY, self._motor_up_stepper.value())
+        save_float(_MOTOR_HOLD_DURATION_KEY, self._motor_hold_stepper.value())
+        save_float(_MOTOR_DOWN_DURATION_KEY, self._motor_down_stepper.value())
+        self._motor_chart.set_durations(
+            self._motor_up_stepper.value(), self._motor_hold_stepper.value(), self._motor_down_stepper.value()
+        )
+        self.ramp_settings_changed.emit(*self._current_motor_ramp_settings_tuple())
+
+    def _apply_motor_durations(self, up_s: float, hold_s: float, down_s: float) -> None:
+        # Same blockSignals-during-batch-set pattern as motor_test_widget.
+        # MotorTestPage._apply_durations() - see that method's docstring
+        # for why setting the three steppers one at a time WITHOUT
+        # blocking corrupts settings_store with a stale intermediate value.
+        for stepper, value in (
+            (self._motor_up_stepper, up_s),
+            (self._motor_hold_stepper, hold_s),
+            (self._motor_down_stepper, down_s),
+        ):
+            stepper.blockSignals(True)
+            stepper.setValue(round(value, 1))
+            stepper.blockSignals(False)
+        save_float(_MOTOR_UP_DURATION_KEY, self._motor_up_stepper.value())
+        save_float(_MOTOR_HOLD_DURATION_KEY, self._motor_hold_stepper.value())
+        save_float(_MOTOR_DOWN_DURATION_KEY, self._motor_down_stepper.value())
+        self._motor_chart.set_durations(
+            self._motor_up_stepper.value(), self._motor_hold_stepper.value(), self._motor_down_stepper.value()
+        )
+
+    def _on_motor_chart_profile_changed(
+        self, up_s: float, hold_s: float, down_s: float, min_percent: float, max_percent: float
+    ) -> None:
+        self._apply_motor_durations(up_s, hold_s, down_s)
+        save_int(_MOTOR_MIN_BOUND_KEY, round(min_percent))
+        save_int(_MOTOR_MAX_BOUND_KEY, round(max_percent))
+        self.ramp_settings_changed.emit(*self._current_motor_ramp_settings_tuple())
+
+    def apply_external_ramp_settings(
+        self, up_s: float, hold_s: float, down_s: float, ramp_mode: str, test_mode: str, min_percent: float, max_percent: float
+    ) -> None:
+        """Called by MainWindow when the sibling "Прогон мотором" tab
+        changed these same shared settings - mirrors them here too,
+        without re-emitting ramp_settings_changed (that tab already saved
+        settings_store itself - see main_window.py's wiring)."""
+        self._apply_motor_durations(up_s, hold_s, down_s)
+        idx = self._motor_ramp_mode_combo.findData(ramp_mode if ramp_mode in _RAMP_MODE_LABELS else RAMP_LINEAR)
+        if idx >= 0:
+            self._motor_ramp_mode_combo.blockSignals(True)
+            self._motor_ramp_mode_combo.setCurrentIndex(idx)
+            self._motor_ramp_mode_combo.blockSignals(False)
+        self._motor_chart.set_curve_mode(self._motor_ramp_mode_combo.currentData())
+        idx = self._motor_test_mode_combo.findData(test_mode if test_mode in _TEST_MODE_LABELS else TEST_MODE_ALL)
+        if idx >= 0:
+            self._motor_test_mode_combo.blockSignals(True)
+            self._motor_test_mode_combo.setCurrentIndex(idx)
+            self._motor_test_mode_combo.blockSignals(False)
+        self._motor_chart.set_bounds(min_percent, max_percent)
 
     def _on_esc_detail_changed(self, index: int, state: str, detail: str) -> None:
         self._esc_detail_by_index[index] = f"ESC {index + 1}: {detail}" if detail else f"ESC {index + 1}: -"

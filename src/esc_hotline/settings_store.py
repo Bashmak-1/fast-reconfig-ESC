@@ -54,3 +54,20 @@ def save_int(key: str, value: int) -> None:
     settings = _open()
     settings.setValue(key, value)
     settings.sync()
+
+
+def load_float(key: str, default: float = 0.0) -> float:
+    """Same as load_int(), but for values needing sub-integer precision
+    (e.g. ramp durations in tenths of a second) - reads an older plain
+    int ("4") written by a previous version just as well as a float
+    ("4.2"), since both parse fine via float()."""
+    try:
+        return float(_open().value(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def save_float(key: str, value: float) -> None:
+    settings = _open()
+    settings.setValue(key, value)
+    settings.sync()

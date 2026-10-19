@@ -316,6 +316,13 @@ class MainWindow(QMainWindow):
         self.hotspot_line_page.controller.armed_changed.connect(lambda *_: self.fc_flash_page.recheck_availability())
         self.motor_test_page.connection_changed.connect(lambda *_: self.fc_flash_page.recheck_availability())
 
+        # Both tabs' ramp-test settings (durations, curve/test mode, speed
+        # bounds) are the SAME shared settings_store keys, not two separate
+        # configs - this keeps each tab's own chart/controls reflecting the
+        # other's latest change live, not just after a restart.
+        self.motor_test_page.ramp_settings_changed.connect(self.fc_flash_page.apply_external_ramp_settings)
+        self.fc_flash_page.ramp_settings_changed.connect(self.motor_test_page.apply_external_ramp_settings)
+
     # ---- i18n ------------------------------------------------
 
     def _on_language_selected(self, index: int) -> None:

@@ -21,6 +21,7 @@ from PyQt6.QtCore import QEvent, Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
@@ -31,7 +32,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .manual_counter_widget import ManualCounterWidget
 from .motor_ramp import MOTOR_PROTOCOLS, MSP_MAX, MSP_MIN, msp_to_percent
 from .motor_test_manager import (
     PHASE_DOWN,
@@ -44,9 +44,10 @@ from .motor_test_manager import (
     TEST_MODE_SEQUENTIAL,
     MotorTestManager,
 )
+from .ramp_chart_math import MIN_PHASE_DURATION_S
 from .ramp_chart_widget import RampChartWidget
 from .serial_transport import list_fc_ports
-from .settings_store import load_int, load_str, save_int, save_str
+from .settings_store import load_float, load_int, load_str, save_float, save_int, save_str
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
 
 _PORT_KEY = "motor_test_port"
@@ -58,11 +59,13 @@ _TEST_MODE_KEY = "motor_test_mode"
 _MIN_BOUND_KEY = "motor_test_min_percent"
 _MAX_BOUND_KEY = "motor_test_max_percent"
 DEFAULT_BAUD = 115200
-DEFAULT_UP_DURATION_S = 4
-DEFAULT_HOLD_DURATION_S = 0
-DEFAULT_DOWN_DURATION_S = 4
+DEFAULT_UP_DURATION_S = 4.0
+DEFAULT_HOLD_DURATION_S = 0.0
+DEFAULT_DOWN_DURATION_S = 4.0
 DEFAULT_MIN_BOUND = 0
 DEFAULT_MAX_BOUND = 100
+_MAX_DURATION_S = 60.0
+_DURATION_STEP_S = 0.1
 _SLIDER_HEIGHT = 70
 _SLIDER_WIDTH = 22
 _RAMP_MODE_LABELS = {RAMP_LINEAR: "Лінійна", RAMP_BEZIER: "Безе"}
@@ -75,6 +78,20 @@ _PHASE_LABELS = {
     PHASE_DOWN: "Спад...",
 }
 _STATUS_COLORS = {"info": TEXT_MUTED, "warning": ACCENT_AMBER, "error": ACCENT_ERROR, "success": ACCENT_GREEN}
+
+
+def _make_duration_spinbox(min_value: float) -> QDoubleSpinBox:
+    """Tenths-of-a-second duration input - a standard QDoubleSpinBox
+    (decimals=1, step=0.1s) replaces the old whole-seconds-only
+    ManualCounterWidget stepper, matching what ramp_chart_math.py's
+    duration math (and dragging a chart point) already supported
+    internally all along."""
+    box = QDoubleSpinBox()
+    box.setDecimals(1)
+    box.setSingleStep(_DURATION_STEP_S)
+    box.setRange(min_value, _MAX_DURATION_S)
+    box.setFixedWidth(80)
+    return box
 
 
 class MotorTestPage(QWidget):
@@ -94,6 +111,14 @@ class MotorTestPage(QWidget):
 
     # GUI-thread-affinity signal for MainWindow's cross-tab port-collision guard.
     connection_changed = pyqtSignal(bool)
+
+    # Fires whenever this tab changes the shared ramp settings (duration,
+    # curve mode, test mode, or speed bounds) - MainWindow wires this to
+    # the sibling "Прошивка FC" tab's apply_external_ramp_settings() so
+    # both tabs' charts/controls stay in sync live, not just via the
+    # shared settings_store keys at next restart. Order: up_s, hold_s,
+    # down_s, ramp_mode, test_mode, min_percent, max_percent.
+    ramp_settings_changed = pyqtSignal(float, float, float, str, str, float, float)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -228,18 +253,18 @@ class MotorTestPage(QWidget):
 
         duration_row = QHBoxLayout()
         duration_row.addWidget(QLabel("Розгін, с:"))
-        self._up_duration_stepper = ManualCounterWidget(min_value=1, max_value=60, step=1)
-        self._up_duration_stepper.value_changed.connect(self._on_duration_changed)
+        self._up_duration_stepper = _make_duration_spinbox(MIN_PHASE_DURATION_S)
+        self._up_duration_stepper.valueChanged.connect(self._on_duration_changed)
         duration_row.addWidget(self._up_duration_stepper)
         duration_row.addSpacing(16)
         duration_row.addWidget(QLabel("Утримання, с:"))
-        self._hold_duration_stepper = ManualCounterWidget(min_value=0, max_value=60, step=1)
-        self._hold_duration_stepper.value_changed.connect(self._on_duration_changed)
+        self._hold_duration_stepper = _make_duration_spinbox(0.0)
+        self._hold_duration_stepper.valueChanged.connect(self._on_duration_changed)
         duration_row.addWidget(self._hold_duration_stepper)
         duration_row.addSpacing(16)
         duration_row.addWidget(QLabel("Спад, с:"))
-        self._down_duration_stepper = ManualCounterWidget(min_value=1, max_value=60, step=1)
-        self._down_duration_stepper.value_changed.connect(self._on_duration_changed)
+        self._down_duration_stepper = _make_duration_spinbox(MIN_PHASE_DURATION_S)
+        self._down_duration_stepper.valueChanged.connect(self._on_duration_changed)
         duration_row.addWidget(self._down_duration_stepper)
         duration_row.addStretch(1)
         root.addLayout(duration_row)
@@ -387,9 +412,9 @@ class MotorTestPage(QWidget):
             if idx >= 0:
                 self._port_combo.setCurrentIndex(idx)
         self._apply_durations(
-            load_int(_UP_DURATION_KEY, DEFAULT_UP_DURATION_S),
-            load_int(_HOLD_DURATION_KEY, DEFAULT_HOLD_DURATION_S),
-            load_int(_DOWN_DURATION_KEY, DEFAULT_DOWN_DURATION_S),
+            load_float(_UP_DURATION_KEY, DEFAULT_UP_DURATION_S),
+            load_float(_HOLD_DURATION_KEY, DEFAULT_HOLD_DURATION_S),
+            load_float(_DOWN_DURATION_KEY, DEFAULT_DOWN_DURATION_S),
         )
         ramp_mode = load_str(_RAMP_MODE_KEY, RAMP_LINEAR)
         idx = self._ramp_mode_combo.findData(ramp_mode if ramp_mode in _RAMP_MODE_LABELS else RAMP_LINEAR)
@@ -414,6 +439,42 @@ class MotorTestPage(QWidget):
         max_pct = load_int(_MAX_BOUND_KEY, DEFAULT_MAX_BOUND)
         self._ramp_chart.set_bounds(min_pct, max_pct)
         self._set_speed_bounds_requested.emit(min_pct, max_pct)
+
+    def _current_ramp_settings_tuple(self) -> tuple[float, float, float, str, str, float, float]:
+        return (
+            self._up_duration_stepper.value(),
+            self._hold_duration_stepper.value(),
+            self._down_duration_stepper.value(),
+            self._ramp_mode_combo.currentData(),
+            self._test_mode_combo.currentData(),
+            float(load_int(_MIN_BOUND_KEY, DEFAULT_MIN_BOUND)),
+            float(load_int(_MAX_BOUND_KEY, DEFAULT_MAX_BOUND)),
+        )
+
+    def apply_external_ramp_settings(
+        self, up_s: float, hold_s: float, down_s: float, ramp_mode: str, test_mode: str, min_percent: float, max_percent: float
+    ) -> None:
+        """Called by MainWindow when the sibling "Прошивка FC" tab's own
+        chart/controls changed these same shared settings - mirrors them
+        here too (that tab already saved settings_store itself, so this
+        only updates this tab's own live widgets/manager, never re-emits
+        ramp_settings_changed - that would ping-pong the two tabs forever)."""
+        self._apply_durations(up_s, hold_s, down_s)
+        idx = self._ramp_mode_combo.findData(ramp_mode if ramp_mode in _RAMP_MODE_LABELS else RAMP_LINEAR)
+        if idx >= 0:
+            self._ramp_mode_combo.blockSignals(True)
+            self._ramp_mode_combo.setCurrentIndex(idx)
+            self._ramp_mode_combo.blockSignals(False)
+        self._ramp_chart.set_curve_mode(self._ramp_mode_combo.currentData())
+        self._set_ramp_mode_requested.emit(self._ramp_mode_combo.currentData())
+        idx = self._test_mode_combo.findData(test_mode if test_mode in _TEST_MODE_LABELS else TEST_MODE_ALL)
+        if idx >= 0:
+            self._test_mode_combo.blockSignals(True)
+            self._test_mode_combo.setCurrentIndex(idx)
+            self._test_mode_combo.blockSignals(False)
+        self._set_test_mode_requested.emit(self._test_mode_combo.currentData())
+        self._ramp_chart.set_bounds(min_percent, max_percent)
+        self._set_speed_bounds_requested.emit(min_percent, max_percent)
 
     # ---- port-collision guard (same real-hardware-confirmed risk as the
     # two Хотспот tabs - see main_window.py's _is_port_busy_for_* methods) --
@@ -471,22 +532,25 @@ class MotorTestPage(QWidget):
         mode = self._ramp_mode_combo.currentData()
         save_str(_RAMP_MODE_KEY, mode)
         self._set_ramp_mode_requested.emit(mode)
+        self.ramp_settings_changed.emit(*self._current_ramp_settings_tuple())
 
     def _on_test_mode_changed(self, _index: int) -> None:
         mode = self._test_mode_combo.currentData()
         save_str(_TEST_MODE_KEY, mode)
         self._set_test_mode_requested.emit(mode)
+        self.ramp_settings_changed.emit(*self._current_ramp_settings_tuple())
 
-    def _on_duration_changed(self, _value: int) -> None:
-        save_int(_UP_DURATION_KEY, self._up_duration_stepper.value())
-        save_int(_HOLD_DURATION_KEY, self._hold_duration_stepper.value())
-        save_int(_DOWN_DURATION_KEY, self._down_duration_stepper.value())
+    def _on_duration_changed(self, _value: float) -> None:
+        save_float(_UP_DURATION_KEY, self._up_duration_stepper.value())
+        save_float(_HOLD_DURATION_KEY, self._hold_duration_stepper.value())
+        save_float(_DOWN_DURATION_KEY, self._down_duration_stepper.value())
         self._ramp_chart.set_durations(
             self._up_duration_stepper.value(), self._hold_duration_stepper.value(), self._down_duration_stepper.value()
         )
+        self.ramp_settings_changed.emit(*self._current_ramp_settings_tuple())
 
-    def _apply_durations(self, up_s: int, hold_s: int, down_s: int) -> None:
-        """Set all three steppers at once with their own value_changed
+    def _apply_durations(self, up_s: float, hold_s: float, down_s: float) -> None:
+        """Set all three steppers at once with their own valueChanged
         signals blocked, then save/push once - setting them one at a time
         WITHOUT blocking would fire _on_duration_changed() after the
         first stepper alone, which reads the other two steppers' still-
@@ -501,11 +565,11 @@ class MotorTestPage(QWidget):
             (self._down_duration_stepper, down_s),
         ):
             stepper.blockSignals(True)
-            stepper.set_value(value)
+            stepper.setValue(round(value, 1))
             stepper.blockSignals(False)
-        save_int(_UP_DURATION_KEY, self._up_duration_stepper.value())
-        save_int(_HOLD_DURATION_KEY, self._hold_duration_stepper.value())
-        save_int(_DOWN_DURATION_KEY, self._down_duration_stepper.value())
+        save_float(_UP_DURATION_KEY, self._up_duration_stepper.value())
+        save_float(_HOLD_DURATION_KEY, self._hold_duration_stepper.value())
+        save_float(_DOWN_DURATION_KEY, self._down_duration_stepper.value())
         self._ramp_chart.set_durations(
             self._up_duration_stepper.value(), self._hold_duration_stepper.value(), self._down_duration_stepper.value()
         )
@@ -515,13 +579,14 @@ class MotorTestPage(QWidget):
     ) -> None:
         # Dragging a chart point moves BOTH a duration and a bound at once
         # (see ramp_chart_widget.py's module docstring) - reflect the new
-        # durations back into the steppers (snapping the chart's continuous
-        # drag to whole seconds, since the steppers are int-only) and push
-        # the new bounds to the manager, same as before this feature.
-        self._apply_durations(round(up_s), round(hold_s), round(down_s))
+        # durations back into the steppers, snapped to one decimal (tenths
+        # of a second, matching the steppers' own precision), and push the
+        # new bounds to the manager, same as before this feature.
+        self._apply_durations(up_s, hold_s, down_s)
         save_int(_MIN_BOUND_KEY, round(min_percent))
         save_int(_MAX_BOUND_KEY, round(max_percent))
         self._set_speed_bounds_requested.emit(min_percent, max_percent)
+        self.ramp_settings_changed.emit(*self._current_ramp_settings_tuple())
 
     # ---- start / stop ------------------------------------------------
 
