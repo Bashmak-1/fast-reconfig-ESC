@@ -20,6 +20,14 @@ def _fake_completed(returncode: int = 0, stdout: str = "", stderr: str = "") -> 
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_delay(monkeypatch):
+    # flash_and_verify() sleeps DFU_SETTLE_DELAY_S before writing (real-
+    # hardware-confirmed settle delay, see dfu_flash_manager.py) - no test
+    # here should actually wait for it.
+    monkeypatch.setattr(dfu_flash_manager.time, "sleep", lambda _s: None)
+
+
 # ---- find_cli_path ------------------------------------------------
 
 

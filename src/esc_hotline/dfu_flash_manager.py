@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -58,6 +59,16 @@ FLASH_TIMEOUT_S = 120.0
 # address to download binary file for STM32 MCU devices."
 FLASH_BASE_ADDRESS = "0x08000000"
 RESET_TIMEOUT_S = 10.0
+# Confirmed on real hardware (2026-10-19): flashing IMMEDIATELY after a
+# `-l usb` that just listed the same device can fail outright with
+# "Error: Target device not found. Establishing connection with the
+# device failed." (exit=1), even though the device was genuinely present
+# a moment earlier - the two are separate CLI process launches, each
+# opening its own fresh USB handle to the DFU interface, and the driver
+# apparently needs a brief moment to fully release the previous one. A
+# short settle delay before the write call is the standard mitigation for
+# this class of "list says X, immediate action on X fails" race.
+DFU_SETTLE_DELAY_S = 0.7
 
 
 @dataclass
@@ -157,6 +168,7 @@ def flash_and_verify(
         flog.error("DFU: firmware file not found: %s", firmware_path)
         return FlashResult(False, f"Файл прошивки не знайдено: {firmware_path}")
     flog.info("DFU: --- flashing FC: port=%s, firmware=%s ---", port_id, firmware_path)
+    time.sleep(DFU_SETTLE_DELAY_S)
     args = ["-c", f"port={port_id}", "-w", firmware_path]
     if Path(firmware_path).suffix.lower() == ".bin":
         # .hex carries its own address and needs none of this; a raw .bin
