@@ -767,17 +767,23 @@ class FcFlashPage(QWidget):
         elif flash_esc and not self._selected_esc_indices():
             self._start_stop_btn.setEnabled(False)
             self._set_start_hint("Оберіть хоча б один ESC-слот (або зніміть галочку «Прошивка ESC»).")
-        elif not self._selected_port_device():
-            self._start_stop_btn.setEnabled(False)
-            self._set_start_hint("Оберіть порт (для звичайного режиму FC).")
-        elif self._port_busy_checker and self._port_busy_checker(self._selected_port_device()):
+        elif self._selected_port_device() and self._port_busy_checker and self._port_busy_checker(self._selected_port_device()):
             self._start_stop_btn.setEnabled(False)
             self._set_start_hint("Порт вже використовується іншою вкладкою.")
         else:
+            # A pre-selected normal-mode port is NOT required to start: the
+            # DFU reset (flash_fc on) and "waiting_fc_normal" (flash_fc
+            # off) phases both auto-detect the FC's port themselves (see
+            # fc_flash_station.py's module docstring) - while the FC sits
+            # in DFU mode it naturally shows up as no normal COM port at
+            # all, so requiring one here would make Start impossible to
+            # press exactly when this feature is meant to be used.
             self._start_stop_btn.setEnabled(True)
             hint = ""
             if flash_fc and not self._firmware_path:
                 hint = "Файл прошивки FC не обрано - DFU-крок буде пропущено."
+            elif not self._selected_port_device():
+                hint = "Порт не обрано - FC буде знайдено автоматично."
             self._set_start_hint(hint)
 
     def _set_start_hint(self, text: str) -> None:
