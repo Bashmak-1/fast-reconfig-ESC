@@ -50,9 +50,22 @@ from .fc_flash_station import (
 )
 from .manual_counter_widget import ManualCounterWidget
 from .motor_ramp import MOTOR_PROTOCOLS
+from .motor_test_manager import PHASE_IDLE as MOTOR_PHASE_IDLE, RAMP_LINEAR
+from .ramp_chart_widget import RampChartWidget
 from .serial_transport import list_fc_ports
 from .settings_store import load_int, load_str, save_int, save_str
 from .theme import ACCENT_AMBER, ACCENT_ERROR, TEXT_MUTED
+
+# Same persisted keys fc_flash_station.py reuses from "Прогон мотором" -
+# duplicated here too (this project's convention, see fc_flash_station.py's
+# own module docstring) just to draw the matching chart, never to drive
+# the actual test.
+_MOTOR_UP_DURATION_KEY = "motor_test_up_duration_s"
+_MOTOR_HOLD_DURATION_KEY = "motor_test_hold_duration_s"
+_MOTOR_DOWN_DURATION_KEY = "motor_test_down_duration_s"
+_MOTOR_RAMP_MODE_KEY = "motor_test_ramp_mode"
+_MOTOR_MIN_BOUND_KEY = "motor_test_min_percent"
+_MOTOR_MAX_BOUND_KEY = "motor_test_max_percent"
 
 _FIRMWARE_PATH_KEY = "fc_flash_firmware_path"
 _CONFIG_PATH_KEY = "fc_flash_esc_config_path"
@@ -97,6 +110,8 @@ class FcFlashPage(QWidget):
         self.controller.armed_changed.connect(self._on_armed_changed)
         self.controller.power_cycle_hint_changed.connect(self._on_power_cycle_hint_changed)
         self.controller.port_changed.connect(self._on_port_auto_changed)
+        self.controller.motor_test_phase_changed.connect(self._on_motor_test_phase_changed)
+        self.controller.motor_test_value_changed.connect(self._on_motor_test_value_changed)
 
         self._restore_settings()
 
@@ -228,6 +243,16 @@ class FcFlashPage(QWidget):
         self._detail_label.setStyleSheet(f"color: {TEXT_MUTED};")
         self._detail_label.setWordWrap(True)
         root.addWidget(self._detail_label)
+
+        # Read-only mirror of "Прогон мотором"'s own chart, for the final
+        # automatic motor-test step this tab runs on its own (see
+        # fc_flash_station.py) - setEnabled(False) is enough to block
+        # dragging entirely (a disabled QWidget never gets mouse events),
+        # no separate "read-only" flag needed in RampChartWidget itself.
+        self._motor_chart = RampChartWidget()
+        self._motor_chart.setEnabled(False)
+        self._motor_chart.setMinimumHeight(180)
+        root.addWidget(self._motor_chart)
 
         self._power_cycle_hint_label = QLabel()
         self._power_cycle_hint_label.setStyleSheet(f"color: {ACCENT_AMBER};")
@@ -449,6 +474,27 @@ class FcFlashPage(QWidget):
         self._update_start_stop_button()
         self._update_countdown()
         self._lab_power_hint_label.setVisible(phase in ("watching", "esc_error"))
+        if phase == "connecting_motor_test":
+            # Pull in whatever's currently configured on "Прогон мотором" -
+            # read fresh here rather than cached, same as the controller
+            # itself does right before it actually runs the sweep.
+            self._motor_chart.set_durations(
+                load_int(_MOTOR_UP_DURATION_KEY, 4),
+                load_int(_MOTOR_HOLD_DURATION_KEY, 0),
+                load_int(_MOTOR_DOWN_DURATION_KEY, 4),
+            )
+            self._motor_chart.set_bounds(
+                load_int(_MOTOR_MIN_BOUND_KEY, 0),
+                load_int(_MOTOR_MAX_BOUND_KEY, 100),
+            )
+            self._motor_chart.set_curve_mode(load_str(_MOTOR_RAMP_MODE_KEY, RAMP_LINEAR))
+
+    def _on_motor_test_phase_changed(self, phase: str) -> None:
+        self._motor_chart.set_phase(phase)
+
+    def _on_motor_test_value_changed(self, values: list) -> None:
+        if values:
+            self._motor_chart.set_current_value(values[0])
 
     def _on_esc_detail_changed(self, index: int, state: str, detail: str) -> None:
         self._esc_detail_by_index[index] = f"ESC {index + 1}: {detail}" if detail else f"ESC {index + 1}: -"
@@ -483,6 +529,7 @@ class FcFlashPage(QWidget):
             self._countdown_label.setText("")
             self._on_power_cycle_hint_changed(False)
             self._lab_power_hint_label.setVisible(False)
+            self._motor_chart.set_phase(MOTOR_PHASE_IDLE)
         self._update_start_stop_button()
 
     def _update_countdown(self) -> None:

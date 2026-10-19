@@ -411,6 +411,12 @@ class FcFlashStationController(QObject):
     power_cycle_hint_changed = pyqtSignal(bool)
     port_changed = pyqtSignal(str)  # FC re-enumerated under a different COM port after a DFU reset
 
+    # Raw forwards from the private MotorTestManager, for an optional
+    # read-only RampChartWidget on this tab's own widget - mirrors exactly
+    # what motor_test_widget.py's own chart is fed.
+    motor_test_phase_changed = pyqtSignal(str)  # PHASE_IDLE/PHASE_UP/PHASE_HOLD/PHASE_DOWN
+    motor_test_value_changed = pyqtSignal(list)  # raw MSP values, one per real motor slot
+
     # Internal-only: reach the private EscManager, which lives on another
     # thread - never call its methods directly, only through these signals.
     _connect_requested = pyqtSignal(str, int)
@@ -477,6 +483,8 @@ class FcFlashStationController(QObject):
         motor_mgr.motor_count_detected.connect(self._on_motor_count_detected)
         motor_mgr.armed_check_result.connect(self._on_motor_armed_check_result)
         motor_mgr.phase_changed.connect(self._on_motor_phase_changed)
+        motor_mgr.phase_changed.connect(self.motor_test_phase_changed.emit)
+        motor_mgr.value_changed.connect(self.motor_test_value_changed.emit)
         motor_mgr.log_message.connect(self._on_motor_log_message)
 
         self._firmware_path: Optional[str] = None
