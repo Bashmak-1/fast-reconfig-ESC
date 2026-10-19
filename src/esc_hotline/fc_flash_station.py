@@ -157,6 +157,7 @@ PHASE_STYLE = {
     "esc_error": (ACCENT_ERROR, "white"),
     "error_connect": (ACCENT_ERROR, "white"),
     "writing_protocol": (ACCENT_AMBER, "white"),
+    "skipping_to_motor_test": (BG_PANEL, TEXT_MAIN),
     "waiting_fc_for_motor_test": (BG_PANEL, TEXT_MAIN),
     "connecting_motor_test": (ACCENT_AMBER, "white"),
     "checking_motor_armed": (ACCENT_AMBER, "white"),
@@ -179,6 +180,7 @@ PHASE_LABEL = {
     "esc_error": "Помилка прошивки ESC",
     "error_connect": "Помилка підключення",
     "writing_protocol": "Запис протоколу й перезавантаження FC...",
+    "skipping_to_motor_test": "Прошивку ESC вимкнено оператором - перехід одразу до тесту моторів...",
     "waiting_fc_for_motor_test": "Очікування перезавантаження FC після зміни протоколу...",
     "connecting_motor_test": "Підключення для тесту моторів...",
     "checking_motor_armed": "Перевірка стану FC (має бути disarmed)...",
@@ -390,17 +392,34 @@ class _MotorTestWorkerThread:
 class FcFlashStationController(QObject):
     """Owns a private ConnectionWorker (EscManager + its own QThread, for
     the ESC phase), a private _DfuWorkerThread (for the DFU-flash phase),
-    and a private _ProtocolWorkerThread (for the final protocol-write
-    phase), and drives the combined loop:
-    idle -> waiting_device -> [flashing_fc -> resetting_fc ->]
-    waiting_fc_normal -> connecting -> watching -> [flashing ->]
-    esc_ready -> writing_protocol -> done/protocol_error.
+    a private _ProtocolWorkerThread (for the protocol-write phase), and a
+    private MotorTestManager (for the final motor-test phase), and drives
+    the combined loop: idle -> waiting_device -> [flashing_fc ->
+    resetting_fc ->] waiting_fc_normal -> connecting -> watching ->
+    [flashing ->] esc_ready -> writing_protocol -> waiting_fc_for_motor_test
+    -> connecting_motor_test -> checking_motor_armed -> running_motor_test
+    -> all_done (or one of several *_error phases along the way).
 
     Unlike hotspot_station.py, "esc_ready" here is NOT a steady state to
     loop on - the moment every watched ESC slot is confirmed good for the
     first time, this controller moves straight on to writing the FC's
-    motor protocol and rebooting it, then stops (a one-shot provisioning
-    run for one board, not an open-ended hot-swap line).
+    motor protocol and rebooting it, then on to the motor test, then stops
+    (a one-shot provisioning run for one board, not an open-ended hot-swap
+    line).
+
+    Two independent operator toggles (set_flash_fc_enabled()/
+    set_flash_esc_enabled(), both default True) let a run skip stages that
+    aren't needed this time, in any combination:
+    - flash_fc=False: start() skips straight to "waiting_fc_normal" - no
+      DFU search at all, just auto-detect the FC already in normal mode.
+    - flash_esc=False: once connected, skips the whole watching/flashing
+      ESC loop AND the protocol write that follows it - straight from
+      "connecting" to the final motor-test phase (see
+      "skipping_to_motor_test" in _on_connection_state_changed).
+    - Both False: this run is purely "connect and motor-test", nothing
+      else - a convenience wrapper around what "Прогон мотором" already
+      does standalone, reachable from this tab when it's mid-provisioning
+      flow already (e.g. re-testing right after a manual ESC re-flash).
     """
 
     phase_changed = pyqtSignal(str)
@@ -491,6 +510,8 @@ class FcFlashStationController(QObject):
         self._cli_path_override: Optional[str] = None
         self._config_bytes: Optional[bytes] = None
         self._port_device: Optional[str] = None
+        self._flash_fc_enabled = True
+        self._flash_esc_enabled = True
         self._esc_indices: list[int] = [0]
         self._protocol_index: int = MOTOR_PROTOCOLS.index("DSHOT300")
         self._last_esc_states: dict[int, str] = {}
@@ -553,6 +574,23 @@ class FcFlashStationController(QObject):
     def set_port(self, device: Optional[str]) -> None:
         self._port_device = device
 
+    def set_flash_fc_enabled(self, enabled: bool) -> None:
+        """Operator toggle: when False, the DFU search/flash/reset phases
+        are skipped entirely and start() goes straight to
+        "waiting_fc_normal" - the FC is assumed to already be in normal
+        mode (e.g. a previous run already flashed it), and that phase's
+        existing re-enumeration-tolerant auto-detect (see this file's
+        module docstring) finds/confirms it just the same as it would
+        after a real DFU reset."""
+        self._flash_fc_enabled = enabled
+
+    def set_flash_esc_enabled(self, enabled: bool) -> None:
+        """Operator toggle: when False, the ESC-watch/flash loop AND the
+        protocol write that normally follows it are both skipped - once
+        connected to the FC, this goes straight to the final motor-test
+        phase (see _on_connection_state_changed)."""
+        self._flash_esc_enabled = enabled
+
     def set_esc_indices(self, indices: list[int]) -> None:
         self._esc_indices = list(indices)
 
@@ -581,12 +619,26 @@ class FcFlashStationController(QObject):
         self.power_cycle_hint_changed.emit(False)
         self.dfu_detail_changed.emit("")
         self._flog.info(
-            "=== FC flash station armed: firmware=%s, cli_override=%s, esc_config_bytes=%s, port=%s, esc_indices=%s, protocol_index=%d ===",
+            "=== FC flash station armed: firmware=%s, cli_override=%s, esc_config_bytes=%s, port=%s, esc_indices=%s, "
+            "protocol_index=%d, flash_fc_enabled=%s, flash_esc_enabled=%s ===",
             self._firmware_path, self._cli_path_override,
             len(self._config_bytes) if self._config_bytes is not None else None,
             self._port_device, self._esc_indices, self._protocol_index,
+            self._flash_fc_enabled, self._flash_esc_enabled,
         )
-        self._set_phase("waiting_device")
+        if self._flash_fc_enabled:
+            self._set_phase("waiting_device")
+        else:
+            # Skip the DFU phase entirely - straight to "waiting_fc_normal"
+            # with an empty snapshot, so EVERY currently-present port
+            # counts as a fresh candidate for its own re-enumeration-
+            # tolerant auto-detect (choose_reenumerated_port() already
+            # prefers a likely_fc-flagged port over an unrelated one) -
+            # the operator's remembered port name may well be stale after
+            # an earlier DFU cycle (see module docstring), so this is not
+            # just "trust the dropdown".
+            self._flog.info("FC flash station: FC-flash stage disabled by operator - skipping DFU, auto-detecting normal-mode FC")
+            self._set_phase("waiting_fc_normal")
         self._poll_timer.start()
 
     def stop(self) -> None:
@@ -596,7 +648,7 @@ class FcFlashStationController(QObject):
         self.armed_changed.emit(False)
         self._poll_timer.stop()
         self._flog.info("=== FC flash station disarmed (was in phase %s) ===", self._phase)
-        if self._phase not in DFU_PHASES and self._phase not in MOTOR_TEST_PHASES:
+        if self._phase not in DFU_PHASES and self._phase not in MOTOR_TEST_PHASES and self._phase != "skipping_to_motor_test":
             self._disconnect_requested.emit()
         if self._phase in MOTOR_TEST_PHASES:
             self._motor_disconnect_requested.emit()
@@ -747,10 +799,10 @@ class FcFlashStationController(QObject):
                 self._motor_connect_requested.emit(self._port_device, DEFAULT_BAUD)
             return
         # "flashing_fc"/"resetting_fc"/"flashing"/"fc_flash_error"/
-        # "writing_protocol"/"connecting_motor_test"/"checking_motor_armed"/
-        # "running_motor_test"/"all_done"/"protocol_error"/
-        # "motor_test_error": no polling action, waits for the relevant
-        # *_done signal or a manual retry().
+        # "writing_protocol"/"skipping_to_motor_test"/"connecting_motor_test"/
+        # "checking_motor_armed"/"running_motor_test"/"all_done"/
+        # "protocol_error"/"motor_test_error": no polling action, waits for
+        # the relevant *_done signal or a manual retry().
 
     def _resolved_cli_path(self) -> str:
         path = dfu_flash_manager.find_cli_path(self._cli_path_override)
@@ -873,9 +925,23 @@ class FcFlashStationController(QObject):
             self._pre_dfu_port_snapshot = {info.device for info in list_fc_ports()}
             self._write_protocol_requested.emit(self._port_device or "", DEFAULT_BAUD, self._protocol_index)
             return
+        if self._phase == "skipping_to_motor_test" and not connected:
+            # Same disconnect-confirmation synchronization as above, minus
+            # the protocol write and reboot - the operator disabled the
+            # ESC stage, so there's no reboot to wait out either: connect
+            # straight to the still-current port for the motor test.
+            self._flog.info("FC flash station: FourWay confirmed disconnected - ESC stage was disabled, skipping straight to motor test")
+            self._set_phase("connecting_motor_test")
+            self._motor_connect_requested.emit(self._port_device or "", DEFAULT_BAUD)
+            return
         if self._phase != "connecting":
             return
         if connected:
+            if not self._flash_esc_enabled:
+                self._flog.info("FC flash station: ESC-flash stage disabled by operator - skipping straight to motor test")
+                self._set_phase("skipping_to_motor_test")
+                self._disconnect_requested.emit()
+                return
             self._last_esc_states = {}
             self._tick_seen_states = {}
             for i in self._esc_indices:

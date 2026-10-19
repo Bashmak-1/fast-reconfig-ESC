@@ -26,6 +26,7 @@ from typing import Callable, Optional
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -92,6 +93,8 @@ _ESC_INDICES_KEY = "fc_flash_esc_indices"  # comma-separated 0-based indices, e.
 _PROTOCOL_INDEX_KEY = "fc_flash_protocol_index"
 _CLI_PATH_OVERRIDE_KEY = "fc_flash_cli_path_override"
 _POLL_INTERVAL_KEY = "fc_flash_poll_interval_ms"
+_FLASH_FC_ENABLED_KEY = "fc_flash_stage_fc_enabled"
+_FLASH_ESC_ENABLED_KEY = "fc_flash_stage_esc_enabled"
 _DEFAULT_ESC_INDICES = (0, 1)  # ESC 1 + ESC 2 - the common case is a 2-in-1 ESC board on one FC
 
 _FIRMWARE_FILTER = "Firmware (*.hex *.bin);;All files (*)"
@@ -145,6 +148,13 @@ class FcFlashPage(QWidget):
         root = QVBoxLayout(self)
 
         firmware_row = QHBoxLayout()
+        # Stage toggle - unchecked skips the whole DFU search/flash/reset
+        # phase and auto-detects the FC already in normal mode instead
+        # (see fc_flash_station.py's set_flash_fc_enabled() docstring).
+        self._flash_fc_checkbox = QCheckBox("Прошивка FC")
+        self._flash_fc_checkbox.setChecked(True)
+        self._flash_fc_checkbox.toggled.connect(self._on_flash_fc_toggled)
+        firmware_row.addWidget(self._flash_fc_checkbox)
         self._load_firmware_btn = QPushButton("Прошивка FC...")
         self._load_firmware_btn.clicked.connect(self._on_load_firmware_clicked)
         firmware_row.addWidget(self._load_firmware_btn)
@@ -155,6 +165,13 @@ class FcFlashPage(QWidget):
         root.addLayout(firmware_row)
 
         config_row = QHBoxLayout()
+        # Stage toggle - unchecked skips the ESC watch/flash loop AND the
+        # protocol write that follows it, straight to the motor test (see
+        # fc_flash_station.py's set_flash_esc_enabled() docstring).
+        self._flash_esc_checkbox = QCheckBox("Прошивка ESC")
+        self._flash_esc_checkbox.setChecked(True)
+        self._flash_esc_checkbox.toggled.connect(self._on_flash_esc_toggled)
+        config_row.addWidget(self._flash_esc_checkbox)
         self._load_config_btn = QPushButton("Конфіг ESC...")
         self._load_config_btn.clicked.connect(self._on_load_config_clicked)
         config_row.addWidget(self._load_config_btn)
@@ -446,11 +463,35 @@ class FcFlashPage(QWidget):
         save_int(_POLL_INTERVAL_KEY, value)
         self._update_poll_interval_seconds_label()
 
+    def _on_flash_fc_toggled(self, checked: bool) -> None:
+        save_int(_FLASH_FC_ENABLED_KEY, 1 if checked else 0)
+        self.controller.set_flash_fc_enabled(checked)
+        self._load_firmware_btn.setEnabled(checked)
+        self._update_start_stop_button()
+
+    def _on_flash_esc_toggled(self, checked: bool) -> None:
+        save_int(_FLASH_ESC_ENABLED_KEY, 1 if checked else 0)
+        self.controller.set_flash_esc_enabled(checked)
+        self._load_config_btn.setEnabled(checked)
+        self._esc_menu_btn.setEnabled(checked)
+        self._update_start_stop_button()
+
     def _update_poll_interval_seconds_label(self) -> None:
         seconds = self._poll_interval_stepper.value() / 1000
         self._poll_interval_seconds_label.setText(f"{seconds:.1f}с")
 
     def _restore_settings(self) -> None:
+        flash_fc_enabled = load_int(_FLASH_FC_ENABLED_KEY, 1) != 0
+        self._flash_fc_checkbox.setChecked(flash_fc_enabled)
+        self.controller.set_flash_fc_enabled(flash_fc_enabled)
+        self._load_firmware_btn.setEnabled(flash_fc_enabled)
+
+        flash_esc_enabled = load_int(_FLASH_ESC_ENABLED_KEY, 1) != 0
+        self._flash_esc_checkbox.setChecked(flash_esc_enabled)
+        self.controller.set_flash_esc_enabled(flash_esc_enabled)
+        self._load_config_btn.setEnabled(flash_esc_enabled)
+        self._esc_menu_btn.setEnabled(flash_esc_enabled)
+
         firmware_path = load_str(_FIRMWARE_PATH_KEY)
         if firmware_path and Path(firmware_path).is_file():
             self._apply_firmware_path(firmware_path)
@@ -663,11 +704,13 @@ class FcFlashPage(QWidget):
         self._power_cycle_hint_label.setVisible(show)
 
     def _on_armed_changed(self, armed: bool) -> None:
-        self._load_firmware_btn.setEnabled(not armed)
-        self._load_config_btn.setEnabled(not armed)
+        self._flash_fc_checkbox.setEnabled(not armed)
+        self._flash_esc_checkbox.setEnabled(not armed)
+        self._load_firmware_btn.setEnabled(not armed and self._flash_fc_checkbox.isChecked())
+        self._load_config_btn.setEnabled(not armed and self._flash_esc_checkbox.isChecked())
         self._port_combo.setEnabled(not armed)
         self._refresh_btn.setEnabled(not armed)
-        self._esc_menu_btn.setEnabled(not armed)
+        self._esc_menu_btn.setEnabled(not armed and self._flash_esc_checkbox.isChecked())
         self._protocol_combo.setEnabled(not armed)
         if armed:
             self._countdown_timer.start()
@@ -708,7 +751,7 @@ class FcFlashPage(QWidget):
         if self.controller.armed:
             self._start_stop_btn.setText("Стоп")
             busy_phase = self.controller.phase in (
-                "flashing_fc", "resetting_fc", "flashing", "writing_protocol",
+                "flashing_fc", "resetting_fc", "flashing", "writing_protocol", "skipping_to_motor_test",
                 "connecting_motor_test", "checking_motor_armed", "running_motor_test",
             )
             self._start_stop_btn.setEnabled(not busy_phase)
@@ -716,12 +759,14 @@ class FcFlashPage(QWidget):
             return
 
         self._start_stop_btn.setText("Старт")
-        if self._config_bytes is None:
+        flash_fc = self._flash_fc_checkbox.isChecked()
+        flash_esc = self._flash_esc_checkbox.isChecked()
+        if flash_esc and self._config_bytes is None:
             self._start_stop_btn.setEnabled(False)
-            self._set_start_hint("Оберіть файл конфігу ESC.")
-        elif not self._selected_esc_indices():
+            self._set_start_hint("Оберіть файл конфігу ESC (або зніміть галочку «Прошивка ESC»).")
+        elif flash_esc and not self._selected_esc_indices():
             self._start_stop_btn.setEnabled(False)
-            self._set_start_hint("Оберіть хоча б один ESC-слот.")
+            self._set_start_hint("Оберіть хоча б один ESC-слот (або зніміть галочку «Прошивка ESC»).")
         elif not self._selected_port_device():
             self._start_stop_btn.setEnabled(False)
             self._set_start_hint("Оберіть порт (для звичайного режиму FC).")
@@ -730,7 +775,10 @@ class FcFlashPage(QWidget):
             self._set_start_hint("Порт вже використовується іншою вкладкою.")
         else:
             self._start_stop_btn.setEnabled(True)
-            self._set_start_hint("" if self._firmware_path else "Файл прошивки FC не обрано - DFU-крок буде пропущено.")
+            hint = ""
+            if flash_fc and not self._firmware_path:
+                hint = "Файл прошивки FC не обрано - DFU-крок буде пропущено."
+            self._set_start_hint(hint)
 
     def _set_start_hint(self, text: str) -> None:
         self._start_stop_btn.setToolTip(text)
