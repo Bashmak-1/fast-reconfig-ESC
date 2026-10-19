@@ -58,6 +58,21 @@ flash+verify, exiting DFU (see dfu_flash_manager.reset_to_app - "-g
 <address>", not "-rst"), ESC flashing, and the protocol write+reboot all
 completed successfully through this tab.
 
+Two real-world operator-reported gaps, both fixed the same way - watching
+for DFU is no longer confined to a single "waiting_device" phase that's
+only ever visited once per run:
+- Forgetting to hold the board's DFU button: this tab finds the FC
+  already answering in normal mode (no DFU device yet) and moves straight
+  to "connecting"/"watching" - if the operator notices within moments and
+  power-cycles the board correctly into DFU mode, the disconnect this
+  causes lands in "waiting_fc_normal", which now ALSO watches for DFU
+  (not just normal-mode reappearance), so the correction is still caught.
+- Flashing several boards in a row: once a board reaches "all_done" (see
+  _on_poll_tick's own handling there), this controller waits for THAT
+  board to physically disappear, a short settle delay, then automatically
+  goes back to watching for the next one - no manual Стоп/Старт needed
+  between boards.
+
 After the protocol reboot, this controller goes one step further: it
 waits for the FC to come back up under its new protocol (same
 snapshot/new-port-detection trick as the DFU reset above), connects to
@@ -123,6 +138,12 @@ MIN_POLL_INTERVAL_MS = 1000
 MAX_POLL_INTERVAL_MS = 10_000
 POLL_INTERVAL_STEP_MS = 100
 EMPTY_PROBES_BEFORE_POWER_CYCLE_HINT = 20  # same rationale as hotspot_station.py's own constant
+# How long to wait, once the just-finished board has physically disappeared
+# at "all_done", before starting to watch for the next one - a port can
+# bounce (briefly vanish then reappear) right at power-down, so this is not
+# just cosmetic: starting the search mid-bounce could latch onto the same
+# board's own disappearing act as "ready", then immediately find nothing.
+NEXT_BOARD_SETTLE_DELAY_S = 2.0
 
 # DFU-phase-only states, checked before ever reaching the ESC-watching
 # phases shared in spirit (not in code) with hotspot_station.py.
@@ -536,6 +557,7 @@ class FcFlashStationController(QObject):
         self._dfu_port_id: Optional[str] = None
         self._dfu_poll_count = 0  # how many `-l usb` ticks since armed - visible proof the search loop is actually running
         self._pre_dfu_port_snapshot: set[str] = set()
+        self._fc_gone_since: Optional[float] = None
         self._motor_count_for_test = 0
         self._counter_flashed = 0
         self._counter_ok = 0
@@ -632,6 +654,7 @@ class FcFlashStationController(QObject):
         self._dfu_port_id = None
         self._dfu_poll_count = 0
         self._pre_dfu_port_snapshot = set()
+        self._fc_gone_since = None
         self._motor_count_for_test = 0
         self._last_esc_states = {}
         self._tick_seen_states = {}
@@ -767,6 +790,21 @@ class FcFlashStationController(QObject):
                 self._connect_attempts = 0
                 self._set_phase("connecting")
                 self._attempt_connect()
+                return
+            # ALSO keep watching for DFU here, not just normal-mode
+            # reappearance (confirmed real-world need: the operator can
+            # forget to hold the DFU button, notice within milliseconds
+            # that this tab went straight for FourWay instead of a DFU
+            # search, and power-cycle the board to correct it - by then
+            # this phase has already moved on from "waiting_device" and
+            # would otherwise never look for DFU again. Same mechanism
+            # also covers unplugging this board and plugging in the NEXT
+            # one already in DFU mode, see "all_done"'s own handling below).
+            if self._flash_fc_enabled and not self._dfu_op_in_flight:
+                cli_path = self._resolved_cli_path()
+                if cli_path:
+                    self._dfu_op_in_flight = True
+                    self._list_devices_requested.emit(cli_path)
             return
 
         if self._phase == "connecting":
@@ -818,11 +856,40 @@ class FcFlashStationController(QObject):
                 self._set_phase("connecting_motor_test")
                 self._motor_connect_requested.emit(self._port_device, DEFAULT_BAUD)
             return
+
+        if self._phase == "all_done":
+            # Automatic "ready for the next board" reset - confirmed real
+            # need: without this, the operator had to manually press
+            # Стоп then Старт between every single board. Waits for the
+            # JUST-flashed FC to physically disappear (powered off/
+            # unplugged) first - never starts searching for a new one
+            # while the old one might still answer - then a short settle
+            # delay (the port can bounce once right at power-down), then
+            # goes back to actively watching for the next board exactly
+            # like a fresh start() would.
+            present = bool(self._port_device) and self._port_device in {info.device for info in list_fc_ports()}
+            if present:
+                self._fc_gone_since = None
+                return
+            if self._fc_gone_since is None:
+                self._fc_gone_since = time.monotonic()
+                self.dfu_detail_changed.emit("FC вимкнено - готуюсь до наступної плати...")
+                return
+            if time.monotonic() - self._fc_gone_since < NEXT_BOARD_SETTLE_DELAY_S:
+                return
+            self._flog.info("FC flash station: previous FC gone - watching for the next board")
+            self._fc_gone_since = None
+            self._port_device = None
+            self._pre_dfu_port_snapshot = set()
+            self._dfu_poll_count = 0
+            self.dfu_detail_changed.emit("")
+            self._set_phase("waiting_device" if self._flash_fc_enabled else "waiting_fc_normal")
+            return
         # "flashing_fc"/"resetting_fc"/"flashing"/"fc_flash_error"/
         # "writing_protocol"/"skipping_to_motor_test"/"connecting_motor_test"/
-        # "checking_motor_armed"/"running_motor_test"/"all_done"/
-        # "protocol_error"/"motor_test_error": no polling action, waits for
-        # the relevant *_done signal or a manual retry().
+        # "checking_motor_armed"/"running_motor_test"/"protocol_error"/
+        # "motor_test_error": no polling action, waits for the relevant
+        # *_done signal or a manual retry().
 
     def _resolved_cli_path(self) -> str:
         path = dfu_flash_manager.find_cli_path(self._cli_path_override)
@@ -854,11 +921,17 @@ class FcFlashStationController(QObject):
 
     def _on_devices_listed(self, devices: list) -> None:
         self._dfu_op_in_flight = False
-        if not self._armed or self._phase != "waiting_device":
+        if not self._armed or self._phase not in ("waiting_device", "waiting_fc_normal"):
             return
         self._dfu_poll_count += 1
         self._flog.info("FC flash station: `-l usb` tick #%d -> %d DFU device(s)", self._dfu_poll_count, len(devices))
         if not devices:
+            if self._phase != "waiting_device":
+                # "waiting_fc_normal": this was just the background DFU
+                # check (see _on_poll_tick's own comment there) - normal-
+                # mode reappearance is this phase's own primary watch,
+                # handled separately, nothing more to do here.
+                return
             # No DFU device found THIS tick - only now consider "maybe the
             # FC is already in normal mode, no flash needed this round".
             # Checked here, after confirming no DFU device is present,
@@ -895,6 +968,12 @@ class FcFlashStationController(QObject):
             device.raw_line, device.port_id, self._firmware_path,
         )
         self.dfu_detail_changed.emit(f"DFU-пристрій знайдено ({device.raw_line}). Прошиваю...")
+        # Fresh baseline right before the flash - whatever "waiting_fc_normal"
+        # was previously tracking (if that's where this flash started from,
+        # e.g. operator corrected a forgotten-DFU mistake, or plugged in the
+        # next board) is now moot: this is the new "before" snapshot for the
+        # upcoming DFU reset's own re-enumeration detection.
+        self._pre_dfu_port_snapshot = {info.device for info in list_fc_ports()}
         self._dfu_op_in_flight = True
         self._set_phase("flashing_fc")
         self._flash_fc_requested.emit(self._resolved_cli_path(), device.port_id, self._firmware_path)
