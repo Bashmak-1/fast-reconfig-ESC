@@ -261,6 +261,7 @@ class _DfuWorker(QObject):
 
     devices_listed = pyqtSignal(list)  # list[dfu_flash_manager.DfuDeviceInfo]
     flash_done = pyqtSignal(bool, str)
+    flash_progress = pyqtSignal(str, int)  # stage ("write"/"verify"), percent - see dfu_flash_manager.flash_and_verify
     reset_done = pyqtSignal(bool)
 
     def list_devices(self, cli_path: str) -> None:
@@ -273,7 +274,13 @@ class _DfuWorker(QObject):
         if not cli_path:
             self.flash_done.emit(False, "STM32_Programmer_CLI.exe не знайдено.")
             return
-        result = dfu_flash_manager.flash_and_verify(Path(cli_path), port_id, firmware_path)
+        # Emitting a Qt signal from this worker thread is safe - PyQt
+        # auto-queues delivery to whatever thread the connected slot lives
+        # on (here, the GUI-thread controller), same as every other
+        # cross-thread signal in this file.
+        result = dfu_flash_manager.flash_and_verify(
+            Path(cli_path), port_id, firmware_path, progress_callback=self.flash_progress.emit
+        )
         self.flash_done.emit(result.success, result.message)
 
     def reset(self, cli_path: str, port_id: str) -> None:
@@ -461,6 +468,7 @@ class FcFlashStationController(QObject):
     armed_changed = pyqtSignal(bool)
     power_cycle_hint_changed = pyqtSignal(bool)
     port_changed = pyqtSignal(str)  # FC re-enumerated under a different COM port after a DFU reset
+    dfu_flash_progress_changed = pyqtSignal(str, int)  # stage ("write"/"verify"), percent - see dfu_flash_manager.py
 
     # Raw forwards from the private MotorTestManager, for an optional
     # read-only RampChartWidget on this tab's own widget - mirrors exactly
@@ -515,6 +523,7 @@ class FcFlashStationController(QObject):
         self._reset_fc_requested.connect(dfu_worker.reset)
         dfu_worker.devices_listed.connect(self._on_devices_listed)
         dfu_worker.flash_done.connect(self._on_flash_fc_done)
+        dfu_worker.flash_progress.connect(self.dfu_flash_progress_changed.emit)
         dfu_worker.reset_done.connect(self._on_reset_fc_done)
 
         self._protocol_worker_thread = _ProtocolWorkerThread()

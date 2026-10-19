@@ -26,14 +26,26 @@ enter the write address to download binary file for STM32 MCU devices."
 """
 from __future__ import annotations
 
+import queue
 import re
 import subprocess
+import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .file_logger import get_logger
+
+# Suppresses the console window Windows would otherwise pop up for this
+# console-subsystem .exe every time it's launched from our windowed (no
+# console of its own) GUI app - confirmed annoying in practice (flashes in
+# and out on every single CLI call, several times a second while polling
+# for DFU). capture_output/stdout=PIPE still works identically with this
+# flag; it only suppresses the window, not the process's own I/O.
+_CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+_PERCENT_RE = re.compile(r"(\d{1,3})\s*%")
 
 # Plain logging.Logger singleton, no Qt involved - safe to use from this
 # otherwise Qt-free module. Every CLI invocation is logged verbosely here
@@ -111,12 +123,84 @@ def _run(cli_path: Path, args: list[str], timeout_s: float) -> subprocess.Comple
     flog = get_logger()
     cmd = [str(cli_path), *args]
     flog.info("DFU: running %s", cmd)
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=timeout_s, creationflags=_CREATE_NO_WINDOW
+    )
     flog.info(
         "DFU: %s -> exit=%d, stdout=%r, stderr=%r",
         args, result.returncode, result.stdout, result.stderr,
     )
     return result
+
+
+def _stream_reader(stream, out_queue: "queue.Queue[Optional[str]]") -> None:
+    """Runs on its own daemon thread (started by _run_streaming) - reads
+    one character at a time rather than by line, because the CLI's own
+    progress bar redraws in place using carriage returns ("\\r"), not
+    newlines; buffering by \\n alone would withhold every progress update
+    until the operation's very last line. Puts None once the stream
+    closes, the sentinel _run_streaming's reader loop waits for."""
+    buffer = ""
+    while True:
+        char = stream.read(1)
+        if char == "":
+            break
+        buffer += char
+        if char in ("\n", "\r"):
+            out_queue.put(buffer)
+            buffer = ""
+    if buffer:
+        out_queue.put(buffer)
+    out_queue.put(None)
+
+
+def _run_streaming(
+    cli_path: Path,
+    args: list[str],
+    timeout_s: float,
+    on_line: Optional[Callable[[str], None]] = None,
+) -> subprocess.CompletedProcess:
+    """Same contract as _run(), but reads the child's combined stdout/
+    stderr incrementally instead of waiting for it to exit - lets on_line
+    see each progress update (e.g. "Download in Progress: ... 42%") as it
+    is written, not all at once at the end. A background thread does the
+    actual blocking reads (Windows pipe handles have no native read-with-
+    timeout), so this still enforces timeout_s via Queue.get(timeout=...),
+    exactly like _run()'s own subprocess.run(timeout=...) does.
+    """
+    flog = get_logger()
+    cmd = [str(cli_path), *args]
+    flog.info("DFU: running %s", cmd)
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        creationflags=_CREATE_NO_WINDOW,
+    )
+    out_queue: "queue.Queue[Optional[str]]" = queue.Queue()
+    reader = threading.Thread(target=_stream_reader, args=(process.stdout, out_queue), daemon=True)
+    reader.start()
+
+    chunks: list[str] = []
+    deadline = time.monotonic() + timeout_s
+    while True:
+        remaining = max(0.01, deadline - time.monotonic())
+        try:
+            chunk = out_queue.get(timeout=remaining)
+        except queue.Empty:
+            process.kill()
+            process.wait(timeout=5.0)
+            raise subprocess.TimeoutExpired(cmd, timeout_s)
+        if chunk is None:
+            break
+        chunks.append(chunk)
+        if on_line is not None:
+            on_line(chunk)
+    returncode = process.wait(timeout=5.0)
+    output = "".join(chunks)
+    flog.info("DFU: %s -> exit=%d, stdout=%r, stderr=''", args, returncode, output)
+    return subprocess.CompletedProcess(cmd, returncode, stdout=output, stderr="")
 
 
 def list_devices(cli_path: Path) -> list[DfuDeviceInfo]:
@@ -156,12 +240,25 @@ def list_devices(cli_path: Path) -> list[DfuDeviceInfo]:
 
 
 def flash_and_verify(
-    cli_path: Path, port_id: str, firmware_path: str, timeout_s: float = FLASH_TIMEOUT_S
+    cli_path: Path,
+    port_id: str,
+    firmware_path: str,
+    timeout_s: float = FLASH_TIMEOUT_S,
+    progress_callback: Optional[Callable[[str, int], None]] = None,
 ) -> FlashResult:
     """Write `firmware_path` (.hex or .bin) to the device at `port_id` and
     verify the write (-v) - the same operation the operator currently does
     by hand in the STM32CubeProgrammer GUI. Exit code alone is not trusted
     - success also requires an explicit "verified" marker in stdout.
+
+    `progress_callback(stage, percent)` is called live as the CLI's own
+    "N%" progress text streams in - stage is "write" until the output
+    mentions "Verifying", then "verify". NOT yet confirmed against real
+    hardware whether STM32CubeProgrammer actually flushes these updates
+    incrementally to a redirected pipe, or only at the very end once the
+    whole operation completes (in which case the callback would just fire
+    a burst of updates all at once right before this function returns) -
+    either way behaves correctly, this is purely a UI nicety on top.
     """
     flog = get_logger()
     if not Path(firmware_path).is_file():
@@ -176,8 +273,19 @@ def flash_and_verify(
         # address - see FLASH_BASE_ADDRESS's own comment.
         args.append(FLASH_BASE_ADDRESS)
     args.append("-v")
+
+    stage = "write"
+
+    def on_line(line: str) -> None:
+        nonlocal stage
+        if "verifying" in line.lower():
+            stage = "verify"
+        match = _PERCENT_RE.search(line)
+        if match and progress_callback is not None:
+            progress_callback(stage, min(100, int(match.group(1))))
+
     try:
-        result = _run(cli_path, args, timeout_s)
+        result = _run_streaming(cli_path, args, timeout_s, on_line if progress_callback else None)
     except subprocess.TimeoutExpired:
         flog.error("DFU: flash timed out after %.0fs", timeout_s)
         return FlashResult(False, f"Прошивка не завершилась за {timeout_s:.0f}с (timeout).")
@@ -185,7 +293,7 @@ def flash_and_verify(
         flog.error("DFU: could not launch %s: %s", cli_path, e)
         return FlashResult(False, f"Не вдалось запустити {cli_path.name}: {e}")
 
-    output = (result.stdout or "") + (result.stderr or "")
+    output = result.stdout or ""
     success = result.returncode == 0 and "verified successfully" in output.lower()
     flog.info("DFU: flash verdict: success=%s (exit=%d)", success, result.returncode)
     if success:

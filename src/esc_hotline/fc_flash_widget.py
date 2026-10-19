@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
+    QProgressBar,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -102,6 +103,16 @@ _FIRMWARE_FILTER = "Firmware (*.hex *.bin);;All files (*)"
 _CONFIG_FILTER = "Binary config (*.bin);;All files (*)"
 _DEFAULT_PROTOCOL_INDEX = MOTOR_PROTOCOLS.index("DSHOT300")
 
+# Phases that are genuinely doing something but have no real percentage to
+# report - shown as an indeterminate "busy" bar. "flashing_fc" is handled
+# separately (real 0-100% from dfu_flash_progress_changed); idle/all_done/
+# *_error phases are left out entirely - the progress bar hides for those.
+_BUSY_PHASES_NO_PERCENT = frozenset({
+    "waiting_device", "resetting_fc", "waiting_fc_normal", "connecting", "watching", "flashing", "esc_ready",
+    "writing_protocol", "skipping_to_motor_test", "waiting_fc_for_motor_test", "connecting_motor_test",
+    "checking_motor_armed", "running_motor_test",
+})
+
 
 class FcFlashPage(QWidget):
     # Mirrors motor_test_widget.MotorTestPage's own identical signal -
@@ -140,6 +151,7 @@ class FcFlashPage(QWidget):
         self.controller.port_changed.connect(self._on_port_auto_changed)
         self.controller.motor_test_phase_changed.connect(self._on_motor_test_phase_changed)
         self.controller.motor_test_value_changed.connect(self._on_motor_test_value_changed)
+        self.controller.dfu_flash_progress_changed.connect(self._on_dfu_flash_progress)
 
         self._restore_settings()
 
@@ -232,6 +244,19 @@ class FcFlashPage(QWidget):
         self._banner.setMinimumHeight(90)
         self._banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self._banner)
+
+        # ONE progress indicator for every busy phase, right under the
+        # banner - real 0-100% during the DFU flash/verify itself (the
+        # only step with genuine percentage data, parsed live from the
+        # external STM32CubeProgrammer CLI's own output - see
+        # dfu_flash_manager.py), a generic indeterminate "busy" animation
+        # (range 0,0 - Qt's own marquee) for every other phase that's
+        # doing something but has no percentage to report, hidden
+        # entirely at idle/done/error. Replaces staring at a blank banner
+        # with no visible sign anything is happening.
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setVisible(False)
+        root.addWidget(self._progress_bar)
 
         self._countdown_label = QLabel()
         self._countdown_label.setStyleSheet(f"color: {TEXT_MUTED};")
@@ -615,6 +640,27 @@ class FcFlashPage(QWidget):
         self._update_start_stop_button()
         self._update_countdown()
         self._lab_power_hint_label.setVisible(phase in ("watching", "esc_error"))
+        self._update_progress_bar(phase)
+
+    def _update_progress_bar(self, phase: str) -> None:
+        if phase == "flashing_fc":
+            self._progress_bar.setVisible(True)
+            self._progress_bar.setRange(0, 100)
+            self._progress_bar.setValue(0)
+            self._progress_bar.setFormat("Прошивка: %p%")
+        elif phase in _BUSY_PHASES_NO_PERCENT:
+            self._progress_bar.setVisible(True)
+            self._progress_bar.setRange(0, 0)  # Qt's own indeterminate/marquee animation
+            self._progress_bar.setFormat("")
+        else:
+            self._progress_bar.setVisible(False)
+
+    def _on_dfu_flash_progress(self, stage: str, percent: int) -> None:
+        if self.controller.phase != "flashing_fc":
+            return
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(percent)
+        self._progress_bar.setFormat(f"{'Запис' if stage == 'write' else 'Перевірка'}: %p%")
 
     def _on_motor_test_phase_changed(self, phase: str) -> None:
         self._motor_chart.set_phase(phase)

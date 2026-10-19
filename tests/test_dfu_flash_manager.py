@@ -8,6 +8,7 @@ dfu_flash_manager.py's own module docstring for that known gap).
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +19,36 @@ from esc_hotline import dfu_flash_manager
 
 def _fake_completed(returncode: int = 0, stdout: str = "", stderr: str = "") -> SimpleNamespace:
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+class _FakePopen:
+    """Stands in for subprocess.Popen in flash_and_verify()'s streaming
+    path (_run_streaming/_stream_reader) - read(1) hands out `output` one
+    character at a time, exactly like a real pipe, so the \\r/\\n-splitting
+    logic in _stream_reader gets exercised for real rather than bypassed."""
+
+    def __init__(self, output: str = "", returncode: int = 0, hang_s: float = 0.0) -> None:
+        self._output = output
+        self._pos = 0
+        self._hang_s = hang_s
+        self.returncode = returncode
+        self.stdout = self
+
+    def read(self, _n: int) -> str:
+        if self._hang_s:
+            time.sleep(self._hang_s)
+            return ""
+        if self._pos >= len(self._output):
+            return ""
+        char = self._output[self._pos]
+        self._pos += 1
+        return char
+
+    def wait(self, timeout=None) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -136,9 +167,9 @@ def test_list_devices_handles_timeout(monkeypatch):
 
 def test_flash_and_verify_missing_firmware_file_never_calls_subprocess(monkeypatch, tmp_path):
     def fail_if_called(*a, **k):
-        raise AssertionError("subprocess.run should not be called for a missing firmware file")
+        raise AssertionError("subprocess.Popen should not be called for a missing firmware file")
 
-    monkeypatch.setattr(subprocess, "run", fail_if_called)
+    monkeypatch.setattr(subprocess, "Popen", fail_if_called)
     result = dfu_flash_manager.flash_and_verify(Path("fake_cli.exe"), "usb1", str(tmp_path / "missing.hex"))
     assert result.success is False
     assert "не знайдено" in result.message
@@ -148,10 +179,31 @@ def test_flash_and_verify_success(monkeypatch, tmp_path):
     firmware = tmp_path / "fw.hex"
     firmware.write_text(":0\n")
     monkeypatch.setattr(
-        subprocess, "run", lambda *a, **k: _fake_completed(0, "Download complete.\nVerified successfully.\n")
+        subprocess, "Popen", lambda cmd, **k: _FakePopen("Download complete.\nVerified successfully.\n", 0)
     )
     result = dfu_flash_manager.flash_and_verify(Path("fake_cli.exe"), "usb1", str(firmware))
     assert result.success is True
+
+
+def test_flash_and_verify_reports_live_progress(monkeypatch, tmp_path):
+    # Confirmed real CLI output shape: a progress bar redrawn via "\r",
+    # percentages embedded mid-line, "Verifying" marking the write->verify
+    # stage switch - see dfu_flash_manager.py's own module docstring.
+    firmware = tmp_path / "fw.hex"
+    firmware.write_text(":0\n")
+    output = "Download in Progress:\r 50%\r100%\nVerifying...\nRead progress:\r 50%\r100%\nVerified successfully.\n"
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **k: _FakePopen(output, 0))
+    seen: list[tuple[str, int]] = []
+    result = dfu_flash_manager.flash_and_verify(
+        Path("fake_cli.exe"), "usb1", str(firmware), progress_callback=lambda stage, pct: seen.append((stage, pct))
+    )
+    assert result.success is True
+    assert ("write", 50) in seen
+    assert ("write", 100) in seen
+    assert ("verify", 50) in seen
+    assert ("verify", 100) in seen
+    # the switch to "verify" must not happen before the "Verifying" marker
+    assert seen.index(("write", 100)) < seen.index(("verify", 50))
 
 
 def test_flash_and_verify_bin_file_gets_explicit_address(monkeypatch, tmp_path):
@@ -162,11 +214,11 @@ def test_flash_and_verify_bin_file_gets_explicit_address(monkeypatch, tmp_path):
     firmware.write_bytes(b"\x00" * 16)
     seen_args = []
 
-    def fake_run(cmd, **kwargs):
+    def fake_popen(cmd, **kwargs):
         seen_args.append(cmd)
-        return _fake_completed(0, "Verified successfully.\n")
+        return _FakePopen("Verified successfully.\n", 0)
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     result = dfu_flash_manager.flash_and_verify(Path("fake_cli.exe"), "usb1", str(firmware))
     assert result.success is True
     assert dfu_flash_manager.FLASH_BASE_ADDRESS in seen_args[0]
@@ -180,11 +232,11 @@ def test_flash_and_verify_hex_file_gets_no_address(monkeypatch, tmp_path):
     firmware.write_text(":0\n")
     seen_args = []
 
-    def fake_run(cmd, **kwargs):
+    def fake_popen(cmd, **kwargs):
         seen_args.append(cmd)
-        return _fake_completed(0, "Verified successfully.\n")
+        return _FakePopen("Verified successfully.\n", 0)
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     dfu_flash_manager.flash_and_verify(Path("fake_cli.exe"), "usb1", str(firmware))
     assert dfu_flash_manager.FLASH_BASE_ADDRESS not in seen_args[0]
 
@@ -196,7 +248,7 @@ def test_flash_and_verify_fails_on_nonzero_exit_even_with_verified_text(monkeypa
     firmware = tmp_path / "fw.hex"
     firmware.write_text(":0\n")
     monkeypatch.setattr(
-        subprocess, "run", lambda *a, **k: _fake_completed(1, "Verified successfully.\n", "Error: device lost")
+        subprocess, "Popen", lambda cmd, **k: _FakePopen("Verified successfully.\nError: device lost\n", 1)
     )
     result = dfu_flash_manager.flash_and_verify(Path("fake_cli.exe"), "usb1", str(firmware))
     assert result.success is False
@@ -206,7 +258,7 @@ def test_flash_and_verify_fails_on_nonzero_exit_even_with_verified_text(monkeypa
 def test_flash_and_verify_fails_without_verified_text(monkeypatch, tmp_path):
     firmware = tmp_path / "fw.hex"
     firmware.write_text(":0\n")
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_completed(0, "Download complete.\n"))
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **k: _FakePopen("Download complete.\n", 0))
     result = dfu_flash_manager.flash_and_verify(Path("fake_cli.exe"), "usb1", str(firmware))
     assert result.success is False
 
@@ -214,12 +266,8 @@ def test_flash_and_verify_fails_without_verified_text(monkeypatch, tmp_path):
 def test_flash_and_verify_timeout(monkeypatch, tmp_path):
     firmware = tmp_path / "fw.hex"
     firmware.write_text(":0\n")
-
-    def raise_timeout(*a, **k):
-        raise subprocess.TimeoutExpired(cmd="fake", timeout=1)
-
-    monkeypatch.setattr(subprocess, "run", raise_timeout)
-    result = dfu_flash_manager.flash_and_verify(Path("fake_cli.exe"), "usb1", str(firmware), timeout_s=1.0)
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **k: _FakePopen(hang_s=2.0))
+    result = dfu_flash_manager.flash_and_verify(Path("fake_cli.exe"), "usb1", str(firmware), timeout_s=0.2)
     assert result.success is False
 
 
