@@ -143,7 +143,20 @@ class MspClient:
             try:
                 self._transport.reset_input_buffer()
                 self._transport.write(frame)
-                return _read_msp_response(self._transport, timeout_s)
+                deadline = time.monotonic() + timeout_s
+                while True:
+                    response = _read_msp_response(self._transport, remaining_time(deadline))
+                    if response.command == int(command):
+                        return response
+                    # Confirmed on real hardware: right after the
+                    # FourWayClient.exit_interface() recovery retry (see
+                    # esc_manager.py), one stale response frame from an
+                    # earlier exchange can still be sitting in the buffer
+                    # and would otherwise get silently returned as if it
+                    # answered THIS request - every later command in that
+                    # same handshake then reads one frame behind the one it
+                    # actually asked for. Discard a mismatched command and
+                    # keep reading within the same deadline instead.
             except (TimeoutError, MspFramingError) as e:
                 last_error = e
                 if attempt + 1 < retries:

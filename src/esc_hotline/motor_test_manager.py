@@ -282,7 +282,10 @@ class MotorTestManager(QObject):
             payload = build_advanced_config_payload(index, self._motor_pwm_rate, self._servo_pwm_rate)
             self._msp.send(MspCommand.MSP_SET_ADVANCED_CONFIG, payload, timeout_s=0.3, retries=2)
             self._log("info", f"Протокол записано: {name}. Зберігаю в EEPROM...")
-            self._msp.send(MspCommand.MSP_EEPROM_WRITE, timeout_s=1.0, retries=2)
+            # Same generous budget as fc_flash_station.py's identical call -
+            # confirmed on real hardware that the FC's EEPROM commit can
+            # take longer than a ~2s total retry budget.
+            self._msp.send(MspCommand.MSP_EEPROM_WRITE, timeout_s=3.0, retries=3)
             self._log("info", "Збережено. Перезавантажую FC...")
             self._msp.send(MspCommand.MSP_REBOOT, timeout_s=0.3, retries=1)
         except Exception as e:

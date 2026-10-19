@@ -343,7 +343,12 @@ class _ProtocolWorker(QObject):
             flog.info("Protocol write: writing MSP_SET_ADVANCED_CONFIG, protocol=%s (index=%d)", name, protocol_index)
             msp.send(MspCommand.MSP_SET_ADVANCED_CONFIG, payload, timeout_s=0.3, retries=2)
             flog.info("Protocol write: saving to EEPROM (MSP_EEPROM_WRITE)...")
-            msp.send(MspCommand.MSP_EEPROM_WRITE, timeout_s=1.0, retries=2)
+            # Confirmed on real hardware (2026-10-19): the FC's own EEPROM
+            # commit can take longer than the previous 1.0s*2=~2.05s total
+            # budget (observed failure: ~2.06s elapsed before giving up) -
+            # a plain "no DFU step is a one-shot event, not a tight polling
+            # loop" situation, so a generous worst case here costs nothing.
+            msp.send(MspCommand.MSP_EEPROM_WRITE, timeout_s=3.0, retries=3)
             flog.info("Protocol write: rebooting FC (MSP_REBOOT)...")
             msp.send(MspCommand.MSP_REBOOT, timeout_s=0.3, retries=1)
         except Exception as e:
