@@ -407,19 +407,25 @@ class FcFlashStationController(QObject):
     (a one-shot provisioning run for one board, not an open-ended hot-swap
     line).
 
-    Two independent operator toggles (set_flash_fc_enabled()/
-    set_flash_esc_enabled(), both default True) let a run skip stages that
-    aren't needed this time, in any combination:
+    Three independent operator toggles (set_flash_fc_enabled()/
+    set_flash_esc_enabled()/set_motor_test_enabled(), all default True)
+    let a run skip stages that aren't needed this time, in any
+    combination:
     - flash_fc=False: start() skips straight to "waiting_fc_normal" - no
       DFU search at all, just auto-detect the FC already in normal mode.
     - flash_esc=False: once connected, skips the whole watching/flashing
       ESC loop AND the protocol write that follows it - straight from
       "connecting" to the final motor-test phase (see
-      "skipping_to_motor_test" in _on_connection_state_changed).
-    - Both False: this run is purely "connect and motor-test", nothing
-      else - a convenience wrapper around what "Прогон мотором" already
-      does standalone, reachable from this tab when it's mid-provisioning
-      flow already (e.g. re-testing right after a manual ESC re-flash).
+      "skipping_to_motor_test" in _on_connection_state_changed), unless
+      motor_test is ALSO False, in which case there's nothing left to do
+      at all and this goes straight to "all_done".
+    - motor_test=False: the automatic motor-spin step itself is skipped -
+      whatever earlier stages ran still happen as configured, this run
+      just stops at "all_done" right after the last of them (right after
+      protocol write succeeds, or right after connecting if ESC is also
+      disabled) instead of connecting again and spinning the motors.
+    - All False: this run is purely "confirm the FC connects", nothing
+      else.
     """
 
     phase_changed = pyqtSignal(str)
@@ -512,6 +518,7 @@ class FcFlashStationController(QObject):
         self._port_device: Optional[str] = None
         self._flash_fc_enabled = True
         self._flash_esc_enabled = True
+        self._motor_test_enabled = True
         self._esc_indices: list[int] = [0]
         self._protocol_index: int = MOTOR_PROTOCOLS.index("DSHOT300")
         self._last_esc_states: dict[int, str] = {}
@@ -591,6 +598,14 @@ class FcFlashStationController(QObject):
         phase (see _on_connection_state_changed)."""
         self._flash_esc_enabled = enabled
 
+    def set_motor_test_enabled(self, enabled: bool) -> None:
+        """Operator toggle: when False, the final automatic motor-spin
+        step is skipped entirely - whatever earlier stages ran (DFU flash,
+        ESC flash, protocol write) still happen as configured, this run
+        just stops at "all_done" right after the last of them instead of
+        going on to connect and spin the motors."""
+        self._motor_test_enabled = enabled
+
     def set_esc_indices(self, indices: list[int]) -> None:
         self._esc_indices = list(indices)
 
@@ -620,11 +635,11 @@ class FcFlashStationController(QObject):
         self.dfu_detail_changed.emit("")
         self._flog.info(
             "=== FC flash station armed: firmware=%s, cli_override=%s, esc_config_bytes=%s, port=%s, esc_indices=%s, "
-            "protocol_index=%d, flash_fc_enabled=%s, flash_esc_enabled=%s ===",
+            "protocol_index=%d, flash_fc_enabled=%s, flash_esc_enabled=%s, motor_test_enabled=%s ===",
             self._firmware_path, self._cli_path_override,
             len(self._config_bytes) if self._config_bytes is not None else None,
             self._port_device, self._esc_indices, self._protocol_index,
-            self._flash_fc_enabled, self._flash_esc_enabled,
+            self._flash_fc_enabled, self._flash_esc_enabled, self._motor_test_enabled,
         )
         if self._flash_fc_enabled:
             self._set_phase("waiting_device")
@@ -938,6 +953,10 @@ class FcFlashStationController(QObject):
             return
         if connected:
             if not self._flash_esc_enabled:
+                if not self._motor_test_enabled:
+                    self._flog.info("FC flash station: ESC-flash and motor-test stages both disabled - nothing left to do")
+                    self._set_phase("all_done")
+                    return
                 self._flog.info("FC flash station: ESC-flash stage disabled by operator - skipping straight to motor test")
                 self._set_phase("skipping_to_motor_test")
                 self._disconnect_requested.emit()
@@ -1029,6 +1048,10 @@ class FcFlashStationController(QObject):
         self.dfu_detail_changed.emit(message)
         if not success:
             self._set_phase("protocol_error")
+            return
+        if not self._motor_test_enabled:
+            self._flog.info("FC flash station: motor-test stage disabled by operator - stopping after protocol write")
+            self._set_phase("all_done")
             return
         self._set_phase("waiting_fc_for_motor_test")
 

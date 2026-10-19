@@ -95,6 +95,7 @@ _CLI_PATH_OVERRIDE_KEY = "fc_flash_cli_path_override"
 _POLL_INTERVAL_KEY = "fc_flash_poll_interval_ms"
 _FLASH_FC_ENABLED_KEY = "fc_flash_stage_fc_enabled"
 _FLASH_ESC_ENABLED_KEY = "fc_flash_stage_esc_enabled"
+_MOTOR_TEST_ENABLED_KEY = "fc_flash_stage_motor_test_enabled"
 _DEFAULT_ESC_INDICES = (0, 1)  # ESC 1 + ESC 2 - the common case is a 2-in-1 ESC board on one FC
 
 _FIRMWARE_FILTER = "Firmware (*.hex *.bin);;All files (*)"
@@ -293,6 +294,15 @@ class FcFlashPage(QWidget):
         # test is actually running - RampChartWidget.set_phase() only
         # allows it in PHASE_IDLE, same safeguard "Прогон мотором" has.
         motor_rate_row = QHBoxLayout()
+        # Stage toggle - unchecked skips the final automatic motor-spin
+        # step entirely, whatever earlier stages ran still happen as
+        # configured (see fc_flash_station.py's set_motor_test_enabled()
+        # docstring).
+        self._motor_test_checkbox = QCheckBox("Тест моторів")
+        self._motor_test_checkbox.setChecked(True)
+        self._motor_test_checkbox.toggled.connect(self._on_motor_test_toggled)
+        motor_rate_row.addWidget(self._motor_test_checkbox)
+        motor_rate_row.addSpacing(24)
         motor_rate_row.addWidget(QLabel("Графік рампи:"))
         self._motor_ramp_mode_combo = QComboBox()
         self._motor_ramp_mode_combo.addItem(_RAMP_MODE_LABELS[RAMP_LINEAR], RAMP_LINEAR)
@@ -476,6 +486,11 @@ class FcFlashPage(QWidget):
         self._esc_menu_btn.setEnabled(checked)
         self._update_start_stop_button()
 
+    def _on_motor_test_toggled(self, checked: bool) -> None:
+        save_int(_MOTOR_TEST_ENABLED_KEY, 1 if checked else 0)
+        self.controller.set_motor_test_enabled(checked)
+        self._update_start_stop_button()
+
     def _update_poll_interval_seconds_label(self) -> None:
         seconds = self._poll_interval_stepper.value() / 1000
         self._poll_interval_seconds_label.setText(f"{seconds:.1f}с")
@@ -491,6 +506,10 @@ class FcFlashPage(QWidget):
         self.controller.set_flash_esc_enabled(flash_esc_enabled)
         self._load_config_btn.setEnabled(flash_esc_enabled)
         self._esc_menu_btn.setEnabled(flash_esc_enabled)
+
+        motor_test_enabled = load_int(_MOTOR_TEST_ENABLED_KEY, 1) != 0
+        self._motor_test_checkbox.setChecked(motor_test_enabled)
+        self.controller.set_motor_test_enabled(motor_test_enabled)
 
         firmware_path = load_str(_FIRMWARE_PATH_KEY)
         if firmware_path and Path(firmware_path).is_file():
@@ -706,6 +725,7 @@ class FcFlashPage(QWidget):
     def _on_armed_changed(self, armed: bool) -> None:
         self._flash_fc_checkbox.setEnabled(not armed)
         self._flash_esc_checkbox.setEnabled(not armed)
+        self._motor_test_checkbox.setEnabled(not armed)
         self._load_firmware_btn.setEnabled(not armed and self._flash_fc_checkbox.isChecked())
         self._load_config_btn.setEnabled(not armed and self._flash_esc_checkbox.isChecked())
         self._port_combo.setEnabled(not armed)
