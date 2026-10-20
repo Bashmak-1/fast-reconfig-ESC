@@ -500,6 +500,18 @@ class FcFlashPage(QWidget):
         self._port_combo.setCurrentIndex(idx)
         self._port_combo.blockSignals(False)
         save_str(_PORT_KEY, new_port)
+        # Signals were blocked above specifically to avoid re-triggering
+        # _on_port_changed() (which would otherwise redundantly call
+        # controller.set_port() right back) - but that also means the
+        # Start/Stop button's enabled-state and hint text, which only
+        # _on_port_changed()/_update_start_stop_button() ever refresh,
+        # are never recalculated here. Confirmed in practice: if Start was
+        # disabled (e.g. "Порт вже використовується іншою вкладкою.")
+        # because of whatever port was selected BEFORE this auto-switch,
+        # it stayed disabled with that stale hint even once the FC
+        # re-enumerated onto a perfectly good, free port - this call is
+        # what was missing.
+        self._update_start_stop_button()
 
     def _on_esc_selection_changed(self, *_args) -> None:
         indices = self._selected_esc_indices()
