@@ -118,6 +118,7 @@ class MainWindow(QMainWindow):
     def _build_main_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        layout.addWidget(self._build_connect_row())
         layout.addWidget(self._build_config_row())
 
         self._grid_container = QFrame()
@@ -152,6 +153,14 @@ class MainWindow(QMainWindow):
         return self.fc_flash_page
 
     def _build_top_bar(self) -> QFrame:
+        """App-wide bar, visible above every tab - branding and the language
+        picker only. The port/baud/Підключити controls used to live here
+        too, but that made them look like a single global "connect"
+        control that applied everywhere - confirmed confusing in practice
+        (operators mixed it up with a given tab's OWN connect/start
+        button). They're tied to the Main tab's own connection, so they
+        now live inside that tab instead - see _build_connect_row(),
+        added to _build_main_tab()."""
         bar = QFrame()
         bar.setObjectName("topBar")
         layout = QHBoxLayout(bar)
@@ -160,6 +169,24 @@ class MainWindow(QMainWindow):
         logo.setStyleSheet("font-weight: 700; font-size: 15px; color: #c0392b;")
         layout.addWidget(logo)
         layout.addStretch(1)
+
+        self._lang_combo = QComboBox()
+        self._lang_combo.setIconSize(QSize(22, 15))
+        for code, _flag, label, _name in i18n.LANGUAGES:
+            icon = FLAG_ICON_BUILDERS[code]()
+            self._lang_combo.addItem(icon, label, code)
+        current_idx = [c for c, *_ in i18n.LANGUAGES].index(i18n.current_language())
+        self._lang_combo.setCurrentIndex(current_idx)
+        self._lang_combo.setFixedWidth(96)
+        self._lang_combo.currentIndexChanged.connect(self._on_language_selected)
+        layout.addWidget(self._lang_combo)
+
+        return bar
+
+    def _build_connect_row(self) -> QFrame:
+        row = QFrame()
+        row.setObjectName("connectRow")
+        layout = QHBoxLayout(row)
 
         self._port_label = QLabel()
         layout.addWidget(self._port_label)
@@ -189,18 +216,8 @@ class MainWindow(QMainWindow):
         self._connect_toggle_btn.clicked.connect(self._on_connect_toggle_clicked)
         layout.addWidget(self._connect_toggle_btn)
 
-        self._lang_combo = QComboBox()
-        self._lang_combo.setIconSize(QSize(22, 15))
-        for code, _flag, label, _name in i18n.LANGUAGES:
-            icon = FLAG_ICON_BUILDERS[code]()
-            self._lang_combo.addItem(icon, label, code)
-        current_idx = [c for c, *_ in i18n.LANGUAGES].index(i18n.current_language())
-        self._lang_combo.setCurrentIndex(current_idx)
-        self._lang_combo.setFixedWidth(96)
-        self._lang_combo.currentIndexChanged.connect(self._on_language_selected)
-        layout.addWidget(self._lang_combo)
-
-        return bar
+        layout.addStretch(1)
+        return row
 
     def _build_config_row(self) -> QFrame:
         row = QFrame()

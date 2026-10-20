@@ -18,7 +18,7 @@ QMainWindow, QWidget {{
     font-family: "Segoe UI", sans-serif;
     font-size: 13px;
 }}
-QFrame#topBar, QFrame#configRow, QFrame#escCard, QFrame#logPanel {{
+QFrame#topBar, QFrame#connectRow, QFrame#configRow, QFrame#escCard, QFrame#logPanel {{
     background-color: {BG_PANEL};
     border: 1px solid {BORDER};
     border-radius: 6px;
