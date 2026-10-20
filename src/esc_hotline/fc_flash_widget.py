@@ -128,7 +128,6 @@ class FcFlashPage(QWidget):
         self._config_path: str = ""
         self._firmware_path: str = ""
         self._port_busy_checker: Optional[Callable[[str], bool]] = None
-        self._last_flashed = 0
         self._power_cycle_hint_shown = False
         self._esc_detail_by_index: dict[int, str] = {}
 
@@ -152,6 +151,9 @@ class FcFlashPage(QWidget):
         self.controller.motor_test_phase_changed.connect(self._on_motor_test_phase_changed)
         self.controller.motor_test_value_changed.connect(self._on_motor_test_value_changed)
         self.controller.dfu_flash_progress_changed.connect(self._on_dfu_flash_progress)
+        self.controller.fc_flash_succeeded.connect(lambda: self._fc_counter.increment())
+        self.controller.esc_flash_succeeded.connect(lambda: self._esc_counter.increment())
+        self.controller.motor_test_succeeded.connect(lambda: self._motor_counter.increment())
 
         self._restore_settings()
 
@@ -378,11 +380,33 @@ class FcFlashPage(QWidget):
         self._counters_label = QLabel()
         self._counters_label.setStyleSheet(f"color: {TEXT_MUTED};")
         counters_row.addWidget(self._counters_label, 1)
-        self._manual_counter_label = QLabel("Прошито вручну:")
-        self._manual_counter_label.setStyleSheet(f"color: {TEXT_MUTED};")
-        counters_row.addWidget(self._manual_counter_label)
-        self._manual_counter = ManualCounterWidget()
-        counters_row.addWidget(self._manual_counter)
+        # Per-stage running totals (same ManualCounterWidget "Хотспот"'s own
+        # "Всього перероблено" counter uses) - each one auto +1 exactly once
+        # per board, the moment its own stage finishes successfully (see
+        # fc_flash_station.py's fc_flash_succeeded/esc_flash_succeeded/
+        # motor_test_succeeded signals), and freely correctable by hand
+        # with +/- or typing a number, same as the automatic flashed/ok/
+        # errors breakdown above can't always cover (a re-seated ESC
+        # re-flashed by hand, a miscount, a bench restart mid-batch). A
+        # stage whose checkbox is off never fires its signal in the first
+        # place, so nothing special is needed here to respect that.
+        fc_counter_label = QLabel("FC:")
+        fc_counter_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        counters_row.addWidget(fc_counter_label)
+        self._fc_counter = ManualCounterWidget()
+        counters_row.addWidget(self._fc_counter)
+
+        esc_counter_label = QLabel("ESC:")
+        esc_counter_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        counters_row.addWidget(esc_counter_label)
+        self._esc_counter = ManualCounterWidget()
+        counters_row.addWidget(self._esc_counter)
+
+        motor_counter_label = QLabel("Мотори:")
+        motor_counter_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        counters_row.addWidget(motor_counter_label)
+        self._motor_counter = ManualCounterWidget()
+        counters_row.addWidget(self._motor_counter)
         self._reset_counters_btn = QPushButton("Скинути")
         self._reset_counters_btn.clicked.connect(self._on_reset_counters_clicked)
         counters_row.addWidget(self._reset_counters_btn)
@@ -862,11 +886,10 @@ class FcFlashPage(QWidget):
         self._counters_label.setText(f"Прошито: {flashed} | Вже коректно: {ok} | Помилок: {errors}")
 
     def _on_counters_changed(self, flashed: int, ok: int, errors: int) -> None:
-        if flashed > self._last_flashed:
-            self._manual_counter.increment(flashed - self._last_flashed)
-        self._last_flashed = flashed
         self._update_counters_label()
 
     def _on_reset_counters_clicked(self) -> None:
         self.controller.reset_counters()
-        self._manual_counter.reset()
+        self._fc_counter.reset()
+        self._esc_counter.reset()
+        self._motor_counter.reset()

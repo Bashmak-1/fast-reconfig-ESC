@@ -470,6 +470,18 @@ class FcFlashStationController(QObject):
     port_changed = pyqtSignal(str)  # FC re-enumerated under a different COM port after a DFU reset
     dfu_flash_progress_changed = pyqtSignal(str, int)  # stage ("write"/"verify"), percent - see dfu_flash_manager.py
 
+    # Fired exactly once per board each time its stage finishes
+    # successfully - never on failure, never on a skipped (checkbox-off)
+    # stage, since each is only ever emitted from the one code path where
+    # that specific stage just succeeded. The widget's own per-stage
+    # ManualCounterWidget (see fc_flash_widget.py, same widget hotspot's
+    # "Всього перероблено" tally uses) listens for these and does the
+    # +1 - no checkbox check needed on that end, since a disabled stage's
+    # code path is never reached in the first place.
+    fc_flash_succeeded = pyqtSignal()
+    esc_flash_succeeded = pyqtSignal()
+    motor_test_succeeded = pyqtSignal()
+
     # Raw forwards from the private MotorTestManager, for an optional
     # read-only RampChartWidget on this tab's own widget - mirrors exactly
     # what motor_test_widget.py's own chart is fed.
@@ -1010,6 +1022,7 @@ class FcFlashStationController(QObject):
             self._set_phase("fc_flash_error")
             return
         self.dfu_detail_changed.emit("FC перезавантажується у звичайний режим...")
+        self.fc_flash_succeeded.emit()
         self._set_phase("waiting_fc_normal")
 
     # ---- forwarded EscManager signals (identical logic to hotspot_station.py) ---
@@ -1089,6 +1102,7 @@ class FcFlashStationController(QObject):
         # see _begin_protocol_write()'s own docstring for why.
         self._counter_ok += 1
         self.counters_changed.emit(self._counter_flashed, self._counter_ok, self._counter_errors)
+        self.esc_flash_succeeded.emit()
         self._set_phase("esc_ready")
         self._begin_protocol_write()
 
@@ -1101,6 +1115,8 @@ class FcFlashStationController(QObject):
         self._counter_flashed += success
         self._counter_errors += max(attempted - success, 0)
         self.counters_changed.emit(self._counter_flashed, self._counter_ok, self._counter_errors)
+        if success == attempted and attempted > 0:
+            self.esc_flash_succeeded.emit()
         # Deliberately does NOT trigger _begin_protocol_write() directly
         # here even on full success - the next poll tick's own
         # _discover_many_requested re-reads every watched slot fresh, and
@@ -1194,6 +1210,7 @@ class FcFlashStationController(QObject):
         if phase == MOTOR_PHASE_IDLE:
             self._flog.info("FC flash station: final motor test finished - all done")
             self._motor_disconnect_requested.emit()
+            self.motor_test_succeeded.emit()
             self._set_phase("all_done")
 
     def _on_motor_log_message(self, level: str, text: str) -> None:
