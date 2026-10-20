@@ -461,6 +461,17 @@ class MainWindow(QMainWindow):
         self.config_editor.set_apply_enabled(connected)
         self.hotspot_page.on_connection_state_changed(connected, expected_count)
         self.hotspot_line_page.recheck_availability()
+        # fc_flash_page and motor_test_page's own busy-checkers
+        # (_is_port_busy_for_fc_flash/_is_port_busy_for_motor_test) both
+        # check THIS tab's _connected/_port_combo state - confirmed
+        # missing: unlike every other tab pairing, which rechecks each
+        # other on armed_changed/connection_changed (see where those two
+        # are wired up, further down in this file), this tab's own
+        # connect/disconnect never told either of them to recheck, so a
+        # Start button disabled here could stay stuck disabled even after
+        # this tab's connection (the actual reason) went away.
+        self.fc_flash_page.recheck_availability()
+        self.motor_test_page.recheck_availability()
         if connected:
             self.request_discover.emit()
 
