@@ -186,20 +186,32 @@ def test_flash_and_verify_success(monkeypatch, tmp_path):
 
 
 def test_flash_and_verify_reports_live_progress(monkeypatch, tmp_path):
-    # Confirmed real CLI output shape: a progress bar redrawn via "\r",
-    # percentages embedded mid-line, "Verifying" marking the write->verify
-    # stage switch - see dfu_flash_manager.py's own module docstring.
+    # Confirmed real CLI output shape (captured from real hardware): no
+    # "\r" redraw at all - one unbroken line per bar, each "N%" step glued
+    # to the next by a fill byte, only a real "\n" once the bar hits 100%.
+    # "\x8b" below stands in for that fill byte (an OEM-codepage block
+    # character in the real log) - irrelevant to parsing, just filler
+    # between steps. "Verifying" marks the write->verify stage switch.
     firmware = tmp_path / "fw.hex"
     firmware.write_text(":0\n")
-    output = "Download in Progress:\r 50%\r100%\nVerifying...\nRead progress:\r 50%\r100%\nVerified successfully.\n"
+    output = (
+        "Download in Progress:\n"
+        "\x8b  0%\x8b 50%\x8b100%\n"
+        "Verifying...\n"
+        "Read progress:\n"
+        "\x8b  0%\x8b 50%\x8b100%\n"
+        "Verified successfully.\n"
+    )
     monkeypatch.setattr(subprocess, "Popen", lambda cmd, **k: _FakePopen(output, 0))
     seen: list[tuple[str, int]] = []
     result = dfu_flash_manager.flash_and_verify(
         Path("fake_cli.exe"), "usb1", str(firmware), progress_callback=lambda stage, pct: seen.append((stage, pct))
     )
     assert result.success is True
-    assert ("write", 50) in seen
-    assert ("write", 100) in seen
+    # Every step must arrive as its own event - not just the first one in
+    # the unbroken line (the bug this test guards against: the old
+    # \r/\n-only splitting would have reported only ("write", 0)).
+    assert seen == [("write", 0), ("write", 50), ("write", 100), ("verify", 0), ("verify", 50), ("verify", 100)]
     assert ("verify", 50) in seen
     assert ("verify", 100) in seen
     # the switch to "verify" must not happen before the "Verifying" marker

@@ -135,18 +135,26 @@ def _run(cli_path: Path, args: list[str], timeout_s: float) -> subprocess.Comple
 
 def _stream_reader(stream, out_queue: "queue.Queue[Optional[str]]") -> None:
     """Runs on its own daemon thread (started by _run_streaming) - reads
-    one character at a time rather than by line, because the CLI's own
-    progress bar redraws in place using carriage returns ("\\r"), not
-    newlines; buffering by \\n alone would withhold every progress update
-    until the operation's very last line. Puts None once the stream
-    closes, the sentinel _run_streaming's reader loop waits for."""
+    one character at a time rather than by line. Confirmed on real
+    hardware: the CLI's progress bar does NOT redraw via "\\r" - it prints
+    one unbroken line per bar with every "N%" step glued directly to the
+    next by a fill character (e.g. "...0%\\x8b  2%\\x8b  4%...100%"), and
+    only emits an actual "\\n" once the bar reaches 100%. Buffering by
+    "\\r"/"\\n" alone would withhold the whole bar until that single final
+    newline, so flash_and_verify's progress_callback would only ever see
+    one value per bar (whichever "N%" happens to be first in that giant
+    buffer) instead of every real step. Flushing on "%" too - the one
+    character every progress step always ends with - fixes this: each
+    step reaches on_line() as its own chunk, as it's printed. Puts None
+    once the stream closes, the sentinel _run_streaming's reader loop
+    waits for."""
     buffer = ""
     while True:
         char = stream.read(1)
         if char == "":
             break
         buffer += char
-        if char in ("\n", "\r"):
+        if char in ("\n", "\r", "%"):
             out_queue.put(buffer)
             buffer = ""
     if buffer:
@@ -253,12 +261,11 @@ def flash_and_verify(
 
     `progress_callback(stage, percent)` is called live as the CLI's own
     "N%" progress text streams in - stage is "write" until the output
-    mentions "Verifying", then "verify". NOT yet confirmed against real
-    hardware whether STM32CubeProgrammer actually flushes these updates
-    incrementally to a redirected pipe, or only at the very end once the
-    whole operation completes (in which case the callback would just fire
-    a burst of updates all at once right before this function returns) -
-    either way behaves correctly, this is purely a UI nicety on top.
+    mentions "Verifying", then "verify". Confirmed on real hardware: the
+    CLI flushes every 2% step incrementally as it happens (not just at
+    the end) - see _stream_reader's own docstring for the exact format
+    and why splitting on "%" (not just "\\r"/"\\n") was required to see
+    them all.
     """
     flog = get_logger()
     if not Path(firmware_path).is_file():
