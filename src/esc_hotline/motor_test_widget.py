@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -150,7 +151,14 @@ class MotorTestPage(QWidget):
     # ---- construction ------------------------------------------------
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        outer.addWidget(scroll)
+        container = QWidget()
+        scroll.setWidget(container)
+        root = QVBoxLayout(container)
 
         warning = QLabel(
             "⚠ Перед стартом: гвинт ЗНЯТО, мотор надійно закріплений на стенді. "
