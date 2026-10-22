@@ -437,7 +437,7 @@ exposed it as an adjustable "ESC retries" spinner (1–20) in the UI.
   `power_cycle_hint_changed(bool)` signal → a small amber
   `_power_cycle_hint_label` under `HotspotLinePage`'s `_detail_label`.
 - **CP210x USB driver** (separately investigated earlier in this project,
-  `C:\Users\Comp\Downloads\CP210x_Windows_Drivers`) is Silicon Labs' official,
+  `C:\Users\<name>\Downloads\CP210x_Windows_Drivers`) is Silicon Labs' official,
   WHQL-signed VCP driver — legitimate, but per the am32-configurator source
   it's associated with *direct single-ESC* connections, not the FC
   passthrough path this tool uses (FCs typically enumerate as native STM32
