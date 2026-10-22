@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from typing import Optional
 
-from PyQt6.QtCore import QSize, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 from . import i18n
@@ -40,6 +40,11 @@ class SettingsDialog(QDialog):
         self._releases: Optional[list] = None
         self._pick_label = QLabel()
         self._pick_combo = QComboBox()
+        # Fixed maximum popup height: it shrinks to fit when there are few releases and otherwise
+        # scrolls (list-style popup, so the maxVisibleItems limit and the scrollbar actually apply).
+        self._pick_combo.setMaxVisibleItems(8)
+        self._pick_combo.setStyleSheet("combobox-popup: 0;")
+        self._pick_combo.view().setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._pick_btn = QPushButton()
         self._pick_btn.clicked.connect(self._on_pick_install)
         self._releases_ready.connect(self._on_releases)
