@@ -27,13 +27,13 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QMenu,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -59,6 +59,7 @@ from .motor_test_manager import (
     TEST_MODE_ALL,
     TEST_MODE_SEQUENTIAL,
 )
+from .motor_test_widget import _NoWheelComboBox as QComboBox
 from .motor_test_widget import _make_duration_spinbox
 from .ramp_chart_math import MIN_PHASE_DURATION_S
 from .ramp_chart_widget import RampChartWidget
@@ -160,7 +161,14 @@ class FcFlashPage(QWidget):
     # ---- construction ------------------------------------------------
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        outer.addWidget(scroll)
+        container = QWidget()
+        scroll.setWidget(container)
+        root = QVBoxLayout(container)
 
         firmware_row = QHBoxLayout()
         # Stage toggle - unchecked skips the whole DFU search/flash/reset
@@ -613,6 +621,18 @@ class FcFlashPage(QWidget):
             action.blockSignals(False)
         self.controller.set_esc_indices(self._selected_esc_indices())
         self._update_esc_menu_button_text()
+        # Without this, _refresh_ports() above already ran
+        # _update_start_stop_button() once BEFORE these ESC-slot
+        # checkboxes were restored - at that moment _selected_esc_indices()
+        # was still empty (every QAction starts unchecked), so with "Прошивка
+        # ESC" enabled (the saved/default state) Start got disabled with
+        # "Оберіть хоча б один ESC-слот..." and NOTHING afterward ever
+        # refreshed it again, even though the indices are now correctly
+        # restored - confirmed real-world: this is exactly the stale-disabled
+        # Start button operators had to work around by clicking the port
+        # refresh (↻) button once at every app startup, which only "fixed"
+        # it by incidentally re-running _update_start_stop_button() too.
+        self._update_start_stop_button()
 
         protocol_index = load_int(_PROTOCOL_INDEX_KEY, _DEFAULT_PROTOCOL_INDEX)
         if 0 <= protocol_index < self._protocol_combo.count():

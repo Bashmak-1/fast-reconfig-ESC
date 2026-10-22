@@ -1109,15 +1109,20 @@ class FcFlashStationController(QObject):
         self._counter_flashed += success
         self._counter_errors += max(attempted - success, 0)
         self.counters_changed.emit(self._counter_flashed, self._counter_ok, self._counter_errors)
-        if success == attempted and attempted > 0:
-            self.esc_flash_succeeded.emit()
-        # Deliberately does NOT trigger _begin_protocol_write() directly
-        # here even on full success - the next poll tick's own
-        # _discover_many_requested re-reads every watched slot fresh, and
-        # ONLY once that readback confirms every slot genuinely matches
-        # does _on_discovery_finished() move on to the protocol write -
-        # same "never trust a write without reading it back" principle as
-        # the write itself, just applied one level up.
+        # Deliberately does NOT emit esc_flash_succeeded (the per-BOARD
+        # counter) here, even on full success, and does NOT trigger
+        # _begin_protocol_write() directly either - the next poll tick's
+        # own _discover_many_requested re-reads every watched slot fresh,
+        # and ONLY once that readback confirms every slot genuinely
+        # matches does _on_discovery_finished() both move on to the
+        # protocol write AND fire esc_flash_succeeded exactly once - same
+        # "never trust a write without reading it back" principle as the
+        # write itself, just applied one level up. Emitting it here TOO
+        # used to double-count every board that actually needed a flash
+        # (once here, a second time from that very next confirmation
+        # tick) - confirmed from real multi-board runs where the per-board
+        # ESC counter came out roughly double the number of boards
+        # actually processed.
         self._set_phase("esc_ready" if success == attempted and attempted > 0 else "esc_error")
 
     def _on_esc_status_changed(self, index: int, state: str, detail: str, esc_info) -> None:

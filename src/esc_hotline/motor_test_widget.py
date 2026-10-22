@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 from PyQt6.QtCore import QEvent, Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QWheelEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -81,13 +82,36 @@ _PHASE_LABELS = {
 _STATUS_COLORS = {"info": TEXT_MUTED, "warning": ACCENT_AMBER, "error": ACCENT_ERROR, "success": ACCENT_GREEN}
 
 
+class _NoWheelComboBox(QComboBox):
+    """The mouse wheel never changes the selection, under any
+    circumstance (not even click-to-engage, unlike config_editor_widget.
+    py's own _ClickToWheelMixin for its sliders) - both motor-test tabs
+    live inside a QScrollArea now, and silently flipping a dropdown's
+    selection while the operator is just scrolling past it on the way
+    down the page is worse than a slider nudge: the new value is easy to
+    not even notice. Confirmed operator request: dropdowns must never
+    react to the wheel at all, full stop."""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        event.ignore()
+
+
+class _NoWheelDoubleSpinBox(QDoubleSpinBox):
+    """Same rationale as _NoWheelComboBox - scrolling the page must never
+    nudge a duration value just because the cursor happened to pass over
+    its spinbox on the way down."""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        event.ignore()
+
+
 def _make_duration_spinbox(min_value: float) -> QDoubleSpinBox:
     """Tenths-of-a-second duration input - a standard QDoubleSpinBox
     (decimals=1, step=0.1s) replaces the old whole-seconds-only
     ManualCounterWidget stepper, matching what ramp_chart_math.py's
     duration math (and dragging a chart point) already supported
     internally all along."""
-    box = QDoubleSpinBox()
+    box = _NoWheelDoubleSpinBox()
     box.setDecimals(1)
     box.setSingleStep(_DURATION_STEP_S)
     box.setRange(min_value, _MAX_DURATION_S)
@@ -170,7 +194,7 @@ class MotorTestPage(QWidget):
 
         conn_row = QHBoxLayout()
         conn_row.addWidget(QLabel("Порт:"))
-        self._port_combo = QComboBox()
+        self._port_combo = _NoWheelComboBox()
         self._port_combo.setMinimumWidth(220)
         conn_row.addWidget(self._port_combo)
         self._refresh_btn = QPushButton("↻")
@@ -193,7 +217,7 @@ class MotorTestPage(QWidget):
         # gated behind an explicit confirmation, not applied on selection.
         protocol_row = QHBoxLayout()
         protocol_row.addWidget(QLabel("Протокол мотора:"))
-        self._protocol_combo = QComboBox()
+        self._protocol_combo = _NoWheelComboBox()
         self._protocol_combo.addItems(MOTOR_PROTOCOLS)
         self._protocol_combo.setEnabled(False)
         protocol_row.addWidget(self._protocol_combo)
@@ -237,7 +261,7 @@ class MotorTestPage(QWidget):
 
         rate_row = QHBoxLayout()
         rate_row.addWidget(QLabel("Графік рампи:"))
-        self._ramp_mode_combo = QComboBox()
+        self._ramp_mode_combo = _NoWheelComboBox()
         self._ramp_mode_combo.addItem(_RAMP_MODE_LABELS[RAMP_LINEAR], RAMP_LINEAR)
         self._ramp_mode_combo.addItem(_RAMP_MODE_LABELS[RAMP_BEZIER], RAMP_BEZIER)
         self._ramp_mode_combo.setToolTip(
@@ -247,7 +271,7 @@ class MotorTestPage(QWidget):
         rate_row.addWidget(self._ramp_mode_combo)
         rate_row.addSpacing(24)
         rate_row.addWidget(QLabel("Режим тесту:"))
-        self._test_mode_combo = QComboBox()
+        self._test_mode_combo = _NoWheelComboBox()
         self._test_mode_combo.addItem(_TEST_MODE_LABELS[TEST_MODE_ALL], TEST_MODE_ALL)
         self._test_mode_combo.addItem(_TEST_MODE_LABELS[TEST_MODE_SEQUENTIAL], TEST_MODE_SEQUENTIAL)
         self._test_mode_combo.setToolTip(
