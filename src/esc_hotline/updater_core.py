@@ -18,6 +18,9 @@ API_LATEST = os.environ.get("ESC_HOTLINE_API_URL", f"https://api.github.com/repo
 MAIN_EXE = "EscHotline.exe"
 UPDATER_EXE = "EscHotlineUpdater.exe"
 SUMS_FILE = "SHA256SUMS.txt"
+# Fixed home of both exes (and the logs/settings the app already keeps here), so the
+# updater can be run from anywhere and still installs into the right place.
+INSTALL_DIR = Path.home() / ".esc_hotline"
 
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 

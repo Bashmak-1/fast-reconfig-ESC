@@ -125,7 +125,7 @@ class UpdateController(QObject):
             QMessageBox.information(self._parent, i18n.tr("update_title"), i18n.tr("update_dev_build"))
             return
         subprocess.Popen(
-            [str(updater), "--wait-pid", str(os.getpid()), "--yes"],
+            [str(updater), "--wait-pid", str(os.getpid()), "--yes", "--target", sys.executable],
             cwd=str(updater.parent),
             creationflags=CREATE_NEW_CONSOLE,
         )

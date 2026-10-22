@@ -82,22 +82,37 @@ EscHotline забирає цю ручну роботу:
 Інтерфейс — англійська та українська (перемикач у верхньому правому
 куті).
 
-## Як запустити
+## Як встановити й оновлювати
 
-Два способи, обидва без встановлення Python:
+**Рекомендовано:** завантажте з [Releases](../../releases/latest) лише
+`EscHotlineUpdater.exe` і запустіть його з будь-якої папки. Він сам
+завантажить останню версію `EscHotline.exe` у `~/.esc_hotline`
+(`C:\Users\<імя>\.esc_hotline`), перевірить контрольну суму, покладе
+туди ж свою копію й наприкінці створить ярлик на робочому столі.
 
-- **`dist/EscHotline.exe`** — один файл, зібраний через PyInstaller
-  ([scripts/build_exe.py](scripts/build_exe.py), або одним подвійним
-  кліком через [scripts/build_exe.bat](scripts/build_exe.bat)). Може
-  блокуватись Smart App Control на Windows 11 як непідписаний файл —
-  деталі в [docs/PROTOCOL_NOTES.md](docs/PROTOCOL_NOTES.md). Сам файл
-  `.exe` не зберігається в цьому репозиторії — його потрібно зібрати
-  самостійно одним зі скриптів вище.
-- **[scripts/run_dev.bat](scripts/run_dev.bat)** (або ярлик "EscHotline
-  (з коду)" на робочому столі) — запускає напряму з коду через
-  віртуальне середовище (`.venv`), без консольного вікна. Потрібен вже
-  налаштований `.venv` — дивись [requirements.txt](requirements.txt) /
+Далі програма сама перевіряє оновлення при старті й пропонує
+«Оновити / Пізніше / Пропустити цю версію»; кнопка «Перевірити
+оновлення» є у вікні «Налаштування» (шестерня вгорі), там же показана
+поточна версія. Обидві програми відповідають на `--version` / `-v` і
+`--help`; `EscHotlineUpdater.exe --check` лише перевіряє (код виходу 10 =
+є оновлення).
+
+Інші способи запуску:
+
+- **Самостійна збірка** — [scripts/build_exe.py](scripts/build_exe.py)
+  (або подвійний клік по [scripts/build_exe.bat](scripts/build_exe.bat))
+  збирає `dist/EscHotline.exe` і `dist/EscHotlineUpdater.exe` через
+  PyInstaller. Файли `.exe` не зберігаються в репозиторії. Windows 11 зі
+  Smart App Control може блокувати непідписані файли — деталі в
+  [docs/PROTOCOL_NOTES.md](docs/PROTOCOL_NOTES.md).
+- **[scripts/run_dev.bat](scripts/run_dev.bat)** — запуск напряму з коду
+  через `.venv`, без консольного вікна. Потрібен налаштований `.venv` —
+  дивись [requirements.txt](requirements.txt) /
   [requirements-dev.txt](requirements-dev.txt).
+
+**Випуск нової версії:** `git tag v1.2.3 && git push origin v1.2.3` —
+CI збере обидва `.exe`, підставить версію з тегу та опублікує реліз
+разом із `SHA256SUMS.txt`.
 
 Прошивка FC через DFU додатково потребує встановленого
 [STM32CubeProgrammer](https://www.st.com/en/development-tools/stm32cubeprog.html)
@@ -117,7 +132,7 @@ EscHotline забирає цю ручну роботу:
 ## Структура репозиторію
 
 - [`src/esc_hotline/`](src/esc_hotline) — увесь код програми.
-- [`tests/`](tests) — pytest-набір (208 тестів).
+- [`tests/`](tests) — pytest-набір (216 тестів).
 - [`scripts/`](scripts) — запуск з коду й збірка `.exe`
   (`run.py`, `run_dev.bat`, `build_exe.py`, `build_exe.bat`).
 - [`docs/`](docs) — технічна документація для розробника, детальніше
@@ -139,7 +154,7 @@ EscHotline забирає цю ручну роботу:
 FourWay, формули полів конфігу, дрібні особливості/грабельки) —
 [docs/PROTOCOL_NOTES.md](docs/PROTOCOL_NOTES.md).
 
-Тести: `pytest tests/` (208 тестів — CRC/протокол, декодування/
+Тести: `pytest tests/` (216 тестів — CRC/протокол, декодування/
 кодування конфігу, DFU-флешер, оркестрація EscManager на підробленому
 залізі, стан-машини "Хотспот (лінія)" і "Прошивка FC", розрахунок
 графіка розгону моторів, клампінг ручного лічильника).
