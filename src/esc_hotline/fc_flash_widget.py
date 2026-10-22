@@ -63,6 +63,7 @@ from .motor_test_manager import (
 from .motor_test_widget import _NoWheelComboBox as QComboBox
 from .motor_test_widget import _make_duration_spinbox
 from .ramp_chart_math import MIN_PHASE_DURATION_S
+from .ramp_curve import DOWN_CURVE_KEY, UP_CURVE_KEY, RampCurve
 from .ramp_chart_widget import RampChartWidget
 from .serial_transport import list_fc_ports
 from .settings_store import load_float, load_int, load_str, save_float, save_int, save_str
@@ -122,6 +123,7 @@ class FcFlashPage(QWidget):
     # apply_external_ramp_settings() so both stay live-synced.
     # Order: up_s, hold_s, down_s, ramp_mode, test_mode, min_percent, max_percent.
     ramp_settings_changed = pyqtSignal(float, float, float, str, str, float, float)
+    curves_changed = pyqtSignal(object, object)  # see motor_test_widget
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -412,6 +414,9 @@ class FcFlashPage(QWidget):
         self._motor_ramp_mode_combo.addItem(_RAMP_MODE_LABELS[RAMP_BEZIER], RAMP_BEZIER)
         self._motor_ramp_mode_combo.currentIndexChanged.connect(self._on_motor_ramp_mode_changed)
         motor_rate_row.addWidget(self._motor_ramp_mode_combo)
+        self._motor_reset_chart_btn = QPushButton("Скинути графік")
+        self._motor_reset_chart_btn.setToolTip("Повертає криву Безе, точки, тривалості й межі до стандартних.")
+        motor_rate_row.addWidget(self._motor_reset_chart_btn)
         motor_rate_row.addSpacing(24)
         motor_rate_row.addWidget(QLabel("Режим тесту:"))
         self._motor_test_mode_combo = QComboBox()
@@ -443,6 +448,8 @@ class FcFlashPage(QWidget):
         self._motor_chart = RampChartWidget()
         self._motor_chart.setMinimumHeight(180)
         self._motor_chart.profile_changed.connect(self._on_motor_chart_profile_changed)
+        self._motor_chart.curves_changed.connect(self._on_motor_chart_curves_changed)
+        self._motor_reset_chart_btn.clicked.connect(self._motor_chart.reset_all)
         motor_config_layout.addWidget(self._motor_chart)
 
         root.addWidget(self._motor_config_container)
@@ -703,8 +710,8 @@ class FcFlashPage(QWidget):
             load_float(_MOTOR_HOLD_DURATION_KEY, _DEFAULT_MOTOR_HOLD_DURATION_S),
             load_float(_MOTOR_DOWN_DURATION_KEY, _DEFAULT_MOTOR_DOWN_DURATION_S),
         )
-        ramp_mode = load_str(_MOTOR_RAMP_MODE_KEY, RAMP_LINEAR)
-        idx = self._motor_ramp_mode_combo.findData(ramp_mode if ramp_mode in _RAMP_MODE_LABELS else RAMP_LINEAR)
+        ramp_mode = load_str(_MOTOR_RAMP_MODE_KEY, RAMP_BEZIER)
+        idx = self._motor_ramp_mode_combo.findData(ramp_mode if ramp_mode in _RAMP_MODE_LABELS else RAMP_BEZIER)
         if idx >= 0:
             self._motor_ramp_mode_combo.setCurrentIndex(idx)
         self._motor_chart.set_curve_mode(self._motor_ramp_mode_combo.currentData())
@@ -717,6 +724,9 @@ class FcFlashPage(QWidget):
         min_pct = load_int(_MOTOR_MIN_BOUND_KEY, _DEFAULT_MOTOR_MIN_BOUND)
         max_pct = load_int(_MOTOR_MAX_BOUND_KEY, _DEFAULT_MOTOR_MAX_BOUND)
         self._motor_chart.set_bounds(min_pct, max_pct)
+        self._motor_chart.set_curves(
+            RampCurve.from_json(load_str(UP_CURVE_KEY)), RampCurve.from_json(load_str(DOWN_CURVE_KEY))
+        )
 
     # ---- start/stop ------------------------------------------------
 
@@ -829,6 +839,15 @@ class FcFlashPage(QWidget):
         self._motor_chart.set_durations(
             self._motor_up_stepper.value(), self._motor_hold_stepper.value(), self._motor_down_stepper.value()
         )
+
+    def _on_motor_chart_curves_changed(self, up: RampCurve, down: RampCurve) -> None:
+        # The station's own motor test reads these keys fresh when it starts (fc_flash_station.py).
+        save_str(UP_CURVE_KEY, up.to_json())
+        save_str(DOWN_CURVE_KEY, down.to_json())
+        self.curves_changed.emit(up, down)
+
+    def apply_external_curves(self, up: RampCurve, down: RampCurve) -> None:
+        self._motor_chart.set_curves(up, down)
 
     def _on_motor_chart_profile_changed(
         self, up_s: float, hold_s: float, down_s: float, min_percent: float, max_percent: float

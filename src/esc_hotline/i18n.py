@@ -46,6 +46,10 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "en": "The program is being moved to its new folder (~/.esc_hotline/stable). It will restart in a moment; your settings are kept.",
         "uk": "Програму переносять у нову папку (~/.esc_hotline/stable). Вона за мить перезапуститься; налаштування збережуться.",
     },
+    "dev_badge_tip": {
+        "en": "This is the DEV build - not the stable program.",
+        "uk": "Це DEV-збірка, а не стабільна програма.",
+    },
     "channel_label": {"en": "Channel:", "uk": "Канал:"},
     "channel_stable": {"en": "Stable", "uk": "Стабільна"},
     "channel_dev": {"en": "Dev", "uk": "Dev"},

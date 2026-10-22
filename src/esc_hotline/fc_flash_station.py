@@ -101,7 +101,8 @@ from .connection_worker import ConnectionWorker
 from .file_logger import get_logger
 from .fourway import FourWayClient
 from .motor_ramp import MOTOR_PROTOCOLS, build_advanced_config_payload
-from .motor_test_manager import ARMED_BIT, PHASE_IDLE as MOTOR_PHASE_IDLE, RAMP_LINEAR, TEST_MODE_ALL, MotorTestManager
+from .ramp_curve import DOWN_CURVE_KEY, TICK_KEY, UP_CURVE_KEY, RampCurve
+from .motor_test_manager import ARMED_BIT, PHASE_IDLE as MOTOR_PHASE_IDLE, RAMP_BEZIER, RAMP_LINEAR, TEST_MODE_ALL, MotorTestManager
 from .msp import MspClient, MspCommand, MspError
 from .serial_transport import PortInfo, SerialTransport, list_fc_ports
 from .settings_store import load_int, load_str
@@ -522,6 +523,8 @@ class FcFlashStationController(QObject):
     _motor_check_disarmed_requested = pyqtSignal()
     _motor_start_sweep_requested = pyqtSignal(float, float, float)
     _motor_set_ramp_mode_requested = pyqtSignal(str)
+    _motor_set_curves_requested = pyqtSignal(object, object)
+    _motor_set_tick_requested = pyqtSignal(int)
     _motor_set_test_mode_requested = pyqtSignal(str)
     _motor_set_speed_bounds_requested = pyqtSignal(float, float)
 
@@ -561,6 +564,8 @@ class FcFlashStationController(QObject):
         self._motor_check_disarmed_requested.connect(motor_mgr.check_disarmed)
         self._motor_start_sweep_requested.connect(motor_mgr.start_sweep)
         self._motor_set_ramp_mode_requested.connect(motor_mgr.set_ramp_mode)
+        self._motor_set_curves_requested.connect(motor_mgr.set_curves)
+        self._motor_set_tick_requested.connect(motor_mgr.set_tick_ms)
         self._motor_set_test_mode_requested.connect(motor_mgr.set_test_mode)
         self._motor_set_speed_bounds_requested.connect(motor_mgr.set_speed_bounds)
         motor_mgr.connection_state_changed.connect(self._on_motor_connection_state_changed)
@@ -1218,7 +1223,11 @@ class FcFlashStationController(QObject):
             self.dfu_detail_changed.emit("Не вдалось підключитись для тесту моторів.")
             self._set_phase("motor_test_error")
             return
-        self._motor_set_ramp_mode_requested.emit(load_str(_MOTOR_RAMP_MODE_KEY, RAMP_LINEAR))
+        self._motor_set_ramp_mode_requested.emit(load_str(_MOTOR_RAMP_MODE_KEY, RAMP_BEZIER))
+        self._motor_set_curves_requested.emit(
+            RampCurve.from_json(load_str(UP_CURVE_KEY)), RampCurve.from_json(load_str(DOWN_CURVE_KEY))
+        )
+        self._motor_set_tick_requested.emit(load_int(TICK_KEY, 100))
         self._motor_set_test_mode_requested.emit(load_str(_MOTOR_TEST_MODE_KEY, TEST_MODE_ALL))
         self._motor_set_speed_bounds_requested.emit(
             float(load_int(_MOTOR_MIN_BOUND_KEY, DEFAULT_MOTOR_MIN_BOUND)),

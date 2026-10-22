@@ -60,13 +60,15 @@ from .motor_ramp import (
 )
 from .msp import MspClient, MspCommand, MspError
 from .ramp_chart_math import MAX_PHASE_DURATION_S, clamp_bound_pair, clamp_duration_s, segment_value
+from .ramp_curve import RampCurve
 from .serial_transport import SerialTransport
 
 MOTOR_SLOTS = 8  # hard MSP_SET_MOTOR/MSP_MOTOR wire-format limit (for (i = 0; i < 8; i++) in fc_msp.c) -
 # separate from FourWay/config world's 12-ESC limit (MAX_ESC_COUNT in esc_manager.py). The number of
 # these 8 slots that are actually configured motors (motor_count) is detected per-connection, see connect().
 ARMED_BIT = 0x04
-TICK_MS = 100
+TICK_MS = 100  # default motor-command / curve-sampling step
+TICK_CHOICES_MS = (100, 50, 20)  # operator-selectable "Крок оновлення"; the curve itself is solved exactly per tick
 
 PHASE_IDLE = "idle"
 PHASE_UP = "up"
@@ -113,6 +115,8 @@ class MotorTestManager(QObject):
         self._max_target = MSP_MAX  # configurable sweep ceiling
         self._phase = PHASE_IDLE
         self._ramp_mode = RAMP_LINEAR
+        self._up_curve: Optional[RampCurve] = None  # None = the default "Безе" shape
+        self._down_curve: Optional[RampCurve] = None
         self._test_mode = TEST_MODE_ALL
         self._active_motor_index: Optional[int] = None  # which single motor is running, TEST_MODE_SEQUENTIAL only
         self._manual_stop_requested = False  # Stop/panic-key pressed - suppress auto-advance to the next motor
@@ -318,6 +322,15 @@ class MotorTestManager(QObject):
         self._phase_start_time = time.monotonic()
         self._phase_start_value = self._current
 
+    def set_curves(self, up: Optional[RampCurve], down: Optional[RampCurve]) -> None:
+        """Operator-edited shapes for розгін/спад (used only in RAMP_BEZIER mode); takes effect from the next tick."""
+        self._up_curve, self._down_curve = up, down
+
+    def set_tick_ms(self, ms: int) -> None:
+        """How often a motor command is sent / the curve is evaluated. Idle-only, like the bounds."""
+        if self._phase == PHASE_IDLE and ms in TICK_CHOICES_MS:
+            self._timer.setInterval(ms)
+
     def set_speed_bounds(self, min_percent: float, max_percent: float) -> None:
         """Configurable sweep floor/ceiling - operator-draggable on the
         ramp chart, idle-only (the chart itself only allows dragging while
@@ -403,7 +416,8 @@ class MotorTestManager(QObject):
             start_percent = msp_to_percent(self._phase_start_value)
             target_percent = msp_to_percent(self._target)
             use_bezier = self._ramp_mode == RAMP_BEZIER
-            value_percent = segment_value(use_bezier, elapsed_s, duration_s, start_percent, target_percent)
+            curve = self._up_curve if self._phase == PHASE_UP else self._down_curve
+            value_percent = segment_value(use_bezier, elapsed_s, duration_s, start_percent, target_percent, curve)
             self._current = percent_to_msp(value_percent)
 
         try:

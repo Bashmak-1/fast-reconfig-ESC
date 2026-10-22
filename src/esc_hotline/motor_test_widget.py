@@ -44,9 +44,11 @@ from .motor_test_manager import (
     RAMP_LINEAR,
     TEST_MODE_ALL,
     TEST_MODE_SEQUENTIAL,
+    TICK_CHOICES_MS,
     MotorTestManager,
 )
 from .ramp_chart_math import MIN_PHASE_DURATION_S
+from .ramp_curve import DOWN_CURVE_KEY, TICK_KEY, UP_CURVE_KEY, RampCurve
 from .ramp_chart_widget import RampChartWidget
 from .serial_transport import list_fc_ports
 from .settings_store import load_float, load_int, load_str, save_float, save_int, save_str
@@ -133,6 +135,8 @@ class MotorTestPage(QWidget):
     _set_ramp_mode_requested = pyqtSignal(str)
     _set_test_mode_requested = pyqtSignal(str)
     _set_speed_bounds_requested = pyqtSignal(float, float)
+    _set_curves_requested = pyqtSignal(object, object)
+    _set_tick_requested = pyqtSignal(int)
 
     # GUI-thread-affinity signal for MainWindow's cross-tab port-collision guard.
     connection_changed = pyqtSignal(bool)
@@ -144,6 +148,8 @@ class MotorTestPage(QWidget):
     # shared settings_store keys at next restart. Order: up_s, hold_s,
     # down_s, ramp_mode, test_mode, min_percent, max_percent.
     ramp_settings_changed = pyqtSignal(float, float, float, str, str, float, float)
+    # up_curve, down_curve (RampCurve) - same cross-tab sync idea, for the editable Bezier shapes.
+    curves_changed = pyqtSignal(object, object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -269,6 +275,17 @@ class MotorTestPage(QWidget):
         )
         self._ramp_mode_combo.currentIndexChanged.connect(self._on_ramp_mode_changed)
         rate_row.addWidget(self._ramp_mode_combo)
+        self._reset_chart_btn = QPushButton("Скинути графік")
+        self._reset_chart_btn.setToolTip("Повертає криву Безе, точки, тривалості й межі до стандартних.")
+        rate_row.addWidget(self._reset_chart_btn)
+        rate_row.addSpacing(12)
+        rate_row.addWidget(QLabel("Крок:"))
+        self._tick_combo = _NoWheelComboBox()
+        for ms in TICK_CHOICES_MS:
+            self._tick_combo.addItem(f"{ms} мс", ms)
+        self._tick_combo.setToolTip("Як часто мотору шлеться команда (менше = плавніше).")
+        self._tick_combo.currentIndexChanged.connect(self._on_tick_changed)
+        rate_row.addWidget(self._tick_combo)
         rate_row.addSpacing(24)
         rate_row.addWidget(QLabel("Режим тесту:"))
         self._test_mode_combo = _NoWheelComboBox()
@@ -403,6 +420,10 @@ class MotorTestPage(QWidget):
         self._set_ramp_mode_requested.connect(self.manager.set_ramp_mode)
         self._set_test_mode_requested.connect(self.manager.set_test_mode)
         self._set_speed_bounds_requested.connect(self.manager.set_speed_bounds)
+        self._set_curves_requested.connect(self.manager.set_curves)
+        self._set_tick_requested.connect(self.manager.set_tick_ms)
+        self._reset_chart_btn.clicked.connect(self._ramp_chart.reset_all)
+        self._ramp_chart.curves_changed.connect(self._on_chart_curves_changed)
 
         self._ramp_chart.profile_changed.connect(self._on_chart_profile_changed)
         self._ramp_mode_combo.currentIndexChanged.connect(
@@ -448,8 +469,8 @@ class MotorTestPage(QWidget):
             load_float(_HOLD_DURATION_KEY, DEFAULT_HOLD_DURATION_S),
             load_float(_DOWN_DURATION_KEY, DEFAULT_DOWN_DURATION_S),
         )
-        ramp_mode = load_str(_RAMP_MODE_KEY, RAMP_LINEAR)
-        idx = self._ramp_mode_combo.findData(ramp_mode if ramp_mode in _RAMP_MODE_LABELS else RAMP_LINEAR)
+        ramp_mode = load_str(_RAMP_MODE_KEY, RAMP_BEZIER)  # "Безе" is the default shape, like DSHOT300 is the default protocol
+        idx = self._ramp_mode_combo.findData(ramp_mode if ramp_mode in _RAMP_MODE_LABELS else RAMP_BEZIER)
         if idx >= 0:
             self._ramp_mode_combo.setCurrentIndex(idx)
         self._set_ramp_mode_requested.emit(self._ramp_mode_combo.currentData())
@@ -471,6 +492,29 @@ class MotorTestPage(QWidget):
         max_pct = load_int(_MAX_BOUND_KEY, DEFAULT_MAX_BOUND)
         self._ramp_chart.set_bounds(min_pct, max_pct)
         self._set_speed_bounds_requested.emit(min_pct, max_pct)
+        up_curve = RampCurve.from_json(load_str(UP_CURVE_KEY))
+        down_curve = RampCurve.from_json(load_str(DOWN_CURVE_KEY))
+        self._ramp_chart.set_curves(up_curve, down_curve)
+        self._set_curves_requested.emit(up_curve, down_curve)
+        tick_idx = self._tick_combo.findData(load_int(TICK_KEY, TICK_CHOICES_MS[0]))
+        self._tick_combo.setCurrentIndex(max(0, tick_idx))
+        self._set_tick_requested.emit(self._tick_combo.currentData())
+
+    def _on_chart_curves_changed(self, up: RampCurve, down: RampCurve) -> None:
+        save_str(UP_CURVE_KEY, up.to_json())
+        save_str(DOWN_CURVE_KEY, down.to_json())
+        self._set_curves_requested.emit(up, down)
+        self.curves_changed.emit(up, down)
+
+    def apply_external_curves(self, up: RampCurve, down: RampCurve) -> None:
+        """The sibling tab already saved them - only mirror into this chart/manager (no re-emit)."""
+        self._ramp_chart.set_curves(up, down)
+        self._set_curves_requested.emit(up, down)
+
+    def _on_tick_changed(self, _index: int) -> None:
+        ms = self._tick_combo.currentData()
+        save_int(TICK_KEY, ms)
+        self._set_tick_requested.emit(ms)
 
     def _current_ramp_settings_tuple(self) -> tuple[float, float, float, str, str, float, float]:
         return (

@@ -10,14 +10,27 @@ the ramp PROFILE shape and its chart geometry.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from .motor_ramp import cubic_bezier_ease
+from .ramp_curve import RampCurve
 
 MIN_BOUND_GAP_PERCENT = 5.0
 MIN_PHASE_DURATION_S = 0.1  # anything shorter is instantaneous for any practical purpose - also avoids div-by-zero
 MAX_PHASE_DURATION_S = 60.0
 
+# What "Скинути графік" restores: durations (s) and bounds (%).
+DEFAULT_UP_DURATION_S = 4.0
+DEFAULT_HOLD_DURATION_S = 0.0
+DEFAULT_DOWN_DURATION_S = 4.0
+DEFAULT_MIN_PERCENT = 0.0
+DEFAULT_MAX_PERCENT = 100.0
 
-def segment_value(use_bezier: bool, elapsed_s: float, duration_s: float, start_percent: float, end_percent: float) -> float:
+
+def segment_value(
+    use_bezier: bool, elapsed_s: float, duration_s: float, start_percent: float, end_percent: float,
+    curve: Optional[RampCurve] = None,
+) -> float:
     """Percent position `elapsed_s` seconds into a `duration_s`-long move
     from start_percent to end_percent - a straight line, or the same
     cubic_bezier_ease() the real ramp motion uses for "Безе". Clamped to
@@ -28,7 +41,8 @@ def segment_value(use_bezier: bool, elapsed_s: float, duration_s: float, start_p
     if duration_s <= 0:
         return end_percent
     t = max(0.0, min(1.0, elapsed_s / duration_s))
-    eased = cubic_bezier_ease(t) if use_bezier else t
+    # `curve` is the operator-edited shape; without one, "Безе" is the old fixed smoothstep (same numbers).
+    eased = (curve.ease(t) if curve is not None else cubic_bezier_ease(t)) if use_bezier else t
     return start_percent + (end_percent - start_percent) * eased
 
 
@@ -40,6 +54,8 @@ def profile_value_at_time(
     down_duration_s: float,
     min_percent: float,
     max_percent: float,
+    up_curve: Optional[RampCurve] = None,
+    down_curve: Optional[RampCurve] = None,
 ) -> float:
     """Percent value at `elapsed_s` into the FULL розгін->утримання->спад
     profile for one motor's one cycle, given as a single continuous
@@ -50,11 +66,11 @@ def profile_value_at_time(
     construction.
     """
     if elapsed_s < up_duration_s:
-        return segment_value(use_bezier, elapsed_s, up_duration_s, min_percent, max_percent)
+        return segment_value(use_bezier, elapsed_s, up_duration_s, min_percent, max_percent, up_curve)
     if elapsed_s < up_duration_s + hold_duration_s:
         return max_percent
     down_elapsed = elapsed_s - up_duration_s - hold_duration_s
-    return segment_value(use_bezier, down_elapsed, down_duration_s, max_percent, min_percent)
+    return segment_value(use_bezier, down_elapsed, down_duration_s, max_percent, min_percent, down_curve)
 
 
 def clamp_bound_pair(min_percent: float, max_percent: float, dragging: str = "min") -> tuple[float, float]:

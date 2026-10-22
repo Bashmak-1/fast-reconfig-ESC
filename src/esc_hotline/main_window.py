@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from . import i18n
+from ._version import __version__
 from .config_editor_widget import ConfigEditorPage
 from .connection_worker import ConnectionWorker
 from .esc_comparison_widget import EscComparisonList
@@ -44,7 +45,7 @@ from .serial_transport import list_fc_ports
 from .settings_dialog import SettingsDialog
 from .settings_store import load_language, load_last_config_path, save_language, save_last_config_path
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
-from .update_controller import UpdateController, is_frozen
+from .update_controller import CHANNEL, UpdateController, is_frozen
 
 BAUD_RATES = [1000000, 500000, 256000, 115200, 57600, 38400, 19200, 14400, 9600]
 GRID_COLUMNS = 4
@@ -179,6 +180,16 @@ class MainWindow(QMainWindow):
         logo.setStyleSheet("font-weight: 700; font-size: 15px; color: #c0392b;")
         layout.addWidget(logo)
         layout.addStretch(1)
+
+        # Present in stable and dev builds alike (same source), shown only in a dev build so it is
+        # obvious at a glance which of the two side-by-side programs this window is.
+        if CHANNEL == "dev":
+            dev_badge = QLabel(f"DEV  {__version__}")
+            dev_badge.setStyleSheet(
+                f"background-color: {ACCENT_AMBER}; color: white; font-weight: 700; padding: 4px 10px; border-radius: 4px;"
+            )
+            dev_badge.setToolTip(i18n.tr("dev_badge_tip"))
+            layout.addWidget(dev_badge)
 
         self._settings_btn = QPushButton()
         self._settings_btn.clicked.connect(self._settings_dialog_exec)
@@ -348,6 +359,8 @@ class MainWindow(QMainWindow):
         # other's latest change live, not just after a restart.
         self.motor_test_page.ramp_settings_changed.connect(self.fc_flash_page.apply_external_ramp_settings)
         self.fc_flash_page.ramp_settings_changed.connect(self.motor_test_page.apply_external_ramp_settings)
+        self.motor_test_page.curves_changed.connect(self.fc_flash_page.apply_external_curves)
+        self.fc_flash_page.curves_changed.connect(self.motor_test_page.apply_external_curves)
 
     # ---- i18n ------------------------------------------------
 
