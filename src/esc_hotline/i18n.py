@@ -42,6 +42,10 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "en": "Updating is only available in the built .exe together with EscHotlineUpdater.exe.",
         "uk": "Оновлення доступне лише у зібраній .exe разом з EscHotlineUpdater.exe.",
     },
+    "migrate_notice": {
+        "en": "The program is being moved to its new folder (~/.esc_hotline/stable). It will restart in a moment; your settings are kept.",
+        "uk": "Програму переносять у нову папку (~/.esc_hotline/stable). Вона за мить перезапуститься; налаштування збережуться.",
+    },
     "channel_label": {"en": "Channel:", "uk": "Канал:"},
     "channel_stable": {"en": "Stable", "uk": "Стабільна"},
     "channel_dev": {"en": "Dev", "uk": "Dev"},

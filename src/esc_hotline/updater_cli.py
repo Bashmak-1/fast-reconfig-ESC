@@ -33,6 +33,7 @@ def create_desktop_shortcut(target: Path, name: str = "EscHotline") -> bool:
 
 
 _last_percent = -1
+_launched_new = False  # set once the freshly installed app has been started
 
 
 def _progress(done: int, total: int) -> None:
@@ -64,6 +65,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"EscHotlineUpdater {__version__}")
         return 0
     code = _run(args)
+    if args.wait_pid is not None and not _launched_new and args.target and args.target.exists():
+        # The app closed itself for us; if nothing new got installed (error, nothing to do) bring it back.
+        subprocess.Popen([str(args.target)], cwd=str(args.target.parent))
     if args.wait_pid is None and not args.check and sys.stdin and sys.stdin.isatty():
         try:
             input("\nНатисніть Enter, щоб закрити це вікно...")  # started by double-click: don't vanish with the result
@@ -157,6 +161,8 @@ def _run(args: argparse.Namespace) -> int:
         core.remove_legacy_flat()
     print(f"Готово: {core.MAIN_EXE} {release.version}. Запускаю...")
     subprocess.Popen([str(target)], cwd=str(target.parent))
+    global _launched_new
+    _launched_new = True
     for old in olds:
         try:
             old.unlink(missing_ok=True)

@@ -184,3 +184,17 @@ def test_remove_legacy_flat_survives_a_locked_exe(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "unlink", locked)
     core.remove_legacy_flat()
     assert not (tmp_path / core.MAIN_EXE).exists() and (tmp_path / core.UPDATER_EXE).exists()
+
+
+def test_updater_relaunches_the_app_when_the_update_fails(tmp_path, monkeypatch):
+    from esc_hotline import updater_cli
+
+    app = tmp_path / "EscHotline.exe"
+    app.write_bytes(b"old")
+    monkeypatch.setattr(core, "ROOT_DIR", tmp_path / "root")
+    monkeypatch.setattr(core, "fetch_latest", lambda **k: (_ for _ in ()).throw(OSError("offline")))
+    started = []
+    monkeypatch.setattr(updater_cli.subprocess, "Popen", lambda cmd, **k: started.append(cmd))
+    monkeypatch.setattr(updater_cli, "_launched_new", False)
+    assert updater_main(["--yes", "--wait-pid", "999999", "--target", str(app)]) == 1
+    assert started == [[str(app)]]  # the app that closed itself for the update is brought back

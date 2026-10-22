@@ -34,6 +34,11 @@ def install_dir() -> Path:
     return Path(sys.executable).parent
 
 
+def is_legacy_flat() -> bool:
+    """Running from the pre-channel layout (exe directly in ~/.esc_hotline) and due to be moved into stable/."""
+    return is_frozen() and CHANNEL == "stable" and install_dir().resolve() == core.ROOT_DIR.resolve()
+
+
 class UpdateController(QObject):
     # (release | None, error text | "", manual) - emitted from the worker thread, delivered queued on the GUI thread
     _checked = pyqtSignal(object, str, bool)
@@ -97,6 +102,12 @@ class UpdateController(QObject):
         if release is None:
             if manual:
                 QMessageBox.warning(self._parent, i18n.tr("update_title"), i18n.tr("update_check_failed", error=error))
+            return
+        if is_legacy_flat():
+            # Online (the check succeeded) and still in the old flat folder: move into stable/ now.
+            # The updater installs the latest stable there, relaunches it, and clears the flat leftovers.
+            QMessageBox.information(self._parent, i18n.tr("update_title"), i18n.tr("migrate_notice"))
+            self._launch_updater()
             return
         if not core.is_newer(release.version, __version__):
             if manual:
