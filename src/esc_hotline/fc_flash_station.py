@@ -861,12 +861,26 @@ class FcFlashStationController(QObject):
             return
 
         if self._phase == "waiting_fc_for_motor_test":
-            # Same re-enumeration trick as "waiting_fc_normal" above, just
-            # after the protocol-write reboot instead of the DFU one -
-            # _pre_dfu_port_snapshot was refreshed right before that reboot
-            # was triggered (see _on_connection_state_changed).
-            new_ports = [info for info in list_fc_ports() if info.device not in self._pre_dfu_port_snapshot]
-            chosen = self._pick_reenumerated_port(new_ports)
+            # NOT the same re-enumeration trick as "waiting_fc_normal" -
+            # that one relies on the old port already being gone from
+            # list_fc_ports() by snapshot time (DFU bootloader mode drops
+            # the VCP entirely). A plain MSP_REBOOT gives no such
+            # guarantee: confirmed on real hardware that the exact same
+            # COM port stays enumerated by Windows the whole time, since
+            # our own transport.close() only releases OUR handle, not the
+            # USB device itself. Filtering it out via _pre_dfu_port_snapshot
+            # (taken WHILE that port was still open, right before the
+            # reboot) left this phase waiting forever even though the FC
+            # had already rebooted and reappeared under the same name -
+            # so check for that port specifically before falling back to
+            # the stricter "genuinely new port" detection.
+            current_ports = list_fc_ports()
+            current_devices = {info.device for info in current_ports}
+            if self._port_device and self._port_device in current_devices:
+                chosen: Optional[str] = self._port_device
+            else:
+                new_ports = [info for info in current_ports if info.device not in self._pre_dfu_port_snapshot]
+                chosen = self._pick_reenumerated_port(new_ports)
             if chosen is not None:
                 if chosen != self._port_device:
                     self._flog.info(
