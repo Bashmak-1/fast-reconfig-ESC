@@ -1,6 +1,7 @@
 """EscHotlineUpdater.exe: console tool that installs/updates EscHotline.exe from
-GitHub Releases into ~/.esc_hotline (wherever the updater itself was started
-from), and puts a desktop shortcut to it. Qt-free on purpose (see updater_core)."""
+GitHub Releases into ~/.esc_hotline/<channel> (stable or dev, each in its own folder;
+wherever the updater itself was started from), and puts a desktop shortcut to it.
+Qt-free on purpose (see updater_core)."""
 from __future__ import annotations
 
 import argparse
@@ -19,10 +20,10 @@ def _ps_quote(path: Path) -> str:
     return str(path).replace("'", "''")
 
 
-def create_desktop_shortcut(target: Path) -> bool:
+def create_desktop_shortcut(target: Path, name: str = "EscHotline") -> bool:
     script = (
         "$d=[Environment]::GetFolderPath('Desktop');"
-        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut(\"$d\\EscHotline.lnk\");"
+        f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut(\"$d\\{name}.lnk\");"
         f"$s.TargetPath='{_ps_quote(target)}';$s.WorkingDirectory='{_ps_quote(target.parent)}';$s.Save()"
     )
     try:
@@ -47,7 +48,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--check", action="store_true", help="лише перевірити; код виходу 10 = є оновлення")
     p.add_argument("--yes", action="store_true", help="не питати підтвердження")
     p.add_argument("--wait-pid", type=int, help="дочекатись завершення процесу (основної програми) перед заміною")
-    p.add_argument("--target", type=Path, help=f"куди ставити {core.MAIN_EXE} (за замовчуванням - {core.INSTALL_DIR})")
+    p.add_argument("--channel", choices=core.CHANNELS, help="stable (за замовчуванням) або dev")
+    p.add_argument("--tag", help="поставити саме цю версію (напр. v1.1.0), навіть старішу")
+    p.add_argument("--target", type=Path, help=f"куди ставити {core.MAIN_EXE} (за замовчуванням - {core.ROOT_DIR}/<канал>)")
     p.add_argument("--shortcut", action="store_true", help="створити ярлик на робочому столі, навіть якщо оновлення не потрібне")
     return p
 
@@ -69,20 +72,44 @@ def main(argv: Optional[list[str]] = None) -> int:
     return code
 
 
+def _own_channel() -> Optional[str]:
+    """The channel this updater copy sits in (~/.esc_hotline/<channel>/), if any."""
+    here = Path(sys.executable).resolve().parent
+    return here.name if here.parent == core.ROOT_DIR.resolve() and here.name in core.CHANNELS else None
+
+
+def _find_release(args: argparse.Namespace, channel: str) -> core.Release:
+    if not args.tag:
+        return core.fetch_latest(channel=channel)
+    wanted = args.tag if args.tag.startswith("v") else "v" + args.tag
+    for ch in core.CHANNELS:
+        for r in core.list_releases(ch):
+            if r.tag == wanted:
+                return r
+    raise ValueError(f"релізу {wanted} не знайдено")
+
+
 def _run(args: argparse.Namespace) -> int:
-    target = args.target or core.INSTALL_DIR / core.MAIN_EXE
+    channel = args.channel or (core.channel_of(args.tag) if args.tag else _own_channel() or "stable")
+    target = args.target or core.channel_dir(channel) / core.MAIN_EXE
+    legacy_dir: Optional[Path] = None
+    if target.parent.resolve() == core.ROOT_DIR.resolve():
+        # Old flat layout (exes directly in ~/.esc_hotline): move into the channel folder.
+        legacy_dir, target = target.parent, core.channel_dir(channel) / core.MAIN_EXE
+    shortcut_name = "EscHotline" if channel == "stable" else "EscHotline Dev"
     print("[1/5] Перевірка оновлень...")
     try:
-        release = core.fetch_latest()
+        release = _find_release(args, channel)
     except Exception as e:
-        print(f"Не вдалось звʼязатись з GitHub: {e}")
+        print(f"Не вдалось отримати реліз з GitHub: {e}")
         return 1
 
     current = core.exe_version(target) if target.exists() else None
-    if current and not core.is_newer(release.version, current):
+    up_to_date = current == release.version if args.tag else bool(current) and not core.is_newer(release.version, current)
+    if up_to_date and legacy_dir is None:
         print(f"Встановлена версія {current} актуальна (на GitHub {release.version}).")
         if args.shortcut:
-            create_desktop_shortcut(target)
+            create_desktop_shortcut(target, shortcut_name)
         return 0
     print(f"Доступна версія {release.version} (зараз: {current or 'не встановлено'}).")
     if args.check:
@@ -125,7 +152,10 @@ def _run(args: argparse.Namespace) -> int:
         return 1
 
     print("[5/5] Ярлик на робочому столі...")
-    print("  готово" if create_desktop_shortcut(target) else "  не вдалось створити ярлик (не критично)")
+    print("  готово" if create_desktop_shortcut(target, shortcut_name) else "  не вдалось створити ярлик (не критично)")
+    if legacy_dir is not None:  # the process that called us has exited (wait_for_pid), so the old flat exes can go
+        for name in (core.MAIN_EXE, core.UPDATER_EXE, core.MAIN_EXE + ".old", core.UPDATER_EXE + ".old"):
+            (legacy_dir / name).unlink(missing_ok=True)
     print(f"Готово: {core.MAIN_EXE} {release.version}. Запускаю...")
     subprocess.Popen([str(target)], cwd=str(target.parent))
     for old in olds:

@@ -42,7 +42,7 @@ from .hotspot_widget import HotspotFlashPage
 from .motor_test_widget import MotorTestPage
 from .serial_transport import list_fc_ports
 from .settings_dialog import SettingsDialog
-from .settings_store import load_last_config_path, save_last_config_path
+from .settings_store import load_language, load_last_config_path, save_language, save_last_config_path
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
 from .update_controller import UpdateController, is_frozen
 
@@ -82,6 +82,10 @@ class MainWindow(QMainWindow):
         self._connected = False
         self._hotspot_armed = False
 
+        saved_lang = load_language()
+        if saved_lang in {c for c, *_ in i18n.LANGUAGES}:
+            i18n.set_language(saved_lang)
+        i18n.signals.language_changed.connect(save_language)
         self._build_ui()
         self._wire_signals()
         self._refresh_ports()

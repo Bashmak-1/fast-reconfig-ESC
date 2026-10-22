@@ -1,0 +1,66 @@
+name: Dev build
+
+# Every push to the dev branch publishes a pre-release (tag vX.Y.Z-dev.N). Pre-releases are
+# invisible to the stable channel (releases/latest skips them); only the Dev channel in the
+# app's Settings, or `EscHotlineUpdater.exe --channel dev`, picks them up.
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: write
+
+concurrency: dev-build
+
+jobs:
+  dev:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - run: pytest tests/
+
+      - name: Compute dev tag (base version from _version.py + run number)
+        id: ver
+        shell: bash
+        run: |
+          base=$(python -c "import re;print(re.search(r'\d+\.\d+\.\d+', open('src/esc_hotline/_version.py').read())[0])")
+          echo "tag=v${base}-dev.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - run: python scripts/stamp_version.py ${{ steps.ver.outputs.tag }}
+
+      - run: python scripts/build_exe.py
+
+      - name: Checksums for the in-app updater
+        shell: bash
+        run: cd dist && sha256sum EscHotline.exe EscHotlineUpdater.exe > SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          make_latest: false
+          generate_release_notes: true
+          files: |
+            dist/EscHotline.exe
+            dist/EscHotlineUpdater.exe
+            dist/SHA256SUMS.txt
+
+      - name: Keep only the 10 newest dev pre-releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --limit 100 --json tagName,isPrerelease -q '.[] | select(.isPrerelease) | .tagName' \
+            | tail -n +11 | xargs -r -n1 gh release delete --cleanup-tag --yes

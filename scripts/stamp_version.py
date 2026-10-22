@@ -1,7 +1,7 @@
 """Stamp a release version (e.g. from a git tag `v1.2.3`) into the files the
 build reads: src/esc_hotline/_version.py and scripts/version_info.txt.
 
-Usage: python scripts/stamp_version.py v1.2.3
+Usage: python scripts/stamp_version.py v1.2.3   (or v1.2.3-dev.17 for a dev build)
 """
 from __future__ import annotations
 
@@ -13,12 +13,12 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def main(tag: str) -> int:
-    m = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", tag)
+    m = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:-dev\.(\d+))?", tag)
     if not m:
-        print(f"Not a vX.Y.Z version: {tag!r}")
+        print(f"Not a vX.Y.Z[-dev.N] version: {tag!r}")
         return 1
-    ver = ".".join(m.groups())
-    tup = ", ".join(m.groups()) + ", 0"
+    ver = tag.lstrip("v")
+    tup = ", ".join(m.groups()[:3]) + f", {m[4] or 0}"
 
     (ROOT / "src" / "esc_hotline" / "_version.py").write_text(
         '"""Single source of truth for the app version. Release CI overwrites this file\n'
@@ -30,7 +30,7 @@ def main(tag: str) -> int:
     vi = ROOT / "scripts" / "version_info.txt"
     text = vi.read_text(encoding="utf-8")
     text = re.sub(r"(filevers|prodvers)=\([^)]*\)", rf"\1=({tup})", text)
-    text = re.sub(r"(u'(?:File|Product)Version', u')[^']*", rf"\g<1>{ver}.0", text)
+    text = re.sub(r"(u'(?:File|Product)Version', u')[^']*", rf"\g<1>{tup.replace(', ', '.')}", text)
     vi.write_text(text, encoding="utf-8")
     print(f"Stamped {ver}")
     return 0

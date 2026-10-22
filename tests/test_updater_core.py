@@ -9,8 +9,8 @@ from esc_hotline._version import __version__
 
 
 def test_parse_version_accepts_tag_prefix():
-    assert core.parse_version("v1.2.3") == (1, 2, 3)
-    assert core.parse_version("EscHotline 10.0.1\n") == (10, 0, 1)
+    assert core.parse_version("v1.2.3")[:3] == (1, 2, 3)
+    assert core.parse_version("EscHotline 10.0.1\n")[:3] == (10, 0, 1)
     with pytest.raises(ValueError):
         core.parse_version("dev")
 
@@ -72,3 +72,63 @@ def test_both_clis_report_version(capsys):
     assert capsys.readouterr().out.strip() == f"EscHotlineUpdater {__version__}"
     assert app_main(["-v"]) == 0
     assert capsys.readouterr().out.strip() == f"EscHotline {__version__}"
+
+
+def test_dev_versions_sort_between_stable_releases():
+    assert core.is_newer("1.2.0-dev.1", "1.1.9")
+    assert core.is_newer("1.2.0", "1.2.0-dev.9")  # stable beats its own dev builds
+    assert core.is_newer("1.2.0-dev.10", "1.2.0-dev.9")
+    assert not core.is_newer("1.2.0-dev.1", "1.2.0")
+
+
+def test_channel_of_and_dirs():
+    assert core.channel_of("1.2.0-dev.3") == "dev" and core.channel_of("1.2.0") == "stable"
+    assert core.channel_dir("dev").parent == core.channel_dir("stable").parent == core.ROOT_DIR
+
+
+def test_list_releases_splits_channels_and_dev_picks_newest(monkeypatch):
+    data = [
+        {"tag_name": "v1.2.0-dev.2", "prerelease": True, "assets": []},
+        {"tag_name": "v1.2.0-dev.3", "prerelease": True, "assets": []},
+        {"tag_name": "v1.1.1", "prerelease": False, "assets": []},
+        {"tag_name": "v1.1.2", "prerelease": False, "draft": True, "assets": []},
+    ]
+    monkeypatch.setattr(core, "_get_json", lambda url, timeout: data)
+    assert [r.tag for r in core.list_releases("stable")] == ["v1.1.1"]
+    assert core.fetch_latest(channel="dev").version == "1.2.0-dev.3"
+
+
+def test_exe_version_keeps_dev_suffix(monkeypatch):
+    import subprocess
+
+    class R:
+        stdout = "EscHotline 1.2.0-dev.7"
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: R())
+    assert core.exe_version("x") == "1.2.0-dev.7"
+
+
+def test_updater_installs_into_channel_folder_and_migrates_legacy(tmp_path, monkeypatch):
+    from esc_hotline import updater_cli
+
+    monkeypatch.setattr(core, "ROOT_DIR", tmp_path)
+    (tmp_path / "EscHotline.exe").write_bytes(b"flat-old")  # pre-channel layout
+    (tmp_path / "EscHotlineUpdater.exe").write_bytes(b"flat-old-updater")
+    rel = core.Release("1.2.0-dev.4", {}, tag="v1.2.0-dev.4")
+    monkeypatch.setattr(core, "fetch_latest", lambda channel="stable", **k: rel)
+    monkeypatch.setattr(core, "fetch_verified", lambda r, name, dest, progress=None: dest.write_bytes(b"new-" + name.encode()))
+    monkeypatch.setattr(updater_cli.subprocess, "Popen", lambda *a, **k: None)
+    shortcuts = []
+    monkeypatch.setattr(updater_cli, "create_desktop_shortcut", lambda t, name="EscHotline": shortcuts.append((t, name)) or True)
+    monkeypatch.setattr(updater_cli, "_own_channel", lambda: None)
+
+    assert updater_main(["--channel", "dev", "--yes"]) == 0
+    assert (tmp_path / "dev" / "EscHotline.exe").read_bytes() == b"new-EscHotline.exe"
+    assert shortcuts == [(tmp_path / "dev" / "EscHotline.exe", "EscHotline Dev")]
+    assert (tmp_path / "EscHotline.exe").exists()  # a dev install never touches the old flat/stable files
+
+    # old flat app asking to update itself -> moved into stable/, flat leftovers removed
+    monkeypatch.setattr(core, "fetch_latest", lambda channel="stable", **k: core.Release("1.3.0", {}, tag="v1.3.0"))
+    assert updater_main(["--yes", "--target", str(tmp_path / "EscHotline.exe")]) == 0
+    assert (tmp_path / "stable" / "EscHotline.exe").exists()
+    assert not (tmp_path / "EscHotline.exe").exists() and not (tmp_path / "EscHotlineUpdater.exe").exists()

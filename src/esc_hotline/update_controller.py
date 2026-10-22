@@ -21,6 +21,8 @@ from .file_logger import get_logger
 from .settings_store import load_str, save_str
 
 _SKIPPED_KEY = "skipped_update_version"
+CHANNEL = core.channel_of(__version__)  # which release stream this very build belongs to
+OTHER_CHANNEL = "dev" if CHANNEL == "stable" else "stable"
 CREATE_NEW_CONSOLE = 0x00000010
 
 
@@ -56,7 +58,7 @@ class UpdateController(QObject):
         release: Optional[core.Release] = None
         error = ""
         try:
-            release = core.fetch_latest()
+            release = core.fetch_latest(channel=CHANNEL)
             if is_frozen():
                 self._sync_updater(release)
         except Exception as e:  # network down, rate limit, bad JSON, ...
@@ -125,8 +127,29 @@ class UpdateController(QObject):
             QMessageBox.information(self._parent, i18n.tr("update_title"), i18n.tr("update_dev_build"))
             return
         subprocess.Popen(
-            [str(updater), "--wait-pid", str(os.getpid()), "--yes", "--target", sys.executable],
+            [str(updater), "--wait-pid", str(os.getpid()), "--yes", "--channel", CHANNEL, "--target", sys.executable],
             cwd=str(updater.parent),
             creationflags=CREATE_NEW_CONSOLE,
         )
         QApplication.quit()
+
+    # ---- the other channel (dev <-> stable), installed side by side on request ----
+
+    def other_exe(self) -> Path:
+        return core.channel_dir(OTHER_CHANNEL) / core.MAIN_EXE
+
+    def install_other(self) -> None:
+        """Download/update the other channel's build. This app keeps running: it is a separate
+        folder and exe, so nothing here can touch the build the user is currently in."""
+        updater = install_dir() / core.UPDATER_EXE
+        if not is_frozen() or not updater.exists():
+            QMessageBox.information(self._parent, i18n.tr("update_title"), i18n.tr("update_dev_build"))
+            return
+        subprocess.Popen(
+            [str(updater), "--channel", OTHER_CHANNEL], cwd=str(updater.parent), creationflags=CREATE_NEW_CONSOLE
+        )
+
+    def launch_other(self) -> None:
+        exe = self.other_exe()
+        if exe.exists():
+            subprocess.Popen([str(exe)], cwd=str(exe.parent))

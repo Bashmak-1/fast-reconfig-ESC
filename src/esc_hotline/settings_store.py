@@ -5,29 +5,61 @@ survives restarts and is easy to find/inspect.
 """
 from __future__ import annotations
 
-from pathlib import Path
+import shutil
 
 from PyQt6.QtCore import QSettings
 
-SETTINGS_DIR = Path.home() / ".esc_hotline"
+from . import updater_core as core
+from ._version import __version__
+
+# Stable and dev builds each keep their own settings (a dev experiment must not corrupt the
+# stable one); only the few values in shared.ini are common to both.
+CHANNEL = core.channel_of(__version__)
+SETTINGS_DIR = core.channel_dir(CHANNEL)
 SETTINGS_FILE = SETTINGS_DIR / "settings.ini"
+SHARED_FILE = core.ROOT_DIR / "shared.ini"
+_LEGACY_FILE = core.ROOT_DIR / "settings.ini"  # pre-channel layout: everything lived directly in ~/.esc_hotline
 
 _LAST_CONFIG_PATH_KEY = "last_config_path"
+_LANGUAGE_KEY = "language"
 
 
 def _open() -> QSettings:
     SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+    if CHANNEL == "stable" and not SETTINGS_FILE.exists() and _LEGACY_FILE.exists():
+        shutil.copy2(_LEGACY_FILE, SETTINGS_FILE)  # one-time carry-over from the old flat layout
     return QSettings(str(SETTINGS_FILE), QSettings.Format.IniFormat)
 
 
+def _open_shared() -> QSettings:
+    core.ROOT_DIR.mkdir(parents=True, exist_ok=True)
+    return QSettings(str(SHARED_FILE), QSettings.Format.IniFormat)
+
+
+def load_shared_str(key: str, default: str = "") -> str:
+    return str(_open_shared().value(key, default))
+
+
+def save_shared_str(key: str, value: str) -> None:
+    settings = _open_shared()
+    settings.setValue(key, value)
+    settings.sync()
+
+
+def load_language() -> str:
+    return load_shared_str(_LANGUAGE_KEY)
+
+
+def save_language(code: str) -> None:
+    save_shared_str(_LANGUAGE_KEY, code)
+
+
 def load_last_config_path() -> str:
-    return str(_open().value(_LAST_CONFIG_PATH_KEY, ""))
+    return load_shared_str(_LAST_CONFIG_PATH_KEY) or str(_open().value(_LAST_CONFIG_PATH_KEY, ""))
 
 
 def save_last_config_path(path: str) -> None:
-    settings = _open()
-    settings.setValue(_LAST_CONFIG_PATH_KEY, path)
-    settings.sync()
+    save_shared_str(_LAST_CONFIG_PATH_KEY, path)
 
 
 def load_str(key: str, default: str = "") -> str:

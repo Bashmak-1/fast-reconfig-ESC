@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import logging
 from logging.handlers import RotatingFileHandler
-from pathlib import Path
 from typing import Optional
 
-LOG_DIR = Path.home() / ".esc_hotline" / "logs"
+from . import updater_core as core
+from ._version import __version__
+
+LOG_DIR = core.channel_dir(core.channel_of(__version__)) / "logs"
 LOG_FILE = LOG_DIR / "esc_hotline.log"
 
 _LEVEL_MAP = {

@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ["v*.*.*"]
+    tags: ["v*.*.*", "!v*-dev*"]
 
 permissions:
   contents: write # lets the default GITHUB_TOKEN publish a Release for this same repo
@@ -42,4 +42,5 @@ jobs:
             dist/EscHotline.exe
             dist/EscHotlineUpdater.exe
             dist/SHA256SUMS.txt
+          prerelease: false
           generate_release_notes: true
