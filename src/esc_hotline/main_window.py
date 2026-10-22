@@ -113,8 +113,6 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._build_fc_flash_tab(), "Прошивка FC")
         root.addWidget(self._tabs, 1)
 
-        root.addWidget(self._build_log_panel())
-
     def _build_main_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -124,6 +122,8 @@ class MainWindow(QMainWindow):
         self._grid_container = QFrame()
         self._grid_layout = QGridLayout(self._grid_container)
         layout.addWidget(self._grid_container, 1)
+
+        layout.addWidget(self._build_main_log_panel())
         return page
 
     def _build_config_tab(self) -> QWidget:
@@ -257,15 +257,21 @@ class MainWindow(QMainWindow):
 
         return row
 
-    def _build_log_panel(self) -> QFrame:
+    def _build_main_log_panel(self) -> QFrame:
+        """Local to the Головна tab now, not a globally-pinned bar below
+        every tab (the previous design, which permanently stole vertical
+        space from every single tab regardless of whether it was even
+        relevant there). See _append_log()'s own mirroring into
+        hotspot_page/config_editor for why Хотспот and Конфіг aren't left
+        silent by this - they shared this exact feed."""
         panel = QFrame()
         panel.setObjectName("logPanel")
         layout = QVBoxLayout(panel)
-        self._log_view = QPlainTextEdit()
-        self._log_view.setReadOnly(True)
-        self._log_view.setMaximumBlockCount(2000)
-        self._log_view.setStyleSheet("font-family: Consolas, monospace;")
-        layout.addWidget(self._log_view)
+        self._main_log_view = QPlainTextEdit()
+        self._main_log_view.setReadOnly(True)
+        self._main_log_view.setMaximumBlockCount(2000)
+        self._main_log_view.setStyleSheet("font-family: Consolas, monospace;")
+        layout.addWidget(self._main_log_view)
         panel.setMaximumHeight(220)
         return panel
 
@@ -522,7 +528,17 @@ class MainWindow(QMainWindow):
 
     def _append_log(self, level: str, text: str) -> None:
         color = _LOG_COLORS.get(level, "#e6e6e6")
-        self._log_view.appendHtml(f'<span style="color:{color};">{text}</span>')
+        html = f'<span style="color:{color};">{text}</span>'
+        self._main_log_view.appendHtml(html)
+        # Хотспот (hotspot_page) and Конфіг (config_editor) both drive this
+        # SAME shared esc_manager (see _wire_signals()) - every message that
+        # reaches here originates from one of these three tabs' own
+        # actions, so mirror it into whichever of the other two has its own
+        # local activity log too. Without this, an operator working from
+        # the Хотспот or Конфіг tab would never see this feed at all unless
+        # they happened to also be looking at Головна at that exact moment.
+        self.hotspot_page.append_log(level, text)
+        self.config_editor.append_log(level, text)
 
     def _on_discovery_finished(self, found: int, expected: int) -> None:
         self._rescan_btn.setEnabled(self._connected and not self._hotspot_armed)

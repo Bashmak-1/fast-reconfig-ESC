@@ -48,6 +48,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -93,6 +94,7 @@ _PHASE_BANNER_KEY = {
 # (error_connect) waits for a manual retry or the FC itself disappearing.
 _AUTO_CONTINUE_PHASES = {"round_done", "round_warning", "round_error"}
 _RETRY_PHASES = {"error_connect"}
+_LOG_COLORS = {"info": TEXT_MUTED, "warning": ACCENT_AMBER, "error": ACCENT_ERROR, "success": ACCENT_GREEN}
 
 
 class HotspotFlashPage(QWidget):
@@ -211,6 +213,18 @@ class HotspotFlashPage(QWidget):
         self._reset_counters_btn.clicked.connect(self._on_reset_counters_clicked)
         counters_row.addWidget(self._reset_counters_btn)
         root.addLayout(counters_row)
+
+        # Mirrors MainWindow's own activity log here too (see append_log()
+        # and main_window.py's _append_log()) - this tab drives the same
+        # shared EscManager the Головна tab does (module docstring), so
+        # without a local copy its own connect/discover/flash activity
+        # would only ever be visible while looking at a different tab.
+        self._activity_log = QPlainTextEdit()
+        self._activity_log.setReadOnly(True)
+        self._activity_log.setMaximumBlockCount(2000)
+        self._activity_log.setMaximumHeight(160)
+        self._activity_log.setStyleSheet("font-family: Consolas, monospace;")
+        root.addWidget(self._activity_log)
 
         self._refresh_ports()
 
@@ -553,3 +567,9 @@ class HotspotFlashPage(QWidget):
         if not self._armed:
             return
         self._comparison_list.set_row(index, state, detail)
+
+    # ---- activity log (fed by MainWindow._append_log - see that method) ---
+
+    def append_log(self, level: str, text: str) -> None:
+        color = _LOG_COLORS.get(level, TEXT_MUTED)
+        self._activity_log.appendHtml(f'<span style="color:{color};">{text}</span>')

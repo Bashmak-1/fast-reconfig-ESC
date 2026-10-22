@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -37,7 +38,9 @@ from .eeprom_config import ConfigFileError, load_config_file
 from .eeprom_fields import FieldSpec, GROUP_ORDER, applicable_specs, decode_field, encode_field
 from .eeprom_values import format_field_value
 from .mcu_profiles import LAYOUT_SIZE
-from .theme import ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
+from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
+
+_LOG_COLORS = {"info": TEXT_MUTED, "warning": ACCENT_AMBER, "error": ACCENT_ERROR, "success": ACCENT_GREEN}
 
 
 class _ClickToWheelMixin:
@@ -142,6 +145,17 @@ class ConfigEditorPage(QWidget):
         self._empty_label = QLabel()
         self._empty_label.setStyleSheet(f"color: {TEXT_MUTED};")
         self._form_layout.insertWidget(0, self._empty_label)
+
+        # Mirrors MainWindow's own activity log here too (see append_log()
+        # and main_window.py's _append_log()) - Apply's actual flash RESULT
+        # comes back through the same shared EscManager the Головна tab
+        # uses, and was only ever visible there before this.
+        self._activity_log = QPlainTextEdit()
+        self._activity_log.setReadOnly(True)
+        self._activity_log.setMaximumBlockCount(2000)
+        self._activity_log.setMaximumHeight(160)
+        self._activity_log.setStyleSheet("font-family: Consolas, monospace;")
+        root.addWidget(self._activity_log)
 
         self._set_controls_enabled(False)
 
@@ -500,3 +514,9 @@ class ConfigEditorPage(QWidget):
             self._original_config = bytes(self._working_config)
             self._refresh_source_label()
         self.apply_requested.emit(bytes(self._working_config))
+
+    # ---- activity log (fed by MainWindow._append_log - see that method) ---
+
+    def append_log(self, level: str, text: str) -> None:
+        color = _LOG_COLORS.get(level, TEXT_MUTED)
+        self._activity_log.appendHtml(f'<span style="color:{color};">{text}</span>')
