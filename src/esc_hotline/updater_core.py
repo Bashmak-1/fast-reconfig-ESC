@@ -164,6 +164,16 @@ def replace_file(new: Path, target: Path) -> Path:
     return old
 
 
+def remove_legacy_flat() -> None:
+    """Delete exes left directly in ROOT_DIR by the pre-channel layout. Best effort: one of
+    them may be the very process doing the cleanup (a running exe can't be deleted)."""
+    for name in (MAIN_EXE, UPDATER_EXE, MAIN_EXE + ".old", UPDATER_EXE + ".old"):
+        try:
+            (ROOT_DIR / name).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def wait_for_pid(pid: int, timeout_s: float = 60.0) -> bool:
     """True once the process is gone (or never existed), False on timeout."""
     if os.name == "nt":

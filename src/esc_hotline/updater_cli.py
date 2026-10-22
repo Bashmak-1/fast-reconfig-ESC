@@ -153,9 +153,8 @@ def _run(args: argparse.Namespace) -> int:
 
     print("[5/5] Ярлик на робочому столі...")
     print("  готово" if create_desktop_shortcut(target, shortcut_name) else "  не вдалось створити ярлик (не критично)")
-    if legacy_dir is not None:  # the process that called us has exited (wait_for_pid), so the old flat exes can go
-        for name in (core.MAIN_EXE, core.UPDATER_EXE, core.MAIN_EXE + ".old", core.UPDATER_EXE + ".old"):
-            (legacy_dir / name).unlink(missing_ok=True)
+    if legacy_dir is not None:  # the calling app has exited; the flat updater (this process?) is cleaned up by the new app later
+        core.remove_legacy_flat()
     print(f"Готово: {core.MAIN_EXE} {release.version}. Запускаю...")
     subprocess.Popen([str(target)], cwd=str(target.parent))
     for old in olds:

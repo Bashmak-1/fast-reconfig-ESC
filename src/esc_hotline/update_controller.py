@@ -61,6 +61,8 @@ class UpdateController(QObject):
             release = core.fetch_latest(channel=CHANNEL)
             if is_frozen():
                 self._sync_updater(release)
+                if CHANNEL == "stable" and install_dir() == core.channel_dir("stable"):
+                    core.remove_legacy_flat()  # leftovers of the old flat layout, e.g. the updater that migrated us
         except Exception as e:  # network down, rate limit, bad JSON, ...
             flog.info("Update check failed: %s", e)
             error = str(e)

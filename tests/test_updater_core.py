@@ -132,3 +132,55 @@ def test_updater_installs_into_channel_folder_and_migrates_legacy(tmp_path, monk
     assert updater_main(["--yes", "--target", str(tmp_path / "EscHotline.exe")]) == 0
     assert (tmp_path / "stable" / "EscHotline.exe").exists()
     assert not (tmp_path / "EscHotline.exe").exists() and not (tmp_path / "EscHotlineUpdater.exe").exists()
+
+
+def _legacy_home(tmp_path, monkeypatch):
+    from esc_hotline import settings_store as ss
+
+    (tmp_path / "settings.ini").write_text("[General]\nlast_config_path=C:/cfg/a.bin\nfoo=bar\n", encoding="utf-8")
+    monkeypatch.setattr(core, "ROOT_DIR", tmp_path)
+    monkeypatch.setattr(ss, "SHARED_FILE", tmp_path / "shared.ini")
+    monkeypatch.setattr(ss, "_LEGACY_FILE", tmp_path / "settings.ini")
+    return ss
+
+
+def test_old_flat_settings_carry_over_to_stable(tmp_path, monkeypatch):
+    ss = _legacy_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(ss, "CHANNEL", "stable")
+    monkeypatch.setattr(ss, "SETTINGS_DIR", tmp_path / "stable")
+    monkeypatch.setattr(ss, "SETTINGS_FILE", tmp_path / "stable" / "settings.ini")
+    assert ss.load_str("foo") == "bar"
+    assert ss.load_last_config_path() == "C:/cfg/a.bin"  # falls back to the carried-over value
+    ss.save_last_config_path("C:/cfg/b.bin")
+    assert ss.load_last_config_path() == "C:/cfg/b.bin"
+    assert (tmp_path / "settings.ini").read_text(encoding="utf-8").count("a.bin") == 1  # old file left intact
+
+
+def test_dev_seeds_from_stable_but_never_writes_back(tmp_path, monkeypatch):
+    ss = _legacy_home(tmp_path, monkeypatch)
+    (tmp_path / "stable").mkdir()
+    (tmp_path / "stable" / "settings.ini").write_text("[General]\nfoo=stable-value\n", encoding="utf-8")
+    monkeypatch.setattr(ss, "CHANNEL", "dev")
+    monkeypatch.setattr(ss, "SETTINGS_DIR", tmp_path / "dev")
+    monkeypatch.setattr(ss, "SETTINGS_FILE", tmp_path / "dev" / "settings.ini")
+    assert ss.load_str("foo") == "stable-value"
+    ss.save_str("foo", "dev-experiment")
+    assert "stable-value" in (tmp_path / "stable" / "settings.ini").read_text(encoding="utf-8")
+
+
+def test_remove_legacy_flat_survives_a_locked_exe(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setattr(core, "ROOT_DIR", tmp_path)
+    for n in (core.MAIN_EXE, core.UPDATER_EXE):
+        (tmp_path / n).write_bytes(b"x")
+    real_unlink = Path.unlink
+
+    def locked(self, missing_ok=False):
+        if self.name == core.UPDATER_EXE:
+            raise PermissionError("in use")
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", locked)
+    core.remove_legacy_flat()
+    assert not (tmp_path / core.MAIN_EXE).exists() and (tmp_path / core.UPDATER_EXE).exists()

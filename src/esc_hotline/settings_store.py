@@ -26,8 +26,15 @@ _LANGUAGE_KEY = "language"
 
 def _open() -> QSettings:
     SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
-    if CHANNEL == "stable" and not SETTINGS_FILE.exists() and _LEGACY_FILE.exists():
-        shutil.copy2(_LEGACY_FILE, SETTINGS_FILE)  # one-time carry-over from the old flat layout
+    if not SETTINGS_FILE.exists():
+        # One-time seed of a fresh channel folder: the old flat layout's settings (stable), and for
+        # dev also the stable ones, so a new dev install doesn't start with empty ports/CLI paths.
+        # Copy only, never write back - a dev build can't touch stable's file.
+        sources = [core.channel_dir("stable") / "settings.ini"] if CHANNEL == "dev" else []
+        for src in sources + [_LEGACY_FILE]:
+            if src.exists():
+                shutil.copy2(src, SETTINGS_FILE)
+                break
     return QSettings(str(SETTINGS_FILE), QSettings.Format.IniFormat)
 
 
