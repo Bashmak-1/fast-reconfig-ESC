@@ -134,16 +134,25 @@ class UpdateController(QObject):
         elif clicked is update_btn:
             self._launch_updater()
 
-    def _launch_updater(self) -> None:
+    def install_version(self, tag: Optional[str]) -> None:
+        """Install a chosen release over this one (also a downgrade). tag=None means "the latest",
+        resolved by the updater at the moment it runs - so picking the top entry always pulls the newest."""
+        shown = tag or i18n.tr("version_latest_word")
+        answer = QMessageBox.question(
+            self._parent, i18n.tr("update_title"), i18n.tr("version_confirm", version=shown)
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._launch_updater(tag)
+
+    def _launch_updater(self, tag: Optional[str] = None) -> None:
         updater = install_dir() / core.UPDATER_EXE
         if not is_frozen() or not updater.exists():
             QMessageBox.information(self._parent, i18n.tr("update_title"), i18n.tr("update_dev_build"))
             return
-        subprocess.Popen(
-            [str(updater), "--wait-pid", str(os.getpid()), "--yes", "--channel", CHANNEL, "--target", sys.executable],
-            cwd=str(updater.parent),
-            creationflags=CREATE_NEW_CONSOLE,
-        )
+        cmd = [str(updater), "--wait-pid", str(os.getpid()), "--yes", "--channel", CHANNEL, "--target", sys.executable]
+        if tag:
+            cmd += ["--tag", tag]
+        subprocess.Popen(cmd, cwd=str(updater.parent), creationflags=CREATE_NEW_CONSOLE)
         QApplication.quit()
 
     # ---- the other channel (dev <-> stable), installed side by side on request ----

@@ -198,3 +198,21 @@ def test_updater_relaunches_the_app_when_the_update_fails(tmp_path, monkeypatch)
     monkeypatch.setattr(updater_cli, "_launched_new", False)
     assert updater_main(["--yes", "--wait-pid", "999999", "--target", str(app)]) == 1
     assert started == [[str(app)]]  # the app that closed itself for the update is brought back
+
+
+def test_updater_tag_installs_an_older_version_over_a_newer_one(tmp_path, monkeypatch):
+    from esc_hotline import updater_cli
+
+    monkeypatch.setattr(core, "ROOT_DIR", tmp_path)
+    exe = tmp_path / "stable" / "EscHotline.exe"
+    exe.parent.mkdir()
+    exe.write_bytes(b"v1.1.3")
+    old = core.Release("1.1.1", {}, tag="v1.1.1")
+    monkeypatch.setattr(core, "list_releases", lambda ch, *a, **k: [old] if ch == "stable" else [])
+    monkeypatch.setattr(core, "exe_version", lambda p: "1.1.3")
+    monkeypatch.setattr(core, "fetch_verified", lambda r, name, dest, progress=None: dest.write_bytes(b"old-" + name.encode()))
+    monkeypatch.setattr(updater_cli.subprocess, "Popen", lambda *a, **k: None)
+    monkeypatch.setattr(updater_cli, "create_desktop_shortcut", lambda *a, **k: True)
+    monkeypatch.setattr(updater_cli, "_launched_new", False)
+    assert updater_main(["--yes", "--tag", "v1.1.1"]) == 0
+    assert exe.read_bytes() == b"old-EscHotline.exe"  # a downgrade is allowed when explicitly requested
