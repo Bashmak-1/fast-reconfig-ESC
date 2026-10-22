@@ -40,5 +40,5 @@ if errorlevel 1 (
 )
 
 echo.
-echo Done: %SCRIPT_DIR%..\dist\EscHotline.exe
+echo Done: %SCRIPT_DIR%..\dist\EscHotline.exe and EscHotlineUpdater.exe
 pause

@@ -1,7 +1,8 @@
-"""Build a standalone EscHotline.exe with PyInstaller.
+"""Build the standalone exes with PyInstaller.
 
-Usage: .venv\\Scripts\\python.exe scripts\\build_exe.py
-Output: dist\\EscHotline.exe (single file, no console window)
+Usage: .venv/Scripts/python.exe scripts/build_exe.py
+Output: dist/EscHotline.exe (GUI, no console window) and
+        dist/EscHotlineUpdater.exe (console updater, Qt-free)
 """
 from __future__ import annotations
 
@@ -12,15 +13,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def main() -> int:
+def build(name: str, entry: str, windowed: bool) -> int:
     args = [
         sys.executable,
         "-m",
         "PyInstaller",
         "--onefile",
-        "--windowed",
+        "--windowed" if windowed else "--console",
         "--name",
-        "EscHotline",
+        name,
         "--paths",
         str(ROOT / "src"),
         "--distpath",
@@ -33,9 +34,13 @@ def main() -> int:
         "--noupx",
         "--version-file",
         str(ROOT / "scripts" / "version_info.txt"),
-        str(ROOT / "scripts" / "run.py"),
+        str(ROOT / "scripts" / entry),
     ]
     return subprocess.call(args, cwd=ROOT)
+
+
+def main() -> int:
+    return build("EscHotline", "run.py", windowed=True) or build("EscHotlineUpdater", "run_updater.py", windowed=False)
 
 
 if __name__ == "__main__":

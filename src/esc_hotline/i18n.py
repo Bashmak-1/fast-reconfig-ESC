@@ -16,6 +16,32 @@ LANGUAGES: list[tuple[str, str, str, str]] = [
 
 _TRANSLATIONS: dict[str, dict[str, str]] = {
     "window_title": {"en": "EscHotline — AM32-ESC Flasher", "uk": "EscHotline — прошивальник AM32-ESC"},
+    "settings_button": {"en": "⚙ Settings", "uk": "⚙ Налаштування"},
+    "settings_title": {"en": "Settings", "uk": "Налаштування"},
+    "language_label": {"en": "Language:", "uk": "Мова:"},
+    "version_label": {"en": "Version:", "uk": "Версія:"},
+    "update_title": {"en": "Updates", "uk": "Оновлення"},
+    "update_check_button": {"en": "Check for updates", "uk": "Перевірити оновлення"},
+    "update_checking": {"en": "Checking...", "uk": "Перевірка..."},
+    "update_up_to_date": {
+        "en": "You have the latest version ({version}).",
+        "uk": "У вас остання версія ({version}).",
+    },
+    "update_check_failed": {
+        "en": "Could not check for updates (no internet or GitHub unreachable):\n{error}",
+        "uk": "Не вдалось перевірити оновлення (немає інтернету або GitHub недоступний):\n{error}",
+    },
+    "update_available": {
+        "en": "A new version {new} is available (you have {current}).\nUpdate now?",
+        "uk": "Доступна нова версія {new} (у вас {current}).\nОновити зараз?",
+    },
+    "update_now": {"en": "Update", "uk": "Оновити"},
+    "update_later": {"en": "Later", "uk": "Пізніше"},
+    "update_skip": {"en": "Skip this version", "uk": "Пропустити цю версію"},
+    "update_dev_build": {
+        "en": "Updating is only available in the built .exe together with EscHotlineUpdater.exe.",
+        "uk": "Оновлення доступне лише у зібраній .exe разом з EscHotlineUpdater.exe.",
+    },
     "port_label": {"en": "Port:", "uk": "Порт:"},
     "baud_label": {"en": "Baud:", "uk": "Бод:"},
     "connect": {"en": "Connect", "uk": "Підключити"},

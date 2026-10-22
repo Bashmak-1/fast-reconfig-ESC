@@ -27,9 +27,19 @@ jobs:
       # Safety gate: a tag can point at a commit that skipped normal CI.
       - run: pytest tests/
 
+      - name: Stamp the tag's version into the build
+        run: python scripts/stamp_version.py ${{ github.ref_name }}
+
       - run: python scripts/build_exe.py
+
+      - name: Checksums for the in-app updater
+        shell: bash
+        run: cd dist && sha256sum EscHotline.exe EscHotlineUpdater.exe > SHA256SUMS.txt
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/EscHotline.exe
+          files: |
+            dist/EscHotline.exe
+            dist/EscHotlineUpdater.exe
+            dist/SHA256SUMS.txt
           generate_release_notes: true

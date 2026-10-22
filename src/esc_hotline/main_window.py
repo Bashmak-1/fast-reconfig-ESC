@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QSize, pyqtSignal
+from PyQt6.QtCore import QTimer, pyqtSignal
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -37,13 +37,14 @@ from .esc_manager import (
 from .esc_status_widget import EscStatusWidget
 from .fc_flash_widget import FcFlashPage
 from .file_logger import LOG_FILE
-from .flag_icons import FLAG_ICON_BUILDERS
 from .hotspot_line_widget import HotspotLinePage
 from .hotspot_widget import HotspotFlashPage
 from .motor_test_widget import MotorTestPage
 from .serial_transport import list_fc_ports
+from .settings_dialog import SettingsDialog
 from .settings_store import load_last_config_path, save_last_config_path
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
+from .update_controller import UpdateController, is_frozen
 
 BAUD_RATES = [1000000, 500000, 256000, 115200, 57600, 38400, 19200, 14400, 9600]
 GRID_COLUMNS = 4
@@ -88,6 +89,11 @@ class MainWindow(QMainWindow):
         self._append_log("info", i18n.tr("log_file_location", path=str(LOG_FILE)))
         self._restore_last_config_path()
         i18n.signals.language_changed.connect(self._retranslate_ui)
+
+        self._update_controller = UpdateController(self)
+        self._settings_dialog = SettingsDialog(self._update_controller, self)
+        if is_frozen():  # a source checkout has no updater/exe to replace, so don't nag developers
+            QTimer.singleShot(1500, lambda: self._update_controller.check(manual=False))
 
     # ---- UI construction ------------------------------------------------
 
@@ -153,8 +159,8 @@ class MainWindow(QMainWindow):
         return self.fc_flash_page
 
     def _build_top_bar(self) -> QFrame:
-        """App-wide bar, visible above every tab - branding and the language
-        picker only. The port/baud/Підключити controls used to live here
+        """App-wide bar, visible above every tab - branding and the settings
+        button only. The port/baud/Підключити controls used to live here
         too, but that made them look like a single global "connect"
         control that applied everywhere - confirmed confusing in practice
         (operators mixed it up with a given tab's OWN connect/start
@@ -170,16 +176,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(logo)
         layout.addStretch(1)
 
-        self._lang_combo = QComboBox()
-        self._lang_combo.setIconSize(QSize(22, 15))
-        for code, _flag, label, _name in i18n.LANGUAGES:
-            icon = FLAG_ICON_BUILDERS[code]()
-            self._lang_combo.addItem(icon, label, code)
-        current_idx = [c for c, *_ in i18n.LANGUAGES].index(i18n.current_language())
-        self._lang_combo.setCurrentIndex(current_idx)
-        self._lang_combo.setFixedWidth(96)
-        self._lang_combo.currentIndexChanged.connect(self._on_language_selected)
-        layout.addWidget(self._lang_combo)
+        self._settings_btn = QPushButton()
+        self._settings_btn.clicked.connect(self._settings_dialog_exec)
+        layout.addWidget(self._settings_btn)
 
         return bar
 
@@ -348,17 +347,8 @@ class MainWindow(QMainWindow):
 
     # ---- i18n ------------------------------------------------
 
-    def _on_language_selected(self, index: int) -> None:
-        code = self._lang_combo.itemData(index)
-        if code:
-            i18n.set_language(code)
-
-    def _sync_lang_combo(self) -> None:
-        idx = [c for c, *_ in i18n.LANGUAGES].index(i18n.current_language())
-        if self._lang_combo.currentIndex() != idx:
-            self._lang_combo.blockSignals(True)
-            self._lang_combo.setCurrentIndex(idx)
-            self._lang_combo.blockSignals(False)
+    def _settings_dialog_exec(self) -> None:
+        self._settings_dialog.exec()
 
     def _update_connect_toggle_button(self) -> None:
         if self._connected:
@@ -372,7 +362,7 @@ class MainWindow(QMainWindow):
         self._connect_toggle_btn.style().polish(self._connect_toggle_btn)
 
     def _retranslate_ui(self, *_args) -> None:
-        self._sync_lang_combo()
+        self._settings_btn.setText(i18n.tr("settings_button"))
         self.setWindowTitle(i18n.tr("window_title"))
         self._tabs.setTabText(0, i18n.tr("tab_main"))
         self._tabs.setTabText(1, i18n.tr("tab_config"))
