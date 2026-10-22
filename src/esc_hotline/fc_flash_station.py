@@ -124,7 +124,9 @@ DEFAULT_MOTOR_MIN_BOUND = 0
 DEFAULT_MOTOR_MAX_BOUND = 100
 
 DEFAULT_BAUD = 115200
-MAX_CONNECT_ATTEMPTS = 5
+# A freshly DFU-flashed FC needs a while before its USB-CDC port answers (real logs: Write timeout,
+# then 'Access is denied' for ~10s+), so give it ~a minute of 1s polls instead of giving up early.
+MAX_CONNECT_ATTEMPTS = 20
 POLL_INTERVAL_MS = 1000
 # Operator-adjustable via FcFlashStationController.set_poll_interval_ms() -
 # same values/rationale as hotspot_station.py's own constants: a
@@ -174,7 +176,7 @@ PHASE_STYLE = {
     "connecting": (ACCENT_AMBER, "white"),
     "watching": (BG_PANEL, TEXT_MAIN),
     "flashing": (ACCENT_ERROR, "white"),
-    "esc_ready": (ACCENT_GREEN, "white"),
+    "esc_ready": (ACCENT_AMBER, "white"),  # intermediate: only some ESCs done; green is reserved for the true end
     "esc_error": (ACCENT_ERROR, "white"),
     "error_connect": (ACCENT_ERROR, "white"),
     "writing_protocol": (ACCENT_AMBER, "white"),
@@ -196,7 +198,7 @@ PHASE_LABEL = {
     "connecting": "Підключення до FC...",
     "watching": "Стеження за ESC...",
     "flashing": "Прошивка ESC...",
-    "esc_ready": "ESC готові",
+    "esc_ready": "ESC прошито - чекаю решту...",
     "esc_error": "Помилка прошивки ESC",
     "error_connect": "Помилка підключення",
     "writing_protocol": "Запис протоколу й перезавантаження FC...",
@@ -204,7 +206,7 @@ PHASE_LABEL = {
     "connecting_motor_test": "Підключення для тесту моторів...",
     "checking_motor_armed": "Перевірка стану FC (має бути disarmed)...",
     "running_motor_test": "Тест моторів...",
-    "all_done": "Готово! FC і ESC прошиті, протокол встановлено, мотори перевірено.",
+    "all_done": "Готово! FC і ESC прошиті, протокол встановлено.",
     "motor_test_error": "Помилка тесту моторів",
     "protocol_error": "Помилка запису протоколу",
 }
@@ -327,11 +329,19 @@ class _ProtocolWorker(QObject):
             flog.error("Protocol write: no port given.")
             self.done.emit(False, "Немає порту для запису протоколу.")
             return
-        try:
-            transport = SerialTransport(port, baud)
-        except Exception as e:
-            flog.error("Protocol write: could not open %s: %s", port, e)
-            self.done.emit(False, f"Не вдалось відкрити {port}: {e}")
+        transport = None
+        last_error: Optional[Exception] = None
+        for attempt in range(10):  # the port can still be held for a moment right after FourWay disconnect
+            try:
+                transport = SerialTransport(port, baud)
+                break
+            except Exception as e:
+                last_error = e
+                flog.warning("Protocol write: open %s failed (attempt %d/10): %s", port, attempt + 1, e)
+                time.sleep(0.5)
+        if transport is None:
+            flog.error("Protocol write: could not open %s: %s", port, last_error)
+            self.done.emit(False, f"Не вдалось відкрити {port}: {last_error}")
             return
 
         msp = MspClient(transport)
@@ -352,9 +362,10 @@ class _ProtocolWorker(QObject):
                 raise MspError(f"занадто коротка відповідь MSP_ADVANCED_CONFIG ({len(adv_resp.payload)} байт)")
             motor_pwm_rate = int.from_bytes(adv_resp.payload[4:6], "little")
             servo_pwm_rate = int.from_bytes(adv_resp.payload[6:8], "little")
+            cur_idx = adv_resp.payload[3]
             flog.info(
-                "Protocol write: current motor_pwm_rate=%d, servo_pwm_rate=%d (echoed back unchanged)",
-                motor_pwm_rate, servo_pwm_rate,
+                "Protocol write: current protocol=%s (index=%d), motor_pwm_rate=%d, servo_pwm_rate=%d (rates echoed back unchanged)",
+                MOTOR_PROTOCOLS[cur_idx] if cur_idx < len(MOTOR_PROTOCOLS) else "?", cur_idx, motor_pwm_rate, servo_pwm_rate,
             )
 
             status_resp = msp.send(MspCommand.MSP_STATUS_EX, timeout_s=0.5, retries=3)
@@ -569,6 +580,7 @@ class FcFlashStationController(QObject):
         self._motor_test_enabled = True
         self._esc_indices: list[int] = [0]
         self._protocol_index: int = MOTOR_PROTOCOLS.index("DSHOT300")
+        self._fc_flashed_no_protocol = False
         self._last_esc_states: dict[int, str] = {}
         self._tick_seen_states: dict[int, str] = {}
         self._armed = False
@@ -671,6 +683,7 @@ class FcFlashStationController(QObject):
         self._armed = True
         self.armed_changed.emit(True)
         self._connect_attempts = 0
+        self._fc_flashed_no_protocol = False
         self._connect_in_flight = False
         self._dfu_op_in_flight = False
         self._dfu_port_id = None
@@ -713,6 +726,10 @@ class FcFlashStationController(QObject):
         self.armed_changed.emit(False)
         self._poll_timer.stop()
         self._flog.info("=== FC flash station disarmed (was in phase %s) ===", self._phase)
+        if self._fc_flashed_no_protocol:
+            self._flog.warning("FC was flashed but the motor protocol was NOT written - FC is left on its default (STANDARD) protocol")
+            self.dfu_detail_changed.emit("УВАГА: FC прошито, але протокол моторів НЕ записано - FC на стандартному протоколі!")
+            self._fc_flashed_no_protocol = False
         if self._phase not in DFU_PHASES and self._phase not in MOTOR_TEST_PHASES:
             self._disconnect_requested.emit()
         if self._phase in MOTOR_TEST_PHASES:
@@ -1037,6 +1054,7 @@ class FcFlashStationController(QObject):
             self._set_phase("fc_flash_error")
             return
         self.dfu_detail_changed.emit("FC перезавантажується у звичайний режим...")
+        self._fc_flashed_no_protocol = True
         self.fc_flash_succeeded.emit()
         self._set_phase("waiting_fc_normal")
 
@@ -1139,6 +1157,19 @@ class FcFlashStationController(QObject):
         # actually processed.
         self._set_phase("esc_ready" if success == attempted and attempted > 0 else "esc_error")
 
+    def banner_text(self) -> str:
+        """PHASE_LABEL, except "esc_ready" names which ESC(s) are done so
+        a half-finished 2-in-1 board never reads like a finished one."""
+        if self._phase == "esc_ready":
+            done = sorted(i + 1 for i, st in self._last_esc_states.items() if st == "ok")
+            if len(done) == len(self._esc_indices):
+                return f"ESC {', '.join(map(str, done))} готові"
+            if done:
+                return f"ESC {', '.join(map(str, done))} готова - чекаю решту..."
+        if self._phase == "all_done" and self._motor_test_enabled:
+            return "Готово! FC і ESC прошиті, протокол встановлено, мотори перевірено."
+        return PHASE_LABEL[self._phase]
+
     def _on_esc_status_changed(self, index: int, state: str, detail: str, esc_info) -> None:
         if not self._armed or index not in self._esc_indices:
             return
@@ -1171,6 +1202,7 @@ class FcFlashStationController(QObject):
         if not success:
             self._set_phase("protocol_error")
             return
+        self._fc_flashed_no_protocol = False
         if not self._motor_test_enabled:
             self._flog.info("FC flash station: motor-test stage disabled by operator - stopping after protocol write")
             self._set_phase("all_done")

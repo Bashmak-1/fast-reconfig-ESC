@@ -47,7 +47,6 @@ from .fc_flash_station import (
     MAX_POLL_INTERVAL_MS,
     MIN_POLL_INTERVAL_MS,
     POLL_INTERVAL_STEP_MS,
-    PHASE_LABEL,
     PHASE_STYLE,
     RETRY_PHASES,
     FcFlashStationController,
@@ -920,7 +919,7 @@ class FcFlashPage(QWidget):
             f"background-color: {bg}; color: {fg}; font-size: 22px; font-weight: 700;"
             "padding: 24px; border-radius: 8px;"
         )
-        self._banner.setText(PHASE_LABEL[self.controller.phase])
+        self._banner.setText(self.controller.banner_text())
         self._retry_btn.setVisible(self.controller.phase in RETRY_PHASES)
 
     def _update_start_stop_button(self) -> None:
