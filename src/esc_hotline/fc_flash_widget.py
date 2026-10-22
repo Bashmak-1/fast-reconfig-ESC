@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
 
 from .eeprom_config import ConfigFileError, load_config_file
 from .esc_manager import MAX_ESC_COUNT
+from .file_logger import LOG_FILE
 from .fc_flash_station import (
     MAX_CONNECT_ATTEMPTS,
     MAX_POLL_INTERVAL_MS,
@@ -134,6 +135,11 @@ class FcFlashPage(QWidget):
         self._esc_detail_by_index: dict[int, str] = {}
 
         self._build_ui()
+        # Same opening line MainWindow's own activity logs show first - this
+        # tab's activity log is fed from a completely separate signal
+        # (dfu_detail_changed), not main_window._append_log(), so it never
+        # got this line for free the way the other three tabs did.
+        self._activity_log.appendPlainText(f"Файл технічних логів: {LOG_FILE}")
 
         # Same purely-cosmetic faster-than-the-controller countdown refresh
         # as hotspot_line_widget.py - an impatient operator staring at a
