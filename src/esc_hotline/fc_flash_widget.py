@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -249,6 +250,47 @@ class FcFlashPage(QWidget):
         self._start_hint_label.setVisible(False)
         root.addWidget(self._start_hint_label)
 
+        # Per-board running totals - moved up here, well before the chart/
+        # log area below, so they stay on-screen without scrolling even on
+        # a short window. Confirmed real need: an operator who isn't
+        # watching the chart at all (someone else handles motor testing)
+        # still needs these counts visible at a glance at all times.
+        counters_row = QHBoxLayout()
+        self._counters_label = QLabel()
+        self._counters_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        counters_row.addWidget(self._counters_label, 1)
+        # Per-stage running totals (same ManualCounterWidget "Хотспот"'s own
+        # "Всього перероблено" counter uses) - each one auto +1 exactly once
+        # per board, the moment its own stage finishes successfully (see
+        # fc_flash_station.py's fc_flash_succeeded/esc_flash_succeeded/
+        # motor_test_succeeded signals), and freely correctable by hand
+        # with +/- or typing a number, same as the automatic flashed/ok/
+        # errors breakdown above can't always cover (a re-seated ESC
+        # re-flashed by hand, a miscount, a bench restart mid-batch). A
+        # stage whose checkbox is off never fires its signal in the first
+        # place, so nothing special is needed here to respect that.
+        fc_counter_label = QLabel("FC:")
+        fc_counter_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        counters_row.addWidget(fc_counter_label)
+        self._fc_counter = ManualCounterWidget()
+        counters_row.addWidget(self._fc_counter)
+
+        esc_counter_label = QLabel("ESC:")
+        esc_counter_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        counters_row.addWidget(esc_counter_label)
+        self._esc_counter = ManualCounterWidget()
+        counters_row.addWidget(self._esc_counter)
+
+        motor_counter_label = QLabel("Мотори:")
+        motor_counter_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        counters_row.addWidget(motor_counter_label)
+        self._motor_counter = ManualCounterWidget()
+        counters_row.addWidget(self._motor_counter)
+        self._reset_counters_btn = QPushButton("Скинути")
+        self._reset_counters_btn.clicked.connect(self._on_reset_counters_clicked)
+        counters_row.addWidget(self._reset_counters_btn)
+        root.addLayout(counters_row)
+
         self._banner = QLabel()
         self._banner.setWordWrap(True)
         self._banner.setMinimumHeight(90)
@@ -321,14 +363,16 @@ class FcFlashPage(QWidget):
         self._detail_label.setWordWrap(True)
         root.addWidget(self._detail_label)
 
-        # Ramp config for the final automatic motor-test step this tab runs
-        # on its own (see fc_flash_station.py) - SAME shared settings as
-        # "Прогон мотором" (not a separate copy), kept in sync live via
-        # ramp_settings_changed/apply_external_ramp_settings (wired in
-        # main_window.py). Dragging stays blocked automatically while a
-        # test is actually running - RampChartWidget.set_phase() only
-        # allows it in PHASE_IDLE, same safeguard "Прогон мотором" has.
-        motor_rate_row = QHBoxLayout()
+        self._power_cycle_hint_label = QLabel()
+        self._power_cycle_hint_label.setStyleSheet(f"color: {ACCENT_AMBER};")
+        self._power_cycle_hint_label.setWordWrap(True)
+        self._power_cycle_hint_label.setVisible(False)
+        root.addWidget(self._power_cycle_hint_label)
+
+        # "Тест моторів" checkbox always stays visible/clickable on its own
+        # row - only the ramp config + chart below it collapse, so turning
+        # the stage back on is always reachable (see _on_motor_test_toggled).
+        motor_header_row = QHBoxLayout()
         # Stage toggle - unchecked skips the final automatic motor-spin
         # step entirely, whatever earlier stages ran still happen as
         # configured (see fc_flash_station.py's set_motor_test_enabled()
@@ -336,8 +380,27 @@ class FcFlashPage(QWidget):
         self._motor_test_checkbox = QCheckBox("Тест моторів")
         self._motor_test_checkbox.setChecked(True)
         self._motor_test_checkbox.toggled.connect(self._on_motor_test_toggled)
-        motor_rate_row.addWidget(self._motor_test_checkbox)
-        motor_rate_row.addSpacing(24)
+        motor_header_row.addWidget(self._motor_test_checkbox)
+        motor_header_row.addStretch(1)
+        root.addLayout(motor_header_row)
+
+        # Ramp config for the final automatic motor-test step this tab runs
+        # on its own (see fc_flash_station.py) - SAME shared settings as
+        # "Прогон мотором" (not a separate copy), kept in sync live via
+        # ramp_settings_changed/apply_external_ramp_settings (wired in
+        # main_window.py). Dragging stays blocked automatically while a
+        # test is actually running - RampChartWidget.set_phase() only
+        # allows it in PHASE_IDLE, same safeguard "Прогон мотором" has.
+        #
+        # Collapsed entirely (hidden, not just disabled) whenever "Тест
+        # моторів" is unchecked - confirmed real need: with the stage
+        # off, the chart is pure visual clutter pushing everything else
+        # further down the page for no benefit.
+        self._motor_config_container = QWidget()
+        motor_config_layout = QVBoxLayout(self._motor_config_container)
+        motor_config_layout.setContentsMargins(0, 0, 0, 0)
+
+        motor_rate_row = QHBoxLayout()
         motor_rate_row.addWidget(QLabel("Графік рампи:"))
         self._motor_ramp_mode_combo = QComboBox()
         self._motor_ramp_mode_combo.addItem(_RAMP_MODE_LABELS[RAMP_LINEAR], RAMP_LINEAR)
@@ -352,7 +415,7 @@ class FcFlashPage(QWidget):
         self._motor_test_mode_combo.currentIndexChanged.connect(self._on_motor_test_mode_changed)
         motor_rate_row.addWidget(self._motor_test_mode_combo)
         motor_rate_row.addStretch(1)
-        root.addLayout(motor_rate_row)
+        motor_config_layout.addLayout(motor_rate_row)
 
         motor_duration_row = QHBoxLayout()
         motor_duration_row.addWidget(QLabel("Розгін, с:"))
@@ -370,55 +433,30 @@ class FcFlashPage(QWidget):
         self._motor_down_stepper.valueChanged.connect(self._on_motor_duration_changed)
         motor_duration_row.addWidget(self._motor_down_stepper)
         motor_duration_row.addStretch(1)
-        root.addLayout(motor_duration_row)
+        motor_config_layout.addLayout(motor_duration_row)
 
         self._motor_chart = RampChartWidget()
         self._motor_chart.setMinimumHeight(180)
         self._motor_chart.profile_changed.connect(self._on_motor_chart_profile_changed)
-        root.addWidget(self._motor_chart)
+        motor_config_layout.addWidget(self._motor_chart)
 
-        self._power_cycle_hint_label = QLabel()
-        self._power_cycle_hint_label.setStyleSheet(f"color: {ACCENT_AMBER};")
-        self._power_cycle_hint_label.setWordWrap(True)
-        self._power_cycle_hint_label.setVisible(False)
-        root.addWidget(self._power_cycle_hint_label)
+        root.addWidget(self._motor_config_container)
+
+        # Scrollable running history of this tab's own live status text
+        # (DFU progress, ESC per-slot results, protocol write, motor-test
+        # messages - everything fc_flash_station.py reports through
+        # dfu_detail_changed) - below the chart, fixed height, own
+        # scrollbar once it fills up. _dfu_detail_label above still shows
+        # just the latest line for an at-a-glance read; this keeps the
+        # full history instead of silently overwriting it on every update.
+        self._activity_log = QPlainTextEdit()
+        self._activity_log.setReadOnly(True)
+        self._activity_log.setMaximumBlockCount(500)
+        self._activity_log.setFixedHeight(160)
+        self._activity_log.setStyleSheet("font-family: Consolas, monospace;")
+        root.addWidget(self._activity_log)
+
         root.addStretch(1)
-
-        counters_row = QHBoxLayout()
-        self._counters_label = QLabel()
-        self._counters_label.setStyleSheet(f"color: {TEXT_MUTED};")
-        counters_row.addWidget(self._counters_label, 1)
-        # Per-stage running totals (same ManualCounterWidget "Хотспот"'s own
-        # "Всього перероблено" counter uses) - each one auto +1 exactly once
-        # per board, the moment its own stage finishes successfully (see
-        # fc_flash_station.py's fc_flash_succeeded/esc_flash_succeeded/
-        # motor_test_succeeded signals), and freely correctable by hand
-        # with +/- or typing a number, same as the automatic flashed/ok/
-        # errors breakdown above can't always cover (a re-seated ESC
-        # re-flashed by hand, a miscount, a bench restart mid-batch). A
-        # stage whose checkbox is off never fires its signal in the first
-        # place, so nothing special is needed here to respect that.
-        fc_counter_label = QLabel("FC:")
-        fc_counter_label.setStyleSheet(f"color: {TEXT_MUTED};")
-        counters_row.addWidget(fc_counter_label)
-        self._fc_counter = ManualCounterWidget()
-        counters_row.addWidget(self._fc_counter)
-
-        esc_counter_label = QLabel("ESC:")
-        esc_counter_label.setStyleSheet(f"color: {TEXT_MUTED};")
-        counters_row.addWidget(esc_counter_label)
-        self._esc_counter = ManualCounterWidget()
-        counters_row.addWidget(self._esc_counter)
-
-        motor_counter_label = QLabel("Мотори:")
-        motor_counter_label.setStyleSheet(f"color: {TEXT_MUTED};")
-        counters_row.addWidget(motor_counter_label)
-        self._motor_counter = ManualCounterWidget()
-        counters_row.addWidget(self._motor_counter)
-        self._reset_counters_btn = QPushButton("Скинути")
-        self._reset_counters_btn.clicked.connect(self._on_reset_counters_clicked)
-        counters_row.addWidget(self._reset_counters_btn)
-        root.addLayout(counters_row)
 
         self._update_counters_label()
         self._render_banner()
@@ -558,6 +596,7 @@ class FcFlashPage(QWidget):
     def _on_motor_test_toggled(self, checked: bool) -> None:
         save_int(_MOTOR_TEST_ENABLED_KEY, 1 if checked else 0)
         self.controller.set_motor_test_enabled(checked)
+        self._motor_config_container.setVisible(checked)
         self._update_start_stop_button()
 
     def _update_poll_interval_seconds_label(self) -> None:
@@ -579,6 +618,13 @@ class FcFlashPage(QWidget):
         motor_test_enabled = load_int(_MOTOR_TEST_ENABLED_KEY, 1) != 0
         self._motor_test_checkbox.setChecked(motor_test_enabled)
         self.controller.set_motor_test_enabled(motor_test_enabled)
+        # setChecked() above only fires toggled() (and so
+        # _on_motor_test_toggled()'s container show/hide) when the restored
+        # value actually DIFFERS from the checkbox's just-constructed
+        # default (True) - explicitly sync visibility here too, same
+        # "restore can match the constructed default" reasoning as the
+        # ramp-mode/test-mode combo restores below.
+        self._motor_config_container.setVisible(motor_test_enabled)
 
         firmware_path = load_str(_FIRMWARE_PATH_KEY)
         if firmware_path and Path(firmware_path).is_file():
@@ -815,6 +861,8 @@ class FcFlashPage(QWidget):
 
     def _on_dfu_detail_changed(self, detail: str) -> None:
         self._dfu_detail_label.setText(detail)
+        if detail:
+            self._activity_log.appendPlainText(detail)
 
     def _on_power_cycle_hint_changed(self, show: bool) -> None:
         self._power_cycle_hint_shown = show
