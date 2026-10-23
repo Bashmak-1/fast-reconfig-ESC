@@ -262,3 +262,47 @@ def test_motor_test_is_cancelled_with_a_clear_reason_on_the_wrong_protocol():
     finally:
         c._armed = False
         c.shutdown()
+
+
+def test_motor_test_connect_waits_for_the_rebooting_fc_and_retries(monkeypatch):
+    """Real log: the station reconnected 150 ms after MSP_REBOOT, hit the still-dying FC, and went straight
+    to 'motor test error' (and the manual retry failed the same way because of a stale disconnect reply)."""
+    import time
+    from unittest.mock import MagicMock
+
+    from PyQt6.QtWidgets import QApplication
+
+    from esc_hotline import fc_flash_station as fs
+    from esc_hotline.serial_transport import PortInfo
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    c = fs.FcFlashStationController()
+    try:
+        c._armed, c._port_device, c._motor_test_enabled = True, "COM9", True
+        c._motor_connect_requested = MagicMock()
+        monkeypatch.setattr(fs, "list_fc_ports", lambda: [PortInfo("COM9", "FC", "", True)])
+        monkeypatch.setattr(fs.QTimer, "singleShot", staticmethod(lambda ms, fn: None))  # no real waiting
+
+        c._set_phase("writing_protocol")
+        c._on_protocol_write_done(True, "ok", True)  # FC rebooted
+        assert c.phase == "waiting_fc_for_motor_test"
+        c._on_poll_tick()  # same port is still listed, but the FC has only just been told to reboot
+        assert c.phase == "waiting_fc_for_motor_test" and not c._motor_connect_requested.emit.called
+
+        c._after_protocol_since = time.monotonic() - 10
+        c._on_poll_tick()
+        assert c.phase == "connecting_motor_test" and c._motor_connect_requested.emit.call_count == 1
+
+        for attempt in range(1, fs.MOTOR_CONNECT_ATTEMPTS):  # failed connects are retried...
+            c._on_motor_connection_state_changed(False)
+            assert c.phase == "connecting_motor_test"
+            c._retry_motor_connect()
+            assert c._motor_connect_attempts == attempt + 1
+        c._on_motor_connection_state_changed(False)  # ...until the budget is used up
+        assert c.phase == "motor_test_error"
+
+        c.retry()  # the manual retry must not be undone by a stale "disconnected" reply
+        assert c.phase == "connecting_motor_test" and c._motor_connect_attempts == 1
+    finally:
+        c._armed = False
+        c.shutdown()

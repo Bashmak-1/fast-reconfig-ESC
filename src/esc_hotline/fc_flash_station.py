@@ -126,6 +126,7 @@ DEFAULT_MOTOR_MIN_BOUND = 0
 DEFAULT_MOTOR_MAX_BOUND = 100
 
 DEFAULT_BAUD = 115200
+MOTOR_CONNECT_ATTEMPTS = 5  # motor-test connect tries (1.5 s apart) before giving up
 # A freshly DFU-flashed FC needs a while before its USB-CDC port answers (real logs: Write timeout,
 # then 'Access is denied' for ~10s+), so give it ~a minute of 1s polls instead of giving up early.
 MAX_CONNECT_ATTEMPTS = 20
@@ -612,6 +613,7 @@ class FcFlashStationController(QObject):
         self._write_protocol_enabled = True  # operator checkbox: fix a wrong protocol (write + reboot) or only report it
         self._motor_detected_protocol = -1  # what the motor-test connection read from the FC (-1 = unknown)
         self._motor_battery_v = -1.0
+        self._motor_connect_attempts = 0
         self._after_protocol_since = 0.0
         self._flashed_indices: set[int] = set()  # ESCs flashed on the board currently in place (for the status lines)
         self._flashing_indices: list[int] = []  # what the running flash batch covers (for the banner)
@@ -787,9 +789,8 @@ class FcFlashStationController(QObject):
         elif self._phase == "protocol_error":
             self._begin_protocol_write()
         elif self._phase == "motor_test_error":
-            self._motor_disconnect_requested.emit()
             self._set_phase("connecting_motor_test")
-            self._motor_connect_requested.emit(self._port_device or "", DEFAULT_BAUD)
+            self._begin_motor_connect()
 
     def reset_counters(self) -> None:
         self._counter_flashed = 0
@@ -937,6 +938,8 @@ class FcFlashStationController(QObject):
             return
 
         if self._phase == "waiting_fc_for_motor_test":
+            if time.monotonic() - self._after_protocol_since < 3.0:
+                return  # real log: connecting 150 ms after MSP_REBOOT reached the still-dying FC and failed
             # NOT the same re-enumeration trick as "waiting_fc_normal" -
             # that one relies on the old port already being gone from
             # list_fc_ports() by snapshot time (DFU bootloader mode drops
@@ -966,7 +969,7 @@ class FcFlashStationController(QObject):
                     self._port_device = chosen
                     self.port_changed.emit(chosen)
                 self._set_phase("connecting_motor_test")
-                self._motor_connect_requested.emit(self._port_device, DEFAULT_BAUD)
+                self._begin_motor_connect()
             return
 
         if self._phase == "all_done":
@@ -1306,17 +1309,36 @@ class FcFlashStationController(QObject):
             self._set_phase("all_done")
             return
         if rebooted:
+            self._after_protocol_since = time.monotonic()
             self._set_phase("waiting_fc_for_motor_test")
         else:  # the FC was never rebooted, so there is nothing to wait for
             self._set_phase("connecting_motor_test")
-            self._motor_connect_requested.emit(self._port_device or "", DEFAULT_BAUD)
+            self._begin_motor_connect()
 
     # ---- final motor-test phase (reuses MotorTestManager as-is) ---------
+
+    def _begin_motor_connect(self) -> None:
+        self._motor_connect_attempts = 0
+        self._try_motor_connect()
+
+    def _try_motor_connect(self) -> None:
+        self._motor_connect_attempts += 1
+        self._motor_connect_requested.emit(self._port_device or "", DEFAULT_BAUD)
+
+    def _retry_motor_connect(self) -> None:
+        if self._armed and self._phase == "connecting_motor_test":
+            self._try_motor_connect()
 
     def _on_motor_connection_state_changed(self, connected: bool) -> None:
         if not self._armed or self._phase != "connecting_motor_test":
             return
         if not connected:
+            if self._motor_connect_attempts < MOTOR_CONNECT_ATTEMPTS:
+                self.dfu_detail_changed.emit(
+                    f"FC ще не готовий для тесту моторів (спроба {self._motor_connect_attempts} з {MOTOR_CONNECT_ATTEMPTS}) - пробую ще раз..."
+                )
+                QTimer.singleShot(1500, self._retry_motor_connect)
+                return
             self.dfu_detail_changed.emit("Не вдалось підключитись для тесту моторів.")
             self._set_phase("motor_test_error")
             return

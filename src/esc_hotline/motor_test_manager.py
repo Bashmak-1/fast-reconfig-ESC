@@ -422,6 +422,9 @@ class MotorTestManager(QObject):
         self._phase_start_value = self._current
 
     def _on_tick(self) -> None:
+        if self._phase == PHASE_IDLE or self._msp is None:
+            self._timer.stop()  # a stale tick after the run ended / the port was closed: nothing to send
+            return
         now = time.monotonic()
         elapsed_s = now - self._phase_start_time
 
@@ -439,7 +442,8 @@ class MotorTestManager(QObject):
         try:
             self._send_all(self._current)
         except Exception as e:
-            self._log("error", f"Помилка запису MSP_SET_MOTOR: {e} - зупиняю.")
+            self._log("error", f"Помилка запису MSP_SET_MOTOR: {e} - зупиняю. (фаза {self._phase}, "
+                               f"таймер {'активний' if self._timer.isActive() else 'зупинений'})")
             self._stop_timer_and_settle()
             return
 
