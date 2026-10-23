@@ -112,7 +112,7 @@ _DEFAULT_PROTOCOL_INDEX = MOTOR_PROTOCOLS.index("DSHOT300")
 # *_error phases are left out entirely - the progress bar hides for those.
 _BUSY_PHASES_NO_PERCENT = frozenset({
     "waiting_device", "resetting_fc", "waiting_fc_normal", "connecting", "watching", "flashing", "esc_ready",
-    "writing_protocol", "waiting_fc_for_motor_test", "connecting_motor_test",
+    "writing_protocol", "waiting_fc_after_protocol", "waiting_fc_for_motor_test", "connecting_motor_test",
     "checking_motor_armed", "running_motor_test",
 })
 

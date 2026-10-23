@@ -182,6 +182,7 @@ PHASE_STYLE = {
     "error_connect": (ACCENT_ERROR, "white"),
     "writing_protocol": (ACCENT_AMBER, "white"),
     "waiting_fc_for_motor_test": (BG_PANEL, TEXT_MAIN),
+    "waiting_fc_after_protocol": (ACCENT_AMBER, "white"),
     "connecting_motor_test": (ACCENT_AMBER, "white"),
     "checking_motor_armed": (ACCENT_AMBER, "white"),
     "running_motor_test": (ACCENT_AMBER, "white"),
@@ -204,6 +205,7 @@ PHASE_LABEL = {
     "error_connect": "Помилка підключення",
     "writing_protocol": "Запис протоколу й перезавантаження FC...",
     "waiting_fc_for_motor_test": "Очікування перезавантаження FC після зміни протоколу...",
+    "waiting_fc_after_protocol": "Протокол записано, FC перезавантажується...",
     "connecting_motor_test": "Підключення для тесту моторів...",
     "checking_motor_armed": "Перевірка стану FC (має бути disarmed)...",
     "running_motor_test": "Тест моторів...",
@@ -439,6 +441,8 @@ class FcFlashStationController(QObject):
     private MotorTestManager (for the final motor-test phase), and drives
     the combined loop: idle -> waiting_device -> [flashing_fc ->
     resetting_fc ->] waiting_fc_normal -> connecting -> watching ->
+    (right after a DFU flash: connecting -> writing_protocol -> waiting_fc_after_protocol -> connecting, so the
+    FC never stays on the default STANDARD protocol if an ESC later fails to answer)
     [flashing ->] esc_ready -> writing_protocol -> waiting_fc_for_motor_test
     -> connecting_motor_test -> checking_motor_armed -> running_motor_test
     -> all_done (or one of several *_error phases along the way).
@@ -586,6 +590,8 @@ class FcFlashStationController(QObject):
         self._esc_indices: list[int] = [0]
         self._protocol_index: int = MOTOR_PROTOCOLS.index("DSHOT300")
         self._fc_flashed_no_protocol = False
+        self._protocol_stage_early = False  # the protocol write now running is the pre-ESC one
+        self._after_protocol_since = 0.0
         self._last_esc_states: dict[int, str] = {}
         self._tick_seen_states: dict[int, str] = {}
         self._armed = False
@@ -689,6 +695,7 @@ class FcFlashStationController(QObject):
         self.armed_changed.emit(True)
         self._connect_attempts = 0
         self._fc_flashed_no_protocol = False
+        self._protocol_stage_early = False
         self._connect_in_flight = False
         self._dfu_op_in_flight = False
         self._dfu_port_id = None
@@ -880,6 +887,25 @@ class FcFlashStationController(QObject):
             else:
                 self._disconnect_requested.emit()
                 self._set_phase("waiting_fc_normal")
+            return
+
+        if self._phase == "waiting_fc_after_protocol":
+            if time.monotonic() - self._after_protocol_since < 3.0:
+                return  # let the FC actually go down first, or we would reconnect to the dying session
+            current_ports = list_fc_ports()
+            if self._port_device and self._port_device in {info.device for info in current_ports}:
+                chosen: Optional[str] = self._port_device
+            else:
+                chosen = self._pick_reenumerated_port(
+                    [info for info in current_ports if info.device not in self._pre_dfu_port_snapshot]
+                )
+            if chosen is not None:
+                if chosen != self._port_device:
+                    self._flog.info("FC flash station: FC re-enumerated after protocol reboot: %s -> %s", self._port_device, chosen)
+                    self._port_device = chosen
+                    self.port_changed.emit(chosen)
+                self._connect_attempts = 0
+                self._set_phase("connecting")
             return
 
         if self._phase == "waiting_fc_for_motor_test":
@@ -1098,6 +1124,15 @@ class FcFlashStationController(QObject):
                 )
                 self._begin_protocol_write()
                 return
+            if self._fc_flashed_no_protocol:
+                # A freshly DFU-flashed FC is back on INAV's default (STANDARD) protocol. Writing the
+                # motor protocol only AFTER every ESC is done left boards on STANDARD whenever an ESC
+                # never answered and the operator gave up (real logs: ~3% of boards) - so do it now,
+                # first thing, independent of the ESC outcome. The usual final write still follows.
+                self._flog.info("FC flash station: freshly flashed FC - writing the motor protocol BEFORE the ESC stage")
+                self._protocol_stage_early = True
+                self._begin_protocol_write()
+                return
             self._last_esc_states = {}
             self._tick_seen_states = {}
             for i in self._esc_indices:
@@ -1208,6 +1243,11 @@ class FcFlashStationController(QObject):
             self._set_phase("protocol_error")
             return
         self._fc_flashed_no_protocol = False
+        if self._protocol_stage_early:
+            self._protocol_stage_early = False
+            self._after_protocol_since = time.monotonic()
+            self._set_phase("waiting_fc_after_protocol")  # FC reboots; then reconnect and carry on with the ESCs
+            return
         if not self._motor_test_enabled:
             self._flog.info("FC flash station: motor-test stage disabled by operator - stopping after protocol write")
             self._set_phase("all_done")

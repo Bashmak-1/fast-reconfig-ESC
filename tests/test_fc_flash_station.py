@@ -67,3 +67,45 @@ def test_multiple_new_ports_prefers_the_likely_fc_one():
 def test_multiple_new_ports_with_none_marked_likely_falls_back_to_first():
     candidates = [_port("COM5"), _port("COM6")]
     assert choose_reenumerated_port(candidates) == "COM5"
+
+
+def test_freshly_flashed_fc_gets_its_protocol_before_the_esc_stage(monkeypatch):
+    """Real-log regression: a board whose ESC never answered stayed on STANDARD because the protocol
+    was only written after every ESC was done. Now it is written first, right after the FC reconnects."""
+    import time
+    from unittest.mock import MagicMock
+
+    from PyQt6.QtWidgets import QApplication
+
+    from esc_hotline import fc_flash_station as fs
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    c = fs.FcFlashStationController()
+    try:
+        c._armed = True
+        c._port_device = "COM9"
+        c._flash_esc_enabled = True
+        c._esc_indices = [0, 1]
+        c._fc_flashed_no_protocol = True  # set by the DFU-reset step
+        c._write_protocol_requested = MagicMock()
+        c._disconnect_requested = MagicMock()
+        monkeypatch.setattr(fs, "list_fc_ports", lambda: [])
+
+        c._set_phase("connecting")
+        c._on_connection_state_changed(True, 2)  # FC answered
+        assert c.phase == "writing_protocol" and c._protocol_stage_early  # NOT "watching"
+        c._disconnect_requested.emit.assert_called_once()
+
+        c._on_connection_state_changed(False, 0)  # FourWay confirmed closed -> the write starts
+        c._write_protocol_requested.emit.assert_called_once_with("COM9", fs.DEFAULT_BAUD, c._protocol_index)
+
+        c._on_protocol_write_done(True, "ok")
+        assert c.phase == "waiting_fc_after_protocol" and not c._fc_flashed_no_protocol
+
+        c._after_protocol_since = time.monotonic() - 10  # reboot settle time has passed
+        monkeypatch.setattr(fs, "list_fc_ports", lambda: [PortInfo("COM9", "FC", "", True)])
+        c._on_poll_tick()
+        assert c.phase == "connecting"  # back to the normal ESC stage via a reconnect
+    finally:
+        c._armed = False
+        c.shutdown()
