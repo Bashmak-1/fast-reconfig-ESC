@@ -11,6 +11,8 @@ write, per-command ACK/timeout detail. Kept on disk specifically so
 from __future__ import annotations
 
 import logging
+import platform
+import sys
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
@@ -45,6 +47,11 @@ def get_logger() -> logging.Logger:
         logger.addHandler(handler)
         logger.info("=" * 70)
         logger.info("Session started - log file: %s", LOG_FILE)
+        logger.info(
+            "App version: %s (%s channel, %s) | %s | Python %s",
+            __version__, core.channel_of(__version__), "exe " + sys.executable if getattr(sys, "frozen", False) else "from source",
+            platform.platform(), platform.python_version(),
+        )
 
     _logger = logger
     return logger
