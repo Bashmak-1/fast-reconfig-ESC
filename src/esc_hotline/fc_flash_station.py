@@ -325,13 +325,13 @@ class _ProtocolWorker(QObject):
     reach this one-shot provisioning step, or vice versa.
     """
 
-    done = pyqtSignal(bool, str)
+    done = pyqtSignal(bool, str, bool)  # success, message, rebooted (False = the FC was left running as is)
 
-    def write_protocol_and_reboot(self, port: str, baud: int, protocol_index: int) -> None:
+    def write_protocol_and_reboot(self, port: str, baud: int, protocol_index: int, allow_write: bool = True) -> None:
         flog = get_logger()
         if not port:
             flog.error("Protocol write: no port given.")
-            self.done.emit(False, "Немає порту для запису протоколу.")
+            self.done.emit(False, "Немає порту для запису протоколу.", False)
             return
         transport = None
         last_error: Optional[Exception] = None
@@ -345,7 +345,7 @@ class _ProtocolWorker(QObject):
                 time.sleep(0.5)
         if transport is None:
             flog.error("Protocol write: could not open %s: %s", port, last_error)
-            self.done.emit(False, f"Не вдалось відкрити {port}: {last_error}")
+            self.done.emit(False, f"Не вдалось відкрити {port}: {last_error}", False)
             return
 
         msp = MspClient(transport)
@@ -372,6 +372,21 @@ class _ProtocolWorker(QObject):
                 MOTOR_PROTOCOLS[cur_idx] if cur_idx < len(MOTOR_PROTOCOLS) else "?", cur_idx, motor_pwm_rate, servo_pwm_rate,
             )
 
+            name = MOTOR_PROTOCOLS[protocol_index] if 0 <= protocol_index < len(MOTOR_PROTOCOLS) else str(protocol_index)
+            cur_name = MOTOR_PROTOCOLS[cur_idx] if 0 <= cur_idx < len(MOTOR_PROTOCOLS) else str(cur_idx)
+            if cur_idx == protocol_index:
+                # Detect first: already right -> nothing to write, and no pointless EEPROM write + reboot.
+                transport.close()
+                flog.info("Protocol write: FC already on %s - nothing to write, no reboot", name)
+                self.done.emit(True, f"Протокол {name} вже встановлено - перезапуск не потрібен.", False)
+                return
+            if not allow_write:
+                transport.close()
+                flog.warning("Protocol write: FC is on %s, expected %s - auto-write is switched off, left as is", cur_name, name)
+                self.done.emit(True, f"УВАГА: на FC протокол {cur_name}, а потрібен {name}. Автозапис вимкнено - протокол НЕ змінено.", False)
+                return
+            flog.info("Protocol write: wrong protocol %s (expected %s) - writing and rebooting", cur_name, name)
+
             status_resp = msp.send(MspCommand.MSP_STATUS_EX, timeout_s=0.5, retries=3)
             if len(status_resp.payload) < 15:
                 raise MspError(f"занадто коротка відповідь MSP_STATUS_EX ({len(status_resp.payload)} байт)")
@@ -379,7 +394,6 @@ class _ProtocolWorker(QObject):
             if arming_flags & ARMED_BIT:
                 raise MspError("FC заармлений (ARMED) - запис протоколу заблоковано")
 
-            name = MOTOR_PROTOCOLS[protocol_index] if 0 <= protocol_index < len(MOTOR_PROTOCOLS) else str(protocol_index)
             payload = build_advanced_config_payload(protocol_index, motor_pwm_rate, servo_pwm_rate)
             flog.info("Protocol write: writing MSP_SET_ADVANCED_CONFIG, protocol=%s (index=%d)", name, protocol_index)
             msp.send(MspCommand.MSP_SET_ADVANCED_CONFIG, payload, timeout_s=0.3, retries=2)
@@ -395,12 +409,12 @@ class _ProtocolWorker(QObject):
         except Exception as e:
             flog.error("Protocol write failed: %s", e)
             transport.close()
-            self.done.emit(False, f"Не вдалось записати протокол: {e}")
+            self.done.emit(False, f"Не вдалось записати протокол: {e}", False)
             return
 
         transport.close()
         flog.info("Protocol write: done successfully (%s)", name)
-        self.done.emit(True, f"Протокол {name} записано. FC перезавантажується...")
+        self.done.emit(True, f"Був неправильний протокол {cur_name} - записано {name}. FC перезавантажується...", True)
 
 
 class _ProtocolWorkerThread:
@@ -515,7 +529,7 @@ class FcFlashStationController(QObject):
     _set_config_path_requested = pyqtSignal(str)
 
     # Internal-only: reach the private _ProtocolWorker.
-    _write_protocol_requested = pyqtSignal(str, int, int)  # port, baud, protocol_index
+    _write_protocol_requested = pyqtSignal(str, int, int, bool)  # port, baud, protocol_index, allow_write
 
     # Internal-only: reach the private _DfuWorker.
     _list_devices_requested = pyqtSignal(str)
@@ -575,6 +589,8 @@ class FcFlashStationController(QObject):
         self._motor_set_test_mode_requested.connect(motor_mgr.set_test_mode)
         self._motor_set_speed_bounds_requested.connect(motor_mgr.set_speed_bounds)
         motor_mgr.connection_state_changed.connect(self._on_motor_connection_state_changed)
+        motor_mgr.protocol_detected.connect(self._on_motor_protocol_detected)
+        motor_mgr.battery_voltage.connect(self._on_motor_battery_voltage)
         motor_mgr.motor_count_detected.connect(self._on_motor_count_detected)
         motor_mgr.armed_check_result.connect(self._on_motor_armed_check_result)
         motor_mgr.phase_changed.connect(self._on_motor_phase_changed)
@@ -593,6 +609,9 @@ class FcFlashStationController(QObject):
         self._protocol_index: int = MOTOR_PROTOCOLS.index("DSHOT300")
         self._fc_flashed_no_protocol = False
         self._protocol_stage_early = False  # the protocol write now running is the pre-ESC one
+        self._write_protocol_enabled = True  # operator checkbox: fix a wrong protocol (write + reboot) or only report it
+        self._motor_detected_protocol = -1  # what the motor-test connection read from the FC (-1 = unknown)
+        self._motor_battery_v = -1.0
         self._after_protocol_since = 0.0
         self._flashed_indices: set[int] = set()  # ESCs flashed on the board currently in place (for the status lines)
         self._flashing_indices: list[int] = []  # what the running flash batch covers (for the banner)
@@ -687,6 +706,11 @@ class FcFlashStationController(QObject):
 
     def set_protocol_index(self, index: int) -> None:
         self._protocol_index = index
+
+    def set_write_protocol_enabled(self, enabled: bool) -> None:
+        """True: a wrong FC protocol is fixed (write + reboot). False: it is only detected and reported;
+        the FC is never rewritten or rebooted by this tool."""
+        self._write_protocol_enabled = enabled
 
     def set_config(self, path: str, config_bytes: bytes) -> None:
         self._config_bytes = config_bytes
@@ -1112,7 +1136,9 @@ class FcFlashStationController(QObject):
             # "waiting_fc_for_motor_test" can tell the FC's new port apart
             # from whatever was already there - same trick as the DFU reset.
             self._pre_dfu_port_snapshot = {info.device for info in list_fc_ports()}
-            self._write_protocol_requested.emit(self._port_device or "", DEFAULT_BAUD, self._protocol_index)
+            self._write_protocol_requested.emit(
+                self._port_device or "", DEFAULT_BAUD, self._protocol_index, self._write_protocol_enabled
+            )
             return
         if self._phase != "connecting":
             return
@@ -1128,7 +1154,7 @@ class FcFlashStationController(QObject):
                 )
                 self._begin_protocol_write()
                 return
-            if self._fc_flashed_no_protocol:
+            if self._fc_flashed_no_protocol and self._write_protocol_enabled:
                 # A freshly DFU-flashed FC is back on INAV's default (STANDARD) protocol. Writing the
                 # motor protocol only AFTER every ESC is done left boards on STANDARD whenever an ESC
                 # never answered and the operator gave up (real logs: ~3% of boards) - so do it now,
@@ -1257,7 +1283,7 @@ class FcFlashStationController(QObject):
         self._set_phase("writing_protocol")
         self._disconnect_requested.emit()
 
-    def _on_protocol_write_done(self, success: bool, message: str) -> None:
+    def _on_protocol_write_done(self, success: bool, message: str, rebooted: bool = True) -> None:
         if not self._armed or self._phase != "writing_protocol":
             return
         self._flog.info("FC flash station: protocol write done: success=%s, message=%s", success, message)
@@ -1268,14 +1294,22 @@ class FcFlashStationController(QObject):
         self._fc_flashed_no_protocol = False
         if self._protocol_stage_early:
             self._protocol_stage_early = False
-            self._after_protocol_since = time.monotonic()
-            self._set_phase("waiting_fc_after_protocol")  # FC reboots; then reconnect and carry on with the ESCs
+            if rebooted:
+                self._after_protocol_since = time.monotonic()
+                self._set_phase("waiting_fc_after_protocol")  # FC reboots; then reconnect and carry on with the ESCs
+            else:
+                self._connect_attempts = 0  # nothing was rebooted: reconnect straight away
+                self._set_phase("connecting")
             return
         if not self._motor_test_enabled:
             self._flog.info("FC flash station: motor-test stage disabled by operator - stopping after protocol write")
             self._set_phase("all_done")
             return
-        self._set_phase("waiting_fc_for_motor_test")
+        if rebooted:
+            self._set_phase("waiting_fc_for_motor_test")
+        else:  # the FC was never rebooted, so there is nothing to wait for
+            self._set_phase("connecting_motor_test")
+            self._motor_connect_requested.emit(self._port_device or "", DEFAULT_BAUD)
 
     # ---- final motor-test phase (reuses MotorTestManager as-is) ---------
 
@@ -1299,6 +1333,12 @@ class FcFlashStationController(QObject):
         self._set_phase("checking_motor_armed")
         self._motor_check_disarmed_requested.emit()
 
+    def _on_motor_protocol_detected(self, index: int, _name: str) -> None:
+        self._motor_detected_protocol = index
+
+    def _on_motor_battery_voltage(self, volts: float) -> None:
+        self._motor_battery_v = volts
+
     def _on_motor_count_detected(self, count: int) -> None:
         self._motor_count_for_test = count
 
@@ -1309,10 +1349,26 @@ class FcFlashStationController(QObject):
             self.dfu_detail_changed.emit(f"Тест моторів заблоковано: {detail or 'не вдалось підтвердити стан disarmed'}")
             self._set_phase("motor_test_error")
             return
+        if self._motor_detected_protocol >= 0 and self._motor_detected_protocol != self._protocol_index:
+            have = MOTOR_PROTOCOLS[self._motor_detected_protocol] if self._motor_detected_protocol < len(MOTOR_PROTOCOLS) else "?"
+            want = MOTOR_PROTOCOLS[self._protocol_index] if 0 <= self._protocol_index < len(MOTOR_PROTOCOLS) else "?"
+            self.dfu_detail_changed.emit(
+                f"Тест моторів скасовано: на FC протокол {have}, а потрібен {want} - ESC не запуститься. "
+                "Увімкніть запис протоколу або виправте його вручну."
+            )
+            self._set_phase("motor_test_error")
+            return
         if self._motor_count_for_test == 0:
             self.dfu_detail_changed.emit("FC не повідомляє жодного мотора - нема що тестувати.")
             self._set_phase("motor_test_error")
             return
+        if 0.0 <= self._motor_battery_v < 1.0:
+            # not a block: INAV reports 0 V when no battery sensor is configured, too - but a test on an
+            # unpowered ESC spins nothing, so say so instead of silently "verifying" the motors
+            self.dfu_detail_changed.emit(
+                f"Увага: напруга живлення {self._motor_battery_v:.1f} В - схоже, на ESC не подано живлення; "
+                "мотори можуть не обертатись."
+            )
         self._flog.info("FC flash station: starting final motor test (%d motor(s))", self._motor_count_for_test)
         self._set_phase("running_motor_test")
         self._motor_start_sweep_requested.emit(

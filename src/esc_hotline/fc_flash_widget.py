@@ -100,6 +100,7 @@ _POLL_INTERVAL_KEY = "fc_flash_poll_interval_ms"
 _FLASH_FC_ENABLED_KEY = "fc_flash_stage_fc_enabled"
 _FLASH_ESC_ENABLED_KEY = "fc_flash_stage_esc_enabled"
 _MOTOR_TEST_ENABLED_KEY = "fc_flash_stage_motor_test_enabled"
+_WRITE_PROTOCOL_KEY = "fc_flash_write_protocol"
 _DEFAULT_ESC_INDICES = (0, 1)  # ESC 1 + ESC 2 - the common case is a 2-in-1 ESC board on one FC
 
 _FIRMWARE_FILTER = "Firmware (*.hex *.bin);;All files (*)"
@@ -244,11 +245,20 @@ class FcFlashPage(QWidget):
         root.addLayout(port_row)
 
         protocol_row = QHBoxLayout()
-        protocol_row.addWidget(QLabel("Протокол (для довідки, не записується автоматично):"))
+        protocol_row.addWidget(QLabel("Потрібний протокол FC:"))
         self._protocol_combo = QComboBox()
         self._protocol_combo.addItems(MOTOR_PROTOCOLS)
         self._protocol_combo.currentIndexChanged.connect(self._on_protocol_changed)
         protocol_row.addWidget(self._protocol_combo)
+        self._write_protocol_checkbox = QCheckBox("Виправляти протокол (запис + перезапуск FC)")
+        self._write_protocol_checkbox.setChecked(True)
+        self._write_protocol_checkbox.setToolTip(
+            "Спершу визначається протокол на FC. Правильний - пропускається без перезапуску. "
+            "Неправильний - записується потрібний і FC перезапускається. Без галочки лише повідомляє про невідповідність."
+        )
+        self._write_protocol_checkbox.toggled.connect(self._on_write_protocol_toggled)
+        protocol_row.addSpacing(16)
+        protocol_row.addWidget(self._write_protocol_checkbox)
         protocol_row.addStretch(1)
         root.addLayout(protocol_row)
 
@@ -605,6 +615,10 @@ class FcFlashPage(QWidget):
         self._esc_menu_btn.setEnabled(checked)
         self._update_start_stop_button()
 
+    def _on_write_protocol_toggled(self, checked: bool) -> None:
+        save_int(_WRITE_PROTOCOL_KEY, 1 if checked else 0)
+        self.controller.set_write_protocol_enabled(checked)
+
     def _on_motor_test_toggled(self, checked: bool) -> None:
         save_int(_MOTOR_TEST_ENABLED_KEY, 1 if checked else 0)
         self.controller.set_motor_test_enabled(checked)
@@ -626,6 +640,10 @@ class FcFlashPage(QWidget):
         self.controller.set_flash_esc_enabled(flash_esc_enabled)
         self._load_config_btn.setEnabled(flash_esc_enabled)
         self._esc_menu_btn.setEnabled(flash_esc_enabled)
+
+        write_protocol = load_int(_WRITE_PROTOCOL_KEY, 1) != 0
+        self._write_protocol_checkbox.setChecked(write_protocol)
+        self.controller.set_write_protocol_enabled(write_protocol)
 
         motor_test_enabled = load_int(_MOTOR_TEST_ENABLED_KEY, 1) != 0
         self._motor_test_checkbox.setChecked(motor_test_enabled)
@@ -900,6 +918,7 @@ class FcFlashPage(QWidget):
         self._flash_fc_checkbox.setEnabled(not armed)
         self._flash_esc_checkbox.setEnabled(not armed)
         self._motor_test_checkbox.setEnabled(not armed)
+        self._write_protocol_checkbox.setEnabled(not armed)
         self._load_firmware_btn.setEnabled(not armed and self._flash_fc_checkbox.isChecked())
         self._load_config_btn.setEnabled(not armed and self._flash_esc_checkbox.isChecked())
         self._port_combo.setEnabled(not armed)

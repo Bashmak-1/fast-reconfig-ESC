@@ -97,7 +97,7 @@ def test_freshly_flashed_fc_gets_its_protocol_before_the_esc_stage(monkeypatch):
         c._disconnect_requested.emit.assert_called_once()
 
         c._on_connection_state_changed(False, 0)  # FourWay confirmed closed -> the write starts
-        c._write_protocol_requested.emit.assert_called_once_with("COM9", fs.DEFAULT_BAUD, c._protocol_index)
+        c._write_protocol_requested.emit.assert_called_once_with("COM9", fs.DEFAULT_BAUD, c._protocol_index, True)
 
         c._on_protocol_write_done(True, "ok")
         assert c.phase == "waiting_fc_after_protocol" and not c._fc_flashed_no_protocol
@@ -153,6 +153,112 @@ def test_banner_and_lines_name_the_right_esc_when_they_appear_out_of_order():
         c._on_esc_status_changed(0, "ok", "x", None)
         c._on_flash_finished(1, 1)
         assert c.banner_text() == "ESC 1, 2 готові"
+    finally:
+        c._armed = False
+        c.shutdown()
+
+
+def _run_protocol_worker(monkeypatch, current_index: int, wanted_index: int, allow_write: bool):
+    """Drive _ProtocolWorker against a fake FC; returns (done_args, list of MSP commands sent)."""
+    from PyQt6.QtWidgets import QApplication
+
+    from esc_hotline import fc_flash_station as fs
+    from esc_hotline.msp import MspCommand
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    sent: list = []
+
+    class FakeTransport:
+        def __init__(self, port, baud): pass
+        def close(self): pass
+
+    class Resp:
+        def __init__(self, payload): self.payload = payload
+
+    class FakeMsp:
+        def __init__(self, transport): pass
+
+        def send(self, cmd, payload=b"", **kw):
+            sent.append(cmd)
+            if cmd == MspCommand.MSP_ADVANCED_CONFIG:
+                return Resp(bytes([0, 0, 0, current_index]) + (16000).to_bytes(2, "little") + (50).to_bytes(2, "little") + b"\0")
+            if cmd == MspCommand.MSP_STATUS_EX:
+                return Resp(bytes(16))  # disarmed
+            return Resp(b"")
+
+    monkeypatch.setattr(fs, "SerialTransport", FakeTransport)
+    monkeypatch.setattr(fs, "MspClient", FakeMsp)
+    worker = fs._ProtocolWorker()
+    got: list = []
+    worker.done.connect(lambda *a: got.append(a))
+    worker.write_protocol_and_reboot("COM1", 115200, wanted_index, allow_write)
+    return got[0], sent
+
+
+def test_protocol_already_correct_is_skipped_without_a_reboot(monkeypatch):
+    from esc_hotline.msp import MspCommand
+
+    done, sent = _run_protocol_worker(monkeypatch, current_index=5, wanted_index=5, allow_write=True)
+    assert done[0] is True and done[2] is False and "вже встановлено" in done[1]
+    assert MspCommand.MSP_SET_ADVANCED_CONFIG not in sent and MspCommand.MSP_REBOOT not in sent
+
+
+def test_wrong_protocol_is_only_reported_when_auto_write_is_off(monkeypatch):
+    from esc_hotline.msp import MspCommand
+
+    done, sent = _run_protocol_worker(monkeypatch, current_index=0, wanted_index=5, allow_write=False)
+    assert done[0] is True and done[2] is False and "УВАГА" in done[1] and "STANDARD" in done[1]
+    assert MspCommand.MSP_SET_ADVANCED_CONFIG not in sent and MspCommand.MSP_REBOOT not in sent
+
+
+def test_wrong_protocol_is_written_and_the_fc_rebooted(monkeypatch):
+    from esc_hotline.msp import MspCommand
+
+    done, sent = _run_protocol_worker(monkeypatch, current_index=0, wanted_index=5, allow_write=True)
+    assert done[0] is True and done[2] is True and "неправильний" in done[1]
+    assert sent.index(MspCommand.MSP_SET_ADVANCED_CONFIG) < sent.index(MspCommand.MSP_EEPROM_WRITE) < sent.index(MspCommand.MSP_REBOOT)
+
+
+def test_no_reboot_means_no_waiting_for_the_fc_to_come_back(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from PyQt6.QtWidgets import QApplication
+
+    from esc_hotline import fc_flash_station as fs
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    c = fs.FcFlashStationController()
+    try:
+        c._armed, c._port_device, c._motor_test_enabled = True, "COM9", True
+        c._motor_connect_requested = MagicMock()
+        c._set_phase("writing_protocol")
+        c._on_protocol_write_done(True, "ok", False)  # protocol was already right: FC not rebooted
+        assert c.phase == "connecting_motor_test"
+        c._motor_connect_requested.emit.assert_called_once_with("COM9", fs.DEFAULT_BAUD)
+
+        c._set_phase("writing_protocol")
+        c._protocol_stage_early = True
+        c._on_protocol_write_done(True, "ok", False)
+        assert c.phase == "connecting"  # straight back to the ESC stage
+    finally:
+        c._armed = False
+        c.shutdown()
+
+
+def test_motor_test_is_cancelled_with_a_clear_reason_on_the_wrong_protocol():
+    from PyQt6.QtWidgets import QApplication
+
+    from esc_hotline import fc_flash_station as fs
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    c = fs.FcFlashStationController()
+    details: list[str] = []
+    c.dfu_detail_changed.connect(details.append)
+    try:
+        c._armed, c._protocol_index, c._motor_detected_protocol = True, 5, 0  # FC reads STANDARD, DSHOT300 wanted
+        c._set_phase("checking_motor_armed")
+        c._on_motor_armed_check_result(True, "")
+        assert c.phase == "motor_test_error" and "STANDARD" in details[-1] and "DSHOT300" in details[-1]
     finally:
         c._armed = False
         c.shutdown()

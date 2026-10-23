@@ -99,6 +99,7 @@ class MotorTestManager(QObject):
     armed_check_result = pyqtSignal(bool, str)  # disarmed_confirmed, detail
     value_changed = pyqtSignal(list)  # `motor_count` raw MSP values (1000-2000), one per real motor slot
     phase_changed = pyqtSignal(str)  # PHASE_IDLE / PHASE_UP / PHASE_HOLD / PHASE_DOWN
+    battery_voltage = pyqtSignal(float)  # volts from MSP_BATTERY_STATE right after connect, -1 = unknown
     protocol_detected = pyqtSignal(int, str)  # index, display name - -1/"" means unknown (right after connect)
     protocol_change_result = pyqtSignal(bool, str)  # success, detail - success implies the FC is rebooting
 
@@ -199,6 +200,17 @@ class MotorTestManager(QObject):
             self._log("warning", f"Не вдалось визначити протокол мотора (MSP_ADVANCED_CONFIG): {e}")
             self._protocol_index = None
 
+        volts = -1.0
+        try:
+            payload = msp.send(MspCommand.MSP_BATTERY_STATE, timeout_s=0.3, retries=2).payload
+            if len(payload) >= 11:
+                volts = int.from_bytes(payload[9:11], "little") / 100.0
+            elif len(payload) >= 4:
+                volts = payload[3] / 10.0
+            self._log("info", f"Напруга живлення (MSP_BATTERY_STATE): {volts:.1f} В.")
+        except Exception as e:
+            self._log("warning", f"Не вдалось прочитати напругу (MSP_BATTERY_STATE): {e}")
+        self.battery_voltage.emit(volts)
         self.connection_state_changed.emit(True)
         self.motor_count_detected.emit(self._motor_count)
         self.protocol_detected.emit(
