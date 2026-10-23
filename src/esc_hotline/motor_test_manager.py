@@ -48,6 +48,7 @@ from typing import Optional
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from .file_logger import get_logger, log_at
 from .motor_ramp import (
     MOTOR_PROTOCOLS,
     MSP_MAX,
@@ -132,6 +133,9 @@ class MotorTestManager(QObject):
 
     def _log(self, level: str, text: str) -> None:
         self.log_message.emit(level, text)
+        # also into the technical log file: motor-test errors used to exist only in the GUI panel,
+        # so a failed test could not be diagnosed from a user's log afterwards
+        log_at(get_logger(), level, "Motor test: " + text)
 
     # ---- lifecycle ------------------------------------------------
 

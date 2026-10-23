@@ -565,6 +565,7 @@ class FcFlashStationController(QObject):
         self._motor_test_worker_thread = _MotorTestWorkerThread()
         motor_mgr = self._motor_test_worker_thread.manager
         self._motor_connect_requested.connect(motor_mgr.connect)
+        self.dfu_detail_changed.connect(lambda text: self._flog.info("FC-tab message: %s", text))  # whatever the operator sees, the log keeps
         self._motor_disconnect_requested.connect(motor_mgr.disconnect)
         self._motor_check_disarmed_requested.connect(motor_mgr.check_disarmed)
         self._motor_start_sweep_requested.connect(motor_mgr.start_sweep)
