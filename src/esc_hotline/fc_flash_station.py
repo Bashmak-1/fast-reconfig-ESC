@@ -100,6 +100,7 @@ from . import dfu_flash_manager
 from .connection_worker import ConnectionWorker
 from .file_logger import get_logger
 from .fourway import FourWayClient
+from .i18n import tr
 from .motor_ramp import MOTOR_PROTOCOLS, build_advanced_config_payload
 from .ramp_curve import DOWN_CURVE_KEY, TICK_KEY, UP_CURVE_KEY, RampCurve
 from .motor_test_manager import ARMED_BIT, PHASE_IDLE as MOTOR_PHASE_IDLE, RAMP_BEZIER, RAMP_LINEAR, TEST_MODE_ALL, MotorTestManager
@@ -592,6 +593,8 @@ class FcFlashStationController(QObject):
         self._fc_flashed_no_protocol = False
         self._protocol_stage_early = False  # the protocol write now running is the pre-ESC one
         self._after_protocol_since = 0.0
+        self._flashed_indices: set[int] = set()  # ESCs flashed on the board currently in place (for the status lines)
+        self._flashing_indices: list[int] = []  # what the running flash batch covers (for the banner)
         self._last_esc_states: dict[int, str] = {}
         self._tick_seen_states: dict[int, str] = {}
         self._armed = False
@@ -1134,6 +1137,7 @@ class FcFlashStationController(QObject):
                 self._begin_protocol_write()
                 return
             self._last_esc_states = {}
+            self._flashed_indices = set()
             self._tick_seen_states = {}
             for i in self._esc_indices:
                 self.esc_detail_changed.emit(i, "idle", "")
@@ -1150,15 +1154,17 @@ class FcFlashStationController(QObject):
         elif self._consecutive_not_found > 0:
             self._consecutive_not_found = 0
             self.power_cycle_hint_changed.emit(False)
-        was_watching = self._phase == "watching"
+        for i in self._esc_indices:
+            if i not in self._tick_seen_states:  # gone (or not there yet): forget it, show "-" - the others keep their lines
+                self._last_esc_states.pop(i, None)
+                self._flashed_indices.discard(i)
+                self.esc_detail_changed.emit(i, "idle", "")
         next_phase, need_flash = phase_after_discovery_many(self._tick_seen_states, self._esc_indices)
         if next_phase == "watching":
-            if not was_watching:
-                for i in self._esc_indices:
-                    self.esc_detail_changed.emit(i, "idle", "")
             self._set_phase("watching")
             return
         if need_flash:
+            self._flashing_indices = list(need_flash)
             self._set_phase("flashing")
             self._flash_requested.emit(self._config_bytes, need_flash)
             return
@@ -1200,12 +1206,18 @@ class FcFlashStationController(QObject):
     def banner_text(self) -> str:
         """PHASE_LABEL, except "esc_ready" names which ESC(s) are done so
         a half-finished 2-in-1 board never reads like a finished one."""
-        if self._phase == "esc_ready":
-            done = sorted(i + 1 for i, st in self._last_esc_states.items() if st == "ok")
-            if len(done) == len(self._esc_indices):
-                return f"ESC {', '.join(map(str, done))} готові"
-            if done:
-                return f"ESC {', '.join(map(str, done))} готова - чекаю решту..."
+        def names(indices) -> str:
+            return ", ".join(str(i + 1) for i in sorted(indices))
+
+        if self._phase == "flashing" and self._flashing_indices:
+            return f"Прошивка ESC {names(self._flashing_indices)}..."
+        if self._phase in ("watching", "esc_ready"):
+            done = {i for i in self._esc_indices if self._last_esc_states.get(i) == "ok"}
+            pending = set(self._esc_indices) - done
+            if done and pending:
+                return f"ESC {names(done)} готова - чекаю ESC {names(pending)}..."
+            if done and self._phase == "esc_ready":
+                return f"ESC {names(done)} готові"
         if self._phase == "all_done" and self._motor_test_enabled:
             return "Готово! FC і ESC прошиті, протокол встановлено, мотори перевірено."
         return PHASE_LABEL[self._phase]
@@ -1215,6 +1227,11 @@ class FcFlashStationController(QObject):
             return
         self._last_esc_states[index] = state
         self._tick_seen_states[index] = state
+        if state == "ok":
+            if self._phase == "flashing":
+                self._flashed_indices.add(index)
+            if index in self._flashed_indices:
+                detail = tr("flashed_verified")
         self.esc_detail_changed.emit(index, state, detail)
 
     # ---- protocol-write phase (terminal step, once every watched ESC is ready) ---

@@ -109,3 +109,50 @@ def test_freshly_flashed_fc_gets_its_protocol_before_the_esc_stage(monkeypatch):
     finally:
         c._armed = False
         c.shutdown()
+
+
+def test_banner_and_lines_name_the_right_esc_when_they_appear_out_of_order():
+    """ESC 2 shows up and is flashed first, ESC 1 later: the banner must name the ESC being flashed /
+    waited for, and ESC 2's line must keep saying it was flashed instead of being wiped or relabelled."""
+    from unittest.mock import MagicMock
+
+    from PyQt6.QtWidgets import QApplication
+
+    from esc_hotline import fc_flash_station as fs
+    from esc_hotline.i18n import tr
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    c = fs.FcFlashStationController()
+    lines: dict[int, str] = {}
+    c.esc_detail_changed.connect(lambda i, st, d: lines.__setitem__(i, d))
+    try:
+        c._flash_requested = MagicMock()
+        c._begin_protocol_write = MagicMock()
+        c._armed, c._esc_indices, c._flash_esc_enabled = True, [0, 1], True
+        c._set_phase("watching")
+
+        c._tick_seen_states = {}
+        c._on_esc_status_changed(1, "diff", "d", None)
+        c._on_discovery_finished(1, 2)
+        assert c.phase == "flashing" and c.banner_text() == "Прошивка ESC 2..."
+        c._on_esc_status_changed(1, "ok", "x", None)
+        c._on_flash_finished(1, 1)
+        assert c.banner_text() == "ESC 2 готова - чекаю ESC 1..."
+
+        c._tick_seen_states = {}  # next tick: ESC 2 still fine, ESC 1 not there yet
+        c._on_esc_status_changed(1, "ok", "config matches", None)
+        c._on_discovery_finished(1, 2)
+        assert c.phase == "watching" and c.banner_text() == "ESC 2 готова - чекаю ESC 1..."
+        assert lines[1] == tr("flashed_verified") and lines[0] == ""  # ESC 2 not wiped / relabelled
+
+        c._tick_seen_states = {}
+        c._on_esc_status_changed(0, "diff", "d", None)
+        c._on_esc_status_changed(1, "ok", "config matches", None)
+        c._on_discovery_finished(2, 2)
+        assert c.banner_text() == "Прошивка ESC 1..."  # not "2, 1"
+        c._on_esc_status_changed(0, "ok", "x", None)
+        c._on_flash_finished(1, 1)
+        assert c.banner_text() == "ESC 1, 2 готові"
+    finally:
+        c._armed = False
+        c.shutdown()
