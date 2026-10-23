@@ -131,6 +131,22 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
     "not_connected_log": {"en": "Not connected.", "uk": "Не підключено."},
     "disconnected_log": {"en": "Disconnected.", "uk": "Відключено."},
     "could_not_open_port": {"en": "Could not open {port}: {error}", "uk": "Не вдалося відкрити {port}: {error}"},
+    "err_port_not_ready": {
+        "en": "The port just appeared and is not ready yet (or the device was unplugged) - the next attempt usually works.",
+        "uk": "Порт щойно з'явився й ще не готовий (або пристрій відключили) - наступна спроба зазвичай вдається.",
+    },
+    "err_port_busy": {
+        "en": "The port is busy - another program (or another tab) is using it, or the FC is still starting up.",
+        "uk": "Порт зайнятий - його використовує інша програма (чи вкладка), або FC ще завантажується.",
+    },
+    "err_port_dead": {
+        "en": "The device does not respond - unplug and replug the USB cable / reboot the FC.",
+        "uk": "Пристрій не відповідає - перевткніть USB-кабель / перезавантажте FC.",
+    },
+    "err_fc_no_response": {
+        "en": "The FC does not answer - replug it; make sure it is not stuck in DFU mode or still booting.",
+        "uk": "FC не відповідає - перевткніть його; перевірте, що він не завис у DFU-режимі й не вантажиться.",
+    },
     "connect_failed": {"en": "Connect failed: {error}", "uk": "Не вдалося підключитись: {error}"},
     "connected_report": {
         "en": "Connected. FC reports {count} ESC output(s){cap}.",

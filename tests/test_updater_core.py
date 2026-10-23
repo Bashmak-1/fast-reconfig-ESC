@@ -216,3 +216,15 @@ def test_updater_tag_installs_an_older_version_over_a_newer_one(tmp_path, monkey
     monkeypatch.setattr(updater_cli, "_launched_new", False)
     assert updater_main(["--yes", "--tag", "v1.1.1"]) == 0
     assert exe.read_bytes() == b"old-EscHotline.exe"  # a downgrade is allowed when explicitly requested
+
+
+def test_serial_errors_get_a_human_explanation():
+    import serial
+
+    from esc_hotline.serial_transport import explain_serial_error
+
+    assert explain_serial_error(FileNotFoundError(2, "x", None, 2)) == ("err_port_not_ready", True)
+    assert explain_serial_error(PermissionError(13, "Access is denied.", None, 5)) == ("err_port_busy", True)
+    assert explain_serial_error(OSError(22, "The semaphore timeout period has expired.", None, 121)) == ("err_port_dead", False)
+    assert explain_serial_error(serial.SerialTimeoutException("Write timeout")) == ("err_fc_no_response", False)
+    assert explain_serial_error(ValueError("other")) == ("", False)

@@ -19,6 +19,23 @@ from serial.tools import list_ports
 FC_VENDOR_IDS = {0x0483, 0x2E3C, 0x2E8A, 0x1209, 0x26AC, 0x27AC, 0x2DAE, 0x3162, 0x35A7}
 
 
+def explain_serial_error(e: BaseException) -> tuple[str, bool]:
+    """(i18n key of a human explanation, transient?) for a failed port open / handshake. The raw
+    pyserial/Windows text ("could not open port ... PermissionError(13)") means nothing to an operator;
+    "transient" = normally clears by itself within seconds (e.g. right after an FC reboot)."""
+    winerror = getattr(e, "winerror", None) or getattr(e, "errno", None)
+    text = str(e).lower()
+    if isinstance(e, serial.SerialTimeoutException) or "write timeout" in text:
+        return "err_fc_no_response", False
+    if isinstance(e, FileNotFoundError) or winerror in (2, 433) or "does not exist" in text:
+        return "err_port_not_ready", True
+    if isinstance(e, PermissionError) or winerror in (5, 31):
+        return "err_port_busy", True
+    if winerror == 121 or "semaphore" in text:
+        return "err_port_dead", False
+    return "", False
+
+
 def remaining_time(deadline: float) -> float:
     return max(0.0, deadline - time.monotonic())
 

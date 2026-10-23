@@ -1143,6 +1143,11 @@ class FcFlashStationController(QObject):
                 self.esc_detail_changed.emit(i, "idle", "")
             self._poll_timer.start()
             self._set_phase("watching")
+        elif self._connect_attempts < MAX_CONNECT_ATTEMPTS:
+            # a freshly flashed/rebooted FC often needs a few tries - say so instead of leaving a bare error in the log
+            self.dfu_detail_changed.emit(
+                f"FC ще не готовий до підключення (спроба {self._connect_attempts} з {MAX_CONNECT_ATTEMPTS}) - пробую ще раз..."
+            )
 
     def _on_discovery_finished(self, found: int, expected: int) -> None:
         if not self._armed or self._phase not in WATCH_PHASES:

@@ -35,7 +35,7 @@ from .i18n import tr
 from .mcu_profiles import LAYOUT_SIZE, MCU_VARIANTS
 from .models import EscInfo, EscState, ProbeResult
 from .msp import MspClient, MspCommand, MspError, MspResponse
-from .serial_transport import SerialTransport
+from .serial_transport import SerialTransport, explain_serial_error
 
 MAX_ESC_COUNT = 12
 POST_PASSTHROUGH_DELAY_S = 2.0  # matches the reference tool's `await delay(2000)`
@@ -139,7 +139,10 @@ class EscManager(QObject):
         try:
             transport = SerialTransport(port, baud)
         except Exception as e:
-            self._log("error", tr("could_not_open_port", port=port, error=e))
+            key, transient = explain_serial_error(e)
+            hint = f" {tr(key)}" if key else ""
+            # transient (port not ready / busy right after a reboot) is a warning, not a scary error
+            self._log("warning" if transient else "error", tr("could_not_open_port", port=port, error=f"{e}.{hint}"))
             self.connection_state_changed.emit(False, 0)
             return
         self._flog.info("Serial port opened: %s @ %d", port, baud)
@@ -150,7 +153,8 @@ class EscManager(QObject):
             api_version, fc_variant = self._handshake(msp)
             expected = self._enter_passthrough(msp)
         except Exception as e:
-            self._log("error", tr("connect_failed", error=e))
+            key, _transient = explain_serial_error(e)
+            self._log("error", tr("connect_failed", error=f"{e}.{' ' + tr(key) if key else ''}"))
             self._flog.exception("Connect failed during handshake/passthrough")
             transport.close()
             self._transport = None
