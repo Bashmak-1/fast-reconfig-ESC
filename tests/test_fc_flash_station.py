@@ -285,7 +285,7 @@ def test_motor_test_connect_waits_for_the_rebooting_fc_and_retries(monkeypatch):
         assert c.phase == "waiting_motor_init" and not c._motor_connect_requested.emit.called  # motors left alone while they initialise
         c._on_poll_tick()
         assert c.phase == "waiting_motor_init"
-        c._motor_init_since = time.monotonic() - fs.MOTOR_INIT_WAIT_S - 1
+        c._motor_init_since = time.monotonic() - c._motor_init_wait_s - 1
         c._on_poll_tick()
         assert c.phase == "connecting_motor_test" and c._motor_connect_requested.emit.call_count == 1
 

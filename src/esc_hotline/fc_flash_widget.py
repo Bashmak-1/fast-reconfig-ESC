@@ -45,6 +45,9 @@ from .file_logger import LOG_FILE
 from .fc_flash_station import (
     MAX_CONNECT_ATTEMPTS,
     MAX_POLL_INTERVAL_MS,
+    MOTOR_INIT_WAIT_MAX_MS,
+    MOTOR_INIT_WAIT_MIN_MS,
+    MOTOR_INIT_WAIT_STEP_MS,
     MIN_POLL_INTERVAL_MS,
     POLL_INTERVAL_STEP_MS,
     PHASE_STYLE,
@@ -97,6 +100,7 @@ _ESC_INDICES_KEY = "fc_flash_esc_indices"  # comma-separated 0-based indices, e.
 _PROTOCOL_INDEX_KEY = "fc_flash_protocol_index"
 _CLI_PATH_OVERRIDE_KEY = "fc_flash_cli_path_override"
 _POLL_INTERVAL_KEY = "fc_flash_poll_interval_ms"
+_MOTOR_INIT_KEY = "fc_flash_motor_init_wait_ms"
 _FLASH_FC_ENABLED_KEY = "fc_flash_stage_fc_enabled"
 _FLASH_ESC_ENABLED_KEY = "fc_flash_stage_esc_enabled"
 _MOTOR_TEST_ENABLED_KEY = "fc_flash_stage_motor_test_enabled"
@@ -365,6 +369,17 @@ class FcFlashPage(QWidget):
         self._poll_interval_seconds_label = QLabel()
         self._poll_interval_seconds_label.setStyleSheet(f"color: {TEXT_MUTED};")
         poll_interval_row.addWidget(self._poll_interval_seconds_label)
+        poll_interval_row.addSpacing(24)
+        poll_interval_row.addWidget(QLabel("Очікування ініціалізації моторів, мс:"))
+        self._motor_init_stepper = ManualCounterWidget(
+            min_value=MOTOR_INIT_WAIT_MIN_MS, max_value=MOTOR_INIT_WAIT_MAX_MS, step=MOTOR_INIT_WAIT_STEP_MS
+        )
+        self._motor_init_stepper.setToolTip(
+            "Після фінального перезапуску FC скільки чекати, поки ESC ініціалізують мотори, перш ніж "
+            "підключатись і давати команди. Замало - мотори можуть самі стрибнути на 20-30% наприкінці ініціалізації."
+        )
+        self._motor_init_stepper.value_changed.connect(self._on_motor_init_changed)
+        poll_interval_row.addWidget(self._motor_init_stepper)
         poll_interval_row.addStretch(1)
         root.addLayout(poll_interval_row)
 
@@ -608,6 +623,10 @@ class FcFlashPage(QWidget):
         save_int(_PROTOCOL_INDEX_KEY, index)
         self.controller.set_protocol_index(index)
 
+    def _on_motor_init_changed(self, value: int) -> None:
+        self.controller.set_motor_init_wait_ms(value)
+        save_int(_MOTOR_INIT_KEY, value)
+
     def _on_poll_interval_changed(self, value: int) -> None:
         self.controller.set_poll_interval_ms(value)
         save_int(_POLL_INTERVAL_KEY, value)
@@ -733,6 +752,8 @@ class FcFlashPage(QWidget):
         self._poll_interval_stepper.set_value(load_int(_POLL_INTERVAL_KEY, self.controller.poll_interval_ms()))
         self.controller.set_poll_interval_ms(self._poll_interval_stepper.value())
         self._update_poll_interval_seconds_label()
+        self._motor_init_stepper.set_value(load_int(_MOTOR_INIT_KEY, self.controller.motor_init_wait_ms()))
+        self.controller.set_motor_init_wait_ms(self._motor_init_stepper.value())
 
         self._apply_motor_durations(
             load_float(_MOTOR_UP_DURATION_KEY, _DEFAULT_MOTOR_UP_DURATION_S),

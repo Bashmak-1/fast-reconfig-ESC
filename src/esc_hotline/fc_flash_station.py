@@ -126,7 +126,10 @@ DEFAULT_MOTOR_MIN_BOUND = 0
 DEFAULT_MOTOR_MAX_BOUND = 100
 
 DEFAULT_BAUD = 115200
-MOTOR_INIT_WAIT_S = 10.0  # after the FC is back from its reboot: let the ESCs finish initialising before any motor command
+MOTOR_INIT_WAIT_S = 3.0  # default: after the FC is back from its reboot, let the ESCs finish initialising before any motor command
+MOTOR_INIT_WAIT_MIN_MS = 0
+MOTOR_INIT_WAIT_MAX_MS = 30_000
+MOTOR_INIT_WAIT_STEP_MS = 500
 MOTOR_ARM_LEAD_S = 1.0  # short idle lead-in after connecting
 MOTOR_CONNECT_ATTEMPTS = 5  # motor-test connect tries (1.5 s apart) before giving up
 # A freshly DFU-flashed FC needs a while before its USB-CDC port answers (real logs: Write timeout,
@@ -644,6 +647,7 @@ class FcFlashStationController(QObject):
         self._motor_connect_attempts = 0
         self._after_protocol_since = 0.0
         self._motor_init_since = 0.0
+        self._motor_init_wait_s = MOTOR_INIT_WAIT_S
         self._phase_since = time.monotonic()
         self._flashed_indices: set[int] = set()  # ESCs flashed on the board currently in place (for the status lines)
         self._flashing_indices: list[int] = []  # what the running flash batch covers (for the banner)
@@ -692,6 +696,13 @@ class FcFlashStationController(QObject):
 
     def poll_interval_ms(self) -> int:
         return self._poll_timer.interval()
+
+    def motor_init_wait_ms(self) -> int:
+        return round(self._motor_init_wait_s * 1000)
+
+    def set_motor_init_wait_ms(self, value: int) -> None:
+        """How long to leave the motors alone after the FC's final reboot (the ESCs initialise meanwhile)."""
+        self._motor_init_wait_s = max(MOTOR_INIT_WAIT_MIN_MS, min(int(value), MOTOR_INIT_WAIT_MAX_MS)) / 1000
 
     def set_poll_interval_ms(self, value: int) -> None:
         """How often to re-probe the watched ESC slot(s) - safe to call at
@@ -1025,7 +1036,7 @@ class FcFlashStationController(QObject):
         if self._phase == "waiting_motor_init":
             # The ESCs re-arm on their own once the rebooted FC outputs idle again; they must be fully initialised
             # BEFORE we touch the motors, or they jump to 20-30% by themselves when initialisation ends.
-            left = MOTOR_INIT_WAIT_S - (time.monotonic() - self._motor_init_since)
+            left = self._motor_init_wait_s - (time.monotonic() - self._motor_init_since)
             if left > 0:
                 self.dfu_detail_changed.emit(f"Очікую завершення ініціалізації моторів: ще {left:.0f} с...")
                 return
