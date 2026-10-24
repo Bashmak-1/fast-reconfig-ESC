@@ -8,10 +8,10 @@ Own private connection (own QThread + MotorTestManager), mirroring
 hotspot_station.py's isolation pattern - talks plain MSP to the FC, never
 touches esc_manager.py or the FourWay/passthrough world the other tabs use.
 
-Deliberately does not let the operator drag the motor sliders by hand: the
-whole point of this feature is that an abrupt manual change is exactly what
-already caused damage, so the only two ways to command the motors here are
-the rate-limited Start sweep and the rate-limited Stop (button or any key).
+The motor sliders can be dragged by hand for a single-motor check, but a drag only sets a
+target: the manager moves the motor towards it at a limited rate (also on release, which
+sends the target back to 0), because an abrupt manual change is exactly what already
+caused damage. Stop / any key spins a slider-driven motor down the same way.
 """
 from __future__ import annotations
 
@@ -137,6 +137,7 @@ class MotorTestPage(QWidget):
     _set_speed_bounds_requested = pyqtSignal(float, float)
     _set_curves_requested = pyqtSignal(object, object)
     _set_tick_requested = pyqtSignal(int)
+    _manual_target_requested = pyqtSignal(int, int)
 
     # GUI-thread-affinity signal for MainWindow's cross-tab port-collision guard.
     connection_changed = pyqtSignal(bool)
@@ -161,6 +162,7 @@ class MotorTestPage(QWidget):
         self._thread.start()
 
         self._connected = False
+        self._sweep_idle = True
         self._protocol_known = False
         self._port_busy_checker: Optional[Callable[[str], bool]] = None
 
@@ -401,8 +403,10 @@ class MotorTestPage(QWidget):
             slider.setObjectName("motorFader")
             slider.setRange(MSP_MIN, MSP_MAX)
             slider.setValue(MSP_MIN)
-            slider.setEnabled(False)
+            slider.setEnabled(self._connected and self._sweep_idle)
             slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            slider.sliderMoved.connect(lambda v, i=len(self._motor_sliders): self._manual_target_requested.emit(i, v))
+            slider.sliderReleased.connect(lambda i=len(self._motor_sliders): self._manual_target_requested.emit(i, MSP_MIN))
             slider.setFixedHeight(_SLIDER_HEIGHT)
             slider.setFixedWidth(_SLIDER_WIDTH)
             col_layout.addWidget(slider, alignment=Qt.AlignmentFlag.AlignHCenter)
@@ -420,6 +424,7 @@ class MotorTestPage(QWidget):
         self._check_disarmed_requested.connect(self.manager.check_disarmed)
         self._start_sweep_requested.connect(self.manager.start_sweep)
         self._stop_sweep_requested.connect(self.manager.stop_sweep)
+        self._manual_target_requested.connect(self.manager.manual_set_target)
         self._set_protocol_requested.connect(self.manager.set_protocol)
         self._set_ramp_mode_requested.connect(self.manager.set_ramp_mode)
         self._set_test_mode_requested.connect(self.manager.set_test_mode)
@@ -616,6 +621,7 @@ class MotorTestPage(QWidget):
 
     def _on_connection_state_changed(self, connected: bool) -> None:
         self._connected = connected
+        self._update_manual_enabled()
         self._connect_btn.setEnabled(True)
         self._connect_btn.setText("Відключити" if connected else "Підключити")
         self._start_btn.setEnabled(connected)
@@ -771,6 +777,8 @@ class MotorTestPage(QWidget):
     def _on_phase_changed(self, phase: str) -> None:
         self._phase_label.setText(_PHASE_LABELS.get(phase, phase))
         self._ramp_chart.set_phase(phase)
+        self._sweep_idle = phase == PHASE_IDLE
+        self._update_manual_enabled()
         if phase == PHASE_IDLE:
             self._start_btn.setEnabled(self._connected)
             self._stop_btn.setEnabled(False)
@@ -782,18 +790,24 @@ class MotorTestPage(QWidget):
             self._protocol_combo.setEnabled(False)
             self._apply_protocol_btn.setEnabled(False)
 
+    def _update_manual_enabled(self) -> None:
+        for slider in self._motor_sliders:
+            slider.setEnabled(self._connected and self._sweep_idle)
+
     def _on_value_changed(self, values: list) -> None:
         # values can legitimately be empty (motor_count == 0, e.g. settling
         # a connection to an FC that reports no motors on disconnect) -
         # nothing to show on the master indicator either in that case.
         if not values:
             return
-        pct = msp_to_percent(values[0])
+        top = max(values)
+        pct = msp_to_percent(top)
         self._master_progress.setValue(round(pct))
         self._master_pct_label.setText(f"{pct:.0f}%")
-        self._ramp_chart.set_current_value(values[0])
+        self._ramp_chart.set_current_value(top)
         for slider, label, v in zip(self._motor_sliders, self._motor_labels, values):
-            slider.setValue(v)
+            if not slider.isSliderDown():
+                slider.setValue(v)
             label.setText(f"{msp_to_percent(v):.0f}%")
 
     def _on_log_message(self, level: str, text: str) -> None:

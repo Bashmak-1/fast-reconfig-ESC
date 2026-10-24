@@ -230,3 +230,33 @@ def test_all_mode_moves_every_motor_together():
     mgr.start_sweep(4.0, 0.0, 4.0)
     mgr._on_tick()
     assert len(set(sent[-1])) == 1  # every motor got the same value
+
+
+def test_manual_drive_slews_one_motor_and_spins_down():
+    from PyQt6.QtWidgets import QApplication
+
+    from esc_hotline import motor_test_manager as mtm
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    sent = []
+
+    class _Msp:
+        def send(self, cmd, payload=b"", **k):
+            sent.append(payload)
+
+    m = mtm.MotorTestManager()
+    m._msp, m._motor_count = _Msp(), 2
+    m._read_disarmed_state = lambda: (True, "")
+    m.manual_set_target(1, 1500)
+    m._on_manual_tick()
+    first = [int.from_bytes(sent[-1][i:i + 2], "little") for i in (0, 2)]
+    assert first == [mtm.MSP_MIN, mtm.MSP_MIN + mtm.MANUAL_STEP]  # only motor 2, one slew step
+    m.manual_set_target(1, mtm.MSP_MIN)  # slider released
+    for _ in range(5):
+        m._on_manual_tick()
+    assert m._manual_index is None  # spun down gradually, then idle
+    m.manual_set_target(0, 1500)
+    m._read_disarmed_state = lambda: (False, "ARMED")
+    m._manual_index = None
+    m.manual_set_target(0, 1500)
+    assert m._manual_index is None  # armed FC: refused

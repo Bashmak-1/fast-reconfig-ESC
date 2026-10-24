@@ -68,6 +68,8 @@ MOTOR_SLOTS = 8  # hard MSP_SET_MOTOR/MSP_MOTOR wire-format limit (for (i = 0; i
 # separate from FourWay/config world's 12-ESC limit (MAX_ESC_COUNT in esc_manager.py). The number of
 # these 8 slots that are actually configured motors (motor_count) is detected per-connection, see connect().
 ARMED_BIT = 0x04
+MANUAL_TICK_MS = 50
+MANUAL_STEP = 25  # raw MSP units per tick: full range in ~2 s, up and down
 TICK_MS = 100  # default motor-command / curve-sampling step
 TICK_CHOICES_MS = (100, 50, 20)  # operator-selectable "Крок оновлення"; the curve itself is solved exactly per tick
 
@@ -131,6 +133,15 @@ class MotorTestManager(QObject):
         self._timer = QTimer(self)
         self._timer.setInterval(TICK_MS)
         self._timer.timeout.connect(self._on_tick)
+
+        # manual single-motor drive (slider drag): the slider only sets a TARGET, the value follows it
+        # at a limited slew rate in both directions - an abrupt drop is what burned FC controllers before
+        self._manual_index: Optional[int] = None
+        self._manual_value = MSP_MIN
+        self._manual_target = MSP_MIN
+        self._manual_timer = QTimer(self)
+        self._manual_timer.setInterval(MANUAL_TICK_MS)
+        self._manual_timer.timeout.connect(self._on_manual_tick)
 
     def _log(self, level: str, text: str) -> None:
         self.log_message.emit(level, text)
@@ -218,7 +229,52 @@ class MotorTestManager(QObject):
             protocol_name(self._protocol_index) if self._protocol_index is not None else "",
         )
 
+    def manual_set_target(self, index: int, value: int) -> None:
+        """Slider drag on motor `index`: only that motor moves, towards `value` (clamped to the sweep ceiling),
+        at MANUAL_STEP per tick. Needs a confirmed-disarmed FC and no sweep running."""
+        if self._msp is None or self._phase != PHASE_IDLE or not (0 <= index < self._motor_count):
+            return
+        value = max(MSP_MIN, min(int(value), self._max_target))
+        if self._manual_index is None:
+            if value <= MSP_MIN:
+                return
+            disarmed, detail = self._read_disarmed_state()
+            if not disarmed:
+                self._log("error", f"Ручне керування заблоковано: {detail}")
+                return
+            self._manual_index, self._manual_value = index, MSP_MIN
+        elif index != self._manual_index:
+            return  # one motor at a time: the other slider waits until this one has spun down
+        self._manual_target = value
+        if not self._manual_timer.isActive():
+            self._manual_timer.start()
+
+    def _on_manual_tick(self) -> None:
+        if self._msp is None or self._phase != PHASE_IDLE or self._manual_index is None:
+            self._manual_timer.stop()
+            self._manual_index = None
+            return
+        delta = max(-MANUAL_STEP, min(MANUAL_STEP, self._manual_target - self._manual_value))
+        self._manual_value += delta
+        values = [MSP_MIN] * self._motor_count
+        values[self._manual_index] = self._manual_value
+        payload = b"".join(v.to_bytes(2, "little") for v in values)
+        payload += b"".join(MSP_MIN.to_bytes(2, "little") for _ in range(MOTOR_SLOTS - self._motor_count))
+        try:
+            self._msp.send(MspCommand.MSP_SET_MOTOR, payload, timeout_s=0.3, retries=2)
+        except Exception as e:
+            self._log("error", f"Помилка запису MSP_SET_MOTOR: {e} - зупиняю.")
+            self._manual_timer.stop()
+            self._manual_index = None
+            return
+        self.value_changed.emit(values)
+        if self._manual_value == MSP_MIN and self._manual_target == MSP_MIN:
+            self._manual_timer.stop()
+            self._manual_index = None
+
     def disconnect(self) -> None:
+        self._manual_timer.stop()
+        self._manual_index = None
         self._stop_timer_and_settle()
         if self._transport is not None:
             self._transport.close()
@@ -376,6 +432,10 @@ class MotorTestManager(QObject):
             return
         if self._phase != PHASE_IDLE:
             return  # already running - Start is a no-op mid-sweep
+        if self._manual_index is not None:
+            self._manual_target = MSP_MIN
+            self._log("error", "Мотор ще крутиться від повзунка - зачекайте, поки зупиниться, і натисніть Старт знову.")
+            return
         self._up_duration_s = clamp_duration_s(up_duration_s)
         self._hold_duration_s = max(0.0, min(MAX_PHASE_DURATION_S, hold_duration_s))  # 0 is valid - no plateau
         self._down_duration_s = clamp_duration_s(down_duration_s)
@@ -405,6 +465,7 @@ class MotorTestManager(QObject):
         motor once this down-leg finishes - a manual Stop halts the whole
         run, it never just skips ahead to the next motor."""
         if self._phase == PHASE_IDLE:
+            self._manual_target = MSP_MIN  # panic key / Stop also spins a slider-driven motor down
             return
         self._manual_stop_requested = True
         self._target = self._min_target
