@@ -405,7 +405,7 @@ class _ProtocolWorker(QObject):
                 self.done.emit(True, f"УВАГА: на FC протокол {cur_name}, а потрібен {name}. Автозапис вимкнено - протокол НЕ змінено.", False)
                 return
             if cur_idx == protocol_index:
-                flog.info("Protocol write: %s already reported, but the ESC stage used FourWay - saving and rebooting once", name)
+                flog.info("Protocol write: %s already reported - final stage always saves and reboots the FC once", name)
             else:
                 flog.info("Protocol write: wrong protocol %s (expected %s) - writing and rebooting", cur_name, name)
 
@@ -1189,8 +1189,8 @@ class FcFlashStationController(QObject):
                 self._port_device or "", DEFAULT_BAUD, self._protocol_index, self._write_protocol_enabled,
                 # After the FourWay/ESC stage the FC's motor outputs stay in passthrough state until it reboots
                 # (real logs: ESCs beep although the FC reports DSHOT300; a manual apply+reboot fixed it every time)
-                # - so reboot once even if the protocol already matches. The early (pre-ESC) write needs no such reboot.
-                (not self._protocol_stage_early) and self._flash_esc_enabled,
+                # - so the final stage ALWAYS saves and fully reboots the FC, even if the protocol already matches. The early (pre-ESC) write needs no such reboot.
+                not self._protocol_stage_early,
             )
             return
         if self._phase != "connecting":
