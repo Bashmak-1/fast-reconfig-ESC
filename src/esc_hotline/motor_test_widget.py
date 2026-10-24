@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from PyQt6.QtCore import QEvent, Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QEvent, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QWheelEvent
 from PyQt6.QtWidgets import (
     QApplication,
@@ -168,6 +168,10 @@ class MotorTestPage(QWidget):
         self._wire_signals()
         self._refresh_ports()
         self._restore_settings()
+        self._port_watch_timer = QTimer(self)  # picks up a freshly plugged FC without pressing ↻
+        self._port_watch_timer.setInterval(1500)
+        self._port_watch_timer.timeout.connect(self._auto_refresh_ports)
+        self._port_watch_timer.start()
 
         # App-level filter, not a keyPressEvent override: a keypress is
         # delivered to whichever child widget currently has focus first
@@ -451,6 +455,22 @@ class MotorTestPage(QWidget):
             self._port_combo.addItem(label, info.device)
         if current:
             idx = self._port_combo.findData(current)
+            if idx >= 0:
+                self._port_combo.setCurrentIndex(idx)
+
+    def _auto_refresh_ports(self) -> None:
+        """Re-scan the COM ports on a timer. A newly appeared port (a new board plugged in) is selected;
+        nothing changes while connected or while the operator has the list open."""
+        if self._connected or self._port_combo.view().isVisible():
+            return
+        known = [self._port_combo.itemData(i) for i in range(self._port_combo.count())]
+        ports = list_fc_ports()
+        if [p.device for p in ports] == known:
+            return
+        new = [p.device for p in ports if p.device not in known]
+        self._refresh_ports()
+        if new:
+            idx = self._port_combo.findData(new[-1])
             if idx >= 0:
                 self._port_combo.setCurrentIndex(idx)
 

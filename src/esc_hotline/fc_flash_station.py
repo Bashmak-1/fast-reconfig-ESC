@@ -126,6 +126,7 @@ DEFAULT_MOTOR_MIN_BOUND = 0
 DEFAULT_MOTOR_MAX_BOUND = 100
 
 DEFAULT_BAUD = 115200
+MOTOR_ARM_LEAD_S = 2.5  # idle frames before the final motor test so the ESCs arm
 MOTOR_CONNECT_ATTEMPTS = 5  # motor-test connect tries (1.5 s apart) before giving up
 # A freshly DFU-flashed FC needs a while before its USB-CDC port answers (real logs: Write timeout,
 # then 'Access is denied' for ~10s+), so give it ~a minute of 1s polls instead of giving up early.
@@ -1427,6 +1428,13 @@ class FcFlashStationController(QObject):
             )
         self._flog.info("FC flash station: starting final motor test (%d motor(s))", self._motor_count_for_test)
         self._set_phase("running_motor_test")
+        # the ramp used to start 10 ms after the FC answered; the Motors tab (works fine) always has seconds
+        # of idle frames first, so give the ESCs time to arm on the idle signal before throttle rises
+        QTimer.singleShot(int(MOTOR_ARM_LEAD_S * 1000), self._start_motor_sweep)
+
+    def _start_motor_sweep(self) -> None:
+        if not self._armed or self._phase != "running_motor_test":
+            return
         self._motor_start_sweep_requested.emit(
             float(load_int(_MOTOR_UP_DURATION_KEY, DEFAULT_MOTOR_UP_DURATION_S)),
             float(load_int(_MOTOR_HOLD_DURATION_KEY, DEFAULT_MOTOR_HOLD_DURATION_S)),
