@@ -320,3 +320,23 @@ def test_reset_to_app_handles_oserror(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", raise_oserror)
     assert dfu_flash_manager.reset_to_app(Path("fake_cli.exe"), "usb1") is False
+
+
+def test_flash_retries_usb_glitch_then_succeeds(monkeypatch, tmp_path):
+    firmware = tmp_path / "fw.hex"
+    firmware.write_text(":0\n")
+    outputs = iter([("±±±Error: \nWrite failed at address: 0x8001000\n", 1), ("Verified successfully.\n", 0)])
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **k: _FakePopen(*next(outputs)))
+    assert dfu_flash_manager.flash_and_verify(Path("fake_cli.exe"), "usb1", str(firmware)).success is True
+
+
+def test_flash_gives_plain_usb_message_after_all_attempts(monkeypatch, tmp_path):
+    firmware = tmp_path / "fw.hex"
+    firmware.write_text(":0\n")
+    calls = []
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda cmd, **k: calls.append(1) or _FakePopen("±±±Error: Target device not found\n", 1)
+    )
+    result = dfu_flash_manager.flash_and_verify(Path("fake_cli.exe"), "usb1", str(firmware))
+    assert result.success is False and len(calls) == dfu_flash_manager.FLASH_ATTEMPTS
+    assert "USB" in result.message and "±" not in result.message

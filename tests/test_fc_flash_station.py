@@ -306,3 +306,20 @@ def test_motor_test_connect_waits_for_the_rebooting_fc_and_retries(monkeypatch):
     finally:
         c._armed = False
         c.shutdown()
+
+
+def test_watchdog_moves_stuck_phase_to_error():
+    from PyQt6.QtWidgets import QApplication
+
+    from esc_hotline import fc_flash_station as fs
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    c = fs.FcFlashStationController()
+    try:
+        c._armed = True
+        c._set_phase("resetting_fc")
+        c._phase_since -= 1000
+        c._on_poll_tick()
+        assert c._phase == "fc_flash_error"
+    finally:
+        c.shutdown()

@@ -141,6 +141,21 @@ POLL_INTERVAL_MS = 1000
 # is separate workflows own their own tuning constants.
 MIN_POLL_INTERVAL_MS = 1000
 MAX_POLL_INTERVAL_MS = 10_000
+
+# Transitional phases that must end by themselves: if one lasts longer, a worker/FC never answered -
+# drop to that phase's error state (which has the retry button) instead of hanging forever.
+# phase -> (seconds, error phase, message). Phases that legitimately wait for the operator
+# (waiting_device, watching, esc_ready, all_done) are not listed.
+PHASE_WATCHDOG_S = {
+    "flashing_fc": (400.0, "fc_flash_error", "Прошивка FC не завершилась вчасно - перевірте USB-кабель і спробуйте ще раз."),
+    "resetting_fc": (45.0, "fc_flash_error", "FC не відповів на запуск прошивки - перевідкрийте DFU й повторіть."),
+    "writing_protocol": (90.0, "protocol_error", "Запис протоколу не завершився вчасно."),
+    "waiting_fc_after_protocol": (60.0, "protocol_error", "FC не зявився після перезавантаження - перевірте USB."),
+    "waiting_fc_for_motor_test": (60.0, "motor_test_error", "FC не зявився після перезавантаження - перевірте USB."),
+    "connecting_motor_test": (60.0, "motor_test_error", "Не вдалось підключитись для тесту моторів вчасно."),
+    "checking_motor_armed": (30.0, "motor_test_error", "FC не відповів на перевірку стану."),
+}
+WAIT_FC_AFTER_FLASH_S = 90.0  # waiting_fc_normal right after a DFU flash
 POLL_INTERVAL_STEP_MS = 100
 EMPTY_PROBES_BEFORE_POWER_CYCLE_HINT = 20  # same rationale as hotspot_station.py's own constant
 # How long to wait, once the just-finished board has physically disappeared
@@ -615,6 +630,7 @@ class FcFlashStationController(QObject):
         self._motor_battery_v = -1.0
         self._motor_connect_attempts = 0
         self._after_protocol_since = 0.0
+        self._phase_since = time.monotonic()
         self._flashed_indices: set[int] = set()  # ESCs flashed on the board currently in place (for the status lines)
         self._flashing_indices: list[int] = []  # what the running flash batch covers (for the banner)
         self._last_esc_states: dict[int, str] = {}
@@ -810,8 +826,25 @@ class FcFlashStationController(QObject):
 
     # ---- polling ------------------------------------------------
 
+    def _check_watchdog(self) -> bool:
+        """True if the current phase ran over its limit and was moved to its error phase."""
+        limit = PHASE_WATCHDOG_S.get(self._phase)
+        if limit is None and self._phase == "waiting_fc_normal" and self._fc_flashed_no_protocol:
+            limit = (WAIT_FC_AFTER_FLASH_S, "fc_flash_error", "FC не зявився після прошивки - перевірте USB-кабель, перепідключіть FC.")
+        if limit is None or time.monotonic() - self._phase_since < limit[0]:
+            return False
+        seconds, error_phase, message = limit
+        self._flog.error("FC flash station: phase %s exceeded %.0fs - going to %s", self._phase, seconds, error_phase)
+        self._dfu_op_in_flight = False
+        self._connect_in_flight = False
+        self.dfu_detail_changed.emit(message)
+        self._set_phase(error_phase)
+        return True
+
     def _on_poll_tick(self) -> None:
         if not self._armed:
+            return
+        if self._check_watchdog():
             return
 
         if self._phase == "waiting_device":
@@ -1029,6 +1062,7 @@ class FcFlashStationController(QObject):
     def _set_phase(self, phase: str) -> None:
         if phase != self._phase:
             self._flog.info("FC flash station: phase %s -> %s", self._phase, phase)
+            self._phase_since = time.monotonic()
         self._phase = phase
         self.phase_changed.emit(phase)
 

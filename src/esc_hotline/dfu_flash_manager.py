@@ -62,6 +62,8 @@ DEFAULT_CLI_CANDIDATES = (
 
 LIST_TIMEOUT_S = 10.0
 FLASH_TIMEOUT_S = 120.0
+FLASH_ATTEMPTS = 3  # USB glitches mid-flash are retried automatically before an error is shown
+FLASH_RETRY_PAUSE_S = 2.0
 # STM32 internal flash always starts here (standard Cortex-M flash origin)
 # - confirmed by the operator's own STM32CubeProgrammer GUI screenshots
 # showing "Start address: 0x08000000". A raw .bin file has no embedded
@@ -281,31 +283,39 @@ def flash_and_verify(
         args.append(FLASH_BASE_ADDRESS)
     args.append("-v")
 
-    stage = "write"
+    message = ""
+    for attempt in range(1, FLASH_ATTEMPTS + 1):
+        stage = "write"
 
-    def on_line(line: str) -> None:
-        nonlocal stage
-        if "verifying" in line.lower():
-            stage = "verify"
-        match = _PERCENT_RE.search(line)
-        if match and progress_callback is not None:
-            progress_callback(stage, min(100, int(match.group(1))))
+        def on_line(line: str) -> None:
+            nonlocal stage
+            if "verifying" in line.lower():
+                stage = "verify"
+            match = _PERCENT_RE.search(line)
+            if match and progress_callback is not None:
+                progress_callback(stage, min(100, int(match.group(1))))
 
-    try:
-        result = _run_streaming(cli_path, args, timeout_s, on_line if progress_callback else None)
-    except subprocess.TimeoutExpired:
-        flog.error("DFU: flash timed out after %.0fs", timeout_s)
-        return FlashResult(False, f"Прошивка не завершилась за {timeout_s:.0f}с (timeout).")
-    except OSError as e:
-        flog.error("DFU: could not launch %s: %s", cli_path, e)
-        return FlashResult(False, f"Не вдалось запустити {cli_path.name}: {e}")
+        try:
+            result = _run_streaming(cli_path, args, timeout_s, on_line if progress_callback else None)
+        except subprocess.TimeoutExpired:
+            flog.error("DFU: flash timed out after %.0fs", timeout_s)
+            return FlashResult(False, f"Прошивка не завершилась за {timeout_s:.0f}с (timeout).")
+        except OSError as e:
+            flog.error("DFU: could not launch %s: %s", cli_path, e)
+            return FlashResult(False, f"Не вдалось запустити {cli_path.name}: {e}")
 
-    output = result.stdout or ""
-    success = result.returncode == 0 and "verified successfully" in output.lower()
-    flog.info("DFU: flash verdict: success=%s (exit=%d)", success, result.returncode)
-    if success:
-        return FlashResult(True, "Прошивку FC записано й перевірено.")
-    return FlashResult(False, _extract_error(output) or f"Прошивка не підтверджена (exit code {result.returncode}).")
+        output = result.stdout or ""
+        success = result.returncode == 0 and "verified successfully" in output.lower()
+        flog.info("DFU: flash verdict: success=%s (exit=%d), attempt %d/%d", success, result.returncode, attempt, FLASH_ATTEMPTS)
+        if success:
+            return FlashResult(True, "Прошивку FC записано й перевірено.")
+        message = _extract_error(output) or f"Прошивка не підтверджена (exit code {result.returncode})."
+        if attempt < FLASH_ATTEMPTS and _is_transient_usb_error(output):
+            flog.warning("DFU: transient USB error (%s) - retrying the flash", message)
+            time.sleep(FLASH_RETRY_PAUSE_S)
+            continue
+        break
+    return FlashResult(False, message)
 
 
 def reset_to_app(cli_path: Path, port_id: str, timeout_s: float = RESET_TIMEOUT_S) -> bool:
@@ -340,8 +350,23 @@ def reset_to_app(cli_path: Path, port_id: str, timeout_s: float = RESET_TIMEOUT_
     return ok
 
 
+_TRANSIENT_USB_MARKERS = ("write failed", "target device not found", "failed to download", "usb error", "unable to connect")
+
+
+def _is_transient_usb_error(output: str) -> bool:
+    """A glitch of the USB link (loose cable, the FC dropping out mid-write) - worth another try
+    straight away, unlike a missing file or a timeout."""
+    low = output.lower()
+    return any(m in low for m in _TRANSIENT_USB_MARKERS)
+
+
 def _extract_error(output: str) -> Optional[str]:
+    if _is_transient_usb_error(output):
+        # the raw CLI text is a progress bar glued to "Error:" - say what it means instead
+        return "Збій запису по USB (кабель, контакт або FC відключився під час прошивки) - перевірте кабель і спробуйте ще раз."
     for line in output.splitlines():
-        if "error" in line.lower():
-            return line.strip()
+        low = line.lower()
+        if "error" in low:
+            text = line[low.index("error"):].strip()  # drop the progress-bar prefix
+            return text
     return None
