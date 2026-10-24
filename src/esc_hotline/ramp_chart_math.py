@@ -46,6 +46,18 @@ def segment_value(
     return start_percent + (end_percent - start_percent) * eased
 
 
+def build_leg_table(
+    use_bezier: bool, duration_s: float, start_percent: float, end_percent: float,
+    curve: Optional[RampCurve], tick_s: float,
+) -> list[float]:
+    """The whole move sampled once, one percent value per tick: table[k] is the value k ticks in, the
+    last entry is exactly end_percent. The sender then only indexes this list instead of re-solving the curve."""
+    steps = max(1, round(duration_s / tick_s))
+    table = [segment_value(use_bezier, k * tick_s, duration_s, start_percent, end_percent, curve) for k in range(steps)]
+    table.append(end_percent)
+    return table
+
+
 def profile_value_at_time(
     use_bezier: bool,
     elapsed_s: float,

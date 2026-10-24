@@ -260,3 +260,35 @@ def test_manual_drive_slews_one_motor_and_spins_down():
     m._manual_index = None
     m.manual_set_target(0, 1500)
     assert m._manual_index is None  # armed FC: refused
+
+
+# ---- pre-solved leg table + slew guard --------------------------------------------------------------------------
+
+
+def test_leg_table_is_solved_once_and_reused():
+    mgr = _armed_manager()
+    mgr.set_ramp_mode("bezier")
+    mgr.start_sweep(2.0, 0.0, 2.0)
+    first = mgr._leg_table
+    assert len(first) == 41 and first[0] == MSP_MIN and first[-1] == MSP_MAX  # 2 s / 50 ms steps + the end point
+    mgr.stop_sweep()
+    mgr._phase = PHASE_IDLE
+    mgr._current = MSP_MIN
+    mgr.start_sweep(2.0, 0.0, 2.0)
+    assert mgr._leg_table is first  # same settings -> served from the cache, nothing re-solved
+
+
+def test_sent_value_never_jumps_faster_than_the_slew_limit():
+    from esc_hotline import motor_test_manager as m
+
+    mgr = _armed_manager()
+    mgr.start_sweep(0.1, 0.0, 0.1)  # a near-instant ramp: the table itself jumps from min to max within 2 ticks
+    sent = []
+    mgr._msp = SimpleNamespace(send=lambda cmd, payload, **k: sent.append(int.from_bytes(payload[:2], "little")))
+    mgr._last_sent_at = m.time.monotonic()
+    for _ in range(40):
+        mgr._phase_start_time -= 0.05
+        mgr._last_sent_at = m.time.monotonic() - 0.05
+        mgr._on_tick()
+    steps = [abs(b - a) for a, b in zip(sent, sent[1:])]
+    assert sent and max(steps) <= round(m.MAX_SLEW_PER_S * 0.05) + 1
