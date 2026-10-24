@@ -405,9 +405,7 @@ class _ProtocolWorker(QObject):
                 self.done.emit(True, f"УВАГА: на FC протокол {cur_name}, а потрібен {name}. Автозапис вимкнено - протокол НЕ змінено.", False)
                 return
             if cur_idx == protocol_index:
-                # Real logs: right after a DFU flash the FC REPORTS DSHOT300 but its motor outputs run on another
-                # protocol until it has been saved and rebooted once (ESCs beep, a manual "Застосувати" fixed it).
-                flog.info("Protocol write: %s already reported, but the FC was just flashed - saving and rebooting once", name)
+                flog.info("Protocol write: %s already reported, but the ESC stage used FourWay - saving and rebooting once", name)
             else:
                 flog.info("Protocol write: wrong protocol %s (expected %s) - writing and rebooting", cur_name, name)
 
@@ -439,7 +437,7 @@ class _ProtocolWorker(QObject):
         transport.close()
         flog.info("Protocol write: done successfully (%s)", name)
         if cur_idx == protocol_index:
-            self.done.emit(True, f"Після прошивки FC збережено протокол {name} і перезавантажено - щоб виходи моторів запрацювали на ньому.", True)
+            self.done.emit(True, f"Після прошивки ESC FC перезавантажено (протокол {name}), щоб виходи моторів знову видавали сигнал.", True)
         else:
             self.done.emit(True, f"Був неправильний протокол {cur_name} - записано {name}. FC перезавантажується...", True)
 
@@ -1189,7 +1187,10 @@ class FcFlashStationController(QObject):
             self._pre_dfu_port_snapshot = {info.device for info in list_fc_ports()}
             self._write_protocol_requested.emit(
                 self._port_device or "", DEFAULT_BAUD, self._protocol_index, self._write_protocol_enabled,
-                self._fc_flashed_no_protocol,  # freshly flashed FC: save + reboot once even if it already reports the right protocol
+                # After the FourWay/ESC stage the FC's motor outputs stay in passthrough state until it reboots
+                # (real logs: ESCs beep although the FC reports DSHOT300; a manual apply+reboot fixed it every time)
+                # - so reboot once even if the protocol already matches. The early (pre-ESC) write needs no such reboot.
+                (not self._protocol_stage_early) and self._flash_esc_enabled,
             )
             return
         if self._phase != "connecting":
