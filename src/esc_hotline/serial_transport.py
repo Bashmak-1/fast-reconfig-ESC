@@ -90,8 +90,9 @@ class SerialTransport:
             self._serial.close()
 
     def write(self, data: bytes) -> None:
+        # no flush(): on Windows it is FlushFileBuffers, which some USB-serial drivers answer only after ~100+ ms
+        # (real log: every MSP exchange took 140 ms instead of 10 ms) - write() already waits for the driver to take the data
         self._serial.write(data)
-        self._serial.flush()
 
     def reset_input_buffer(self) -> None:
         try:

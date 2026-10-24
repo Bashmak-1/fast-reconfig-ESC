@@ -126,6 +126,7 @@ class MotorTestManager(QObject):
         self._test_mode = TEST_MODE_ALL
         self._active_motor_index: Optional[int] = None  # which single motor is running, TEST_MODE_SEQUENTIAL only
         self._manual_stop_requested = False  # Stop/panic-key pressed - suppress auto-advance to the next motor
+        self._send_stats: list[float] = []  # seconds each MSP_SET_MOTOR round trip took in this run (diagnostics)
         self._phase_start_time = 0.0  # monotonic() when the current phase (up/hold/down) began
         self._phase_start_value = MSP_MIN  # self._current at that same moment
         self._protocol_index: Optional[int] = None
@@ -442,6 +443,7 @@ class MotorTestManager(QObject):
         self._hold_duration_s = max(0.0, min(MAX_PHASE_DURATION_S, hold_duration_s))  # 0 is valid - no plateau
         self._down_duration_s = clamp_duration_s(down_duration_s)
         self._manual_stop_requested = False
+        self._send_stats = []
         self._active_motor_index = 0 if self._test_mode == TEST_MODE_SEQUENTIAL else None
         self._current = self._min_target
         self._target = self._max_target
@@ -503,8 +505,10 @@ class MotorTestManager(QObject):
             self._current = percent_to_msp(value_percent)
 
         self.leg_progress.emit(self._phase, elapsed_s)
+        sent_at = time.monotonic()
         try:
             self._send_all(self._current)
+            self._send_stats.append(time.monotonic() - sent_at)
         except Exception as e:
             self._log("error", f"Помилка запису MSP_SET_MOTOR: {e} - зупиняю. (фаза {self._phase}, "
                                f"таймер {'активний' if self._timer.isActive() else 'зупинений'})")
@@ -557,6 +561,10 @@ class MotorTestManager(QObject):
         self._manual_stop_requested = False
         self.phase_changed.emit(PHASE_IDLE)
         self._log("success", f"Прогон завершено, мотори на {msp_to_percent(self._min_target):.0f}%.")
+        if self._send_stats:
+            avg = sum(self._send_stats) / len(self._send_stats) * 1000
+            self._log("info", f"Діагностика: {len(self._send_stats)} команд, середня відповідь FC {avg:.0f} мс, "
+                              f"найдовша {max(self._send_stats) * 1000:.0f} мс.")
         if completed:
             self.sweep_completed.emit()
 
