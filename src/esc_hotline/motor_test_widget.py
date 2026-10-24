@@ -476,6 +476,7 @@ class MotorTestPage(QWidget):
         self.manager.value_changed.connect(self._on_value_changed)
         self.manager.phase_changed.connect(self._on_phase_changed)
         self.manager.sweep_completed.connect(self._count_run)
+        self.manager.leg_progress.connect(self._ramp_chart.set_progress)
         self.manager.protocol_detected.connect(self._on_protocol_detected)
         self.manager.protocol_change_result.connect(self._on_protocol_change_result)
 

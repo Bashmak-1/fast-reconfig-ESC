@@ -101,6 +101,7 @@ class MotorTestManager(QObject):
     armed_check_result = pyqtSignal(bool, str)  # disarmed_confirmed, detail
     value_changed = pyqtSignal(list)  # `motor_count` raw MSP values (1000-2000), one per real motor slot
     phase_changed = pyqtSignal(str)  # PHASE_IDLE / PHASE_UP / PHASE_HOLD / PHASE_DOWN
+    leg_progress = pyqtSignal(str, float)  # (phase, seconds into that phase) - emitted right before value_changed
     sweep_completed = pyqtSignal()  # a run ran to its end (not stopped by hand) - one more FC+ESC checked
     battery_voltage = pyqtSignal(float)  # volts from MSP_BATTERY_STATE right after connect, -1 = unknown
     protocol_detected = pyqtSignal(int, str)  # index, display name - -1/"" means unknown (right after connect)
@@ -501,6 +502,7 @@ class MotorTestManager(QObject):
             value_percent = segment_value(use_bezier, elapsed_s, duration_s, start_percent, target_percent, curve)
             self._current = percent_to_msp(value_percent)
 
+        self.leg_progress.emit(self._phase, elapsed_s)
         try:
             self._send_all(self._current)
         except Exception as e:

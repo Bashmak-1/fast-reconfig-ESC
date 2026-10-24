@@ -108,6 +108,7 @@ class RampChartWidget(QWidget):
         self._live_percent = 0.0
         self._elapsed_s = 0.0
         self._cycle_start_time: Optional[float] = None
+        self._progress_fed = False  # True once the manager reports its own phase clock (see set_progress)
         self._dragging: Optional[str] = None  # "A"/"B"/"C", "U"/"D" (mid anchors), "U1".."D2" (handles), None
         self._up_curve = RampCurve.default()
         self._down_curve = RampCurve.default()
@@ -155,6 +156,8 @@ class RampChartWidget(QWidget):
     def set_phase(self, phase: str) -> None:
         starting_new_cycle = phase == PHASE_UP and phase != self._phase
         self._phase = phase
+        if phase == PHASE_IDLE:
+            self._progress_fed = False
         self._interactive = phase == PHASE_IDLE
         if self._interactive:
             self._dragging = None  # defensive: a sweep starting mid-drag (shouldn't happen) must not leave a stuck drag
@@ -163,9 +166,21 @@ class RampChartWidget(QWidget):
             self._elapsed_s = 0.0
         self.update()
 
+    def set_progress(self, phase: str, elapsed_in_phase_s: float) -> None:
+        """Position of the live marker on the time axis, straight from the motor's own phase clock. A
+        separate wall clock here drifted from it (every up/hold/down switch waits for the next motor tick),
+        so on the way down the dot ran off to the side of the curve."""
+        base = {PHASE_UP: 0.0, PHASE_HOLD: self._up_duration_s, PHASE_DOWN: self._up_duration_s + self._hold_duration_s}.get(phase)
+        if base is None:
+            return
+        self._progress_fed = True
+        self._elapsed_s = base + max(0.0, elapsed_in_phase_s)
+
     def set_current_value(self, msp: int) -> None:
         self._live_percent = msp_to_percent(msp)
-        if self._phase != PHASE_IDLE and self._cycle_start_time is not None:
+        if self._progress_fed:
+            pass  # x comes from set_progress()
+        elif self._phase != PHASE_IDLE and self._cycle_start_time is not None:
             self._elapsed_s = time.monotonic() - self._cycle_start_time
         else:
             self._elapsed_s = 0.0
