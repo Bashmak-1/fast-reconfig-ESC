@@ -15,6 +15,7 @@ caused damage. Stop / any key spins a slider-driven motor down the same way.
 """
 from __future__ import annotations
 
+import threading
 from typing import Callable, Optional
 
 from PyQt6.QtCore import QEvent, Qt, QThread, QTimer, pyqtSignal
@@ -138,6 +139,7 @@ class MotorTestPage(QWidget):
     _set_curves_requested = pyqtSignal(object, object)
     _set_tick_requested = pyqtSignal(int)
     _manual_target_requested = pyqtSignal(int, int)
+    _ports_scanned = pyqtSignal(object)
 
     # GUI-thread-affinity signal for MainWindow's cross-tab port-collision guard.
     connection_changed = pyqtSignal(bool)
@@ -163,6 +165,8 @@ class MotorTestPage(QWidget):
 
         self._connected = False
         self._sweep_idle = True
+        self._port_scan_running = False
+        self._ports_scanned.connect(self._apply_scanned_ports)
         self._protocol_known = False
         self._port_busy_checker: Optional[Callable[[str], bool]] = None
 
@@ -450,10 +454,10 @@ class MotorTestPage(QWidget):
 
     # ---- port picker ------------------------------------------------
 
-    def _refresh_ports(self) -> None:
+    def _refresh_ports(self, ports=None) -> None:
         current = self._port_combo.currentData()
         self._port_combo.clear()
-        for info in list_fc_ports():
+        for info in (list_fc_ports() if ports is None else ports):
             label = f"{info.device} - {info.description}"
             if info.likely_fc:
                 label += "  ★"
@@ -464,11 +468,30 @@ class MotorTestPage(QWidget):
                 self._port_combo.setCurrentIndex(idx)
 
     def _auto_refresh_ports(self) -> None:
-        """Re-scan the COM ports on a timer. A newly appeared port (a new board plugged in) is selected;
-        nothing changes while connected or while the operator has the list open."""
+        """Timer tick: enumerate the COM ports in a background thread - on Windows that call can block for
+        a few hundred ms, which froze the window (e.g. while dragging a motor slider) when done on the GUI thread."""
+        if self._port_scan_running:
+            return
+        self._port_scan_running = True
+
+        def scan() -> None:
+            try:
+                ports = list_fc_ports()
+            except Exception:
+                ports = None
+            self._ports_scanned.emit(ports)
+
+        threading.Thread(target=scan, daemon=True).start()
+
+    def _apply_scanned_ports(self, ports) -> None:
+        """A newly appeared port (a new board plugged in) is selected; nothing changes while connected
+        (except dropping a dead connection) or while the operator has the list open."""
+        self._port_scan_running = False
+        if ports is None:
+            return
         if self._connected:
             # the board was unplugged (next FC+ESC): the open handle is dead - drop it so the next port can be picked
-            if self._selected_port() not in {p.device for p in list_fc_ports()}:
+            if self._selected_port() not in {p.device for p in ports}:
                 self._on_log_message("warning", "Порт зник (FC відключили) - відключаюсь.")
                 self._connect_btn.setEnabled(False)
                 self._disconnect_requested.emit()
@@ -476,11 +499,10 @@ class MotorTestPage(QWidget):
         if self._port_combo.view().isVisible():
             return
         known = [self._port_combo.itemData(i) for i in range(self._port_combo.count())]
-        ports = list_fc_ports()
         if [p.device for p in ports] == known:
             return
         new = [p.device for p in ports if p.device not in known]
-        self._refresh_ports()
+        self._refresh_ports(ports)
         if new:
             idx = self._port_combo.findData(new[-1])
             if idx >= 0:
