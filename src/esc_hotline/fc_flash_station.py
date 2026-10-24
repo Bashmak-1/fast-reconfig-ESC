@@ -665,6 +665,9 @@ class FcFlashStationController(QObject):
     def armed(self) -> bool:
         return self._armed
 
+    def port_device(self) -> Optional[str]:
+        return self._port_device
+
     def counters(self) -> tuple[int, int, int]:
         return self._counter_flashed, self._counter_ok, self._counter_errors
 

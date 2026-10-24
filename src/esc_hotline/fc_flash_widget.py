@@ -101,6 +101,7 @@ _FLASH_FC_ENABLED_KEY = "fc_flash_stage_fc_enabled"
 _FLASH_ESC_ENABLED_KEY = "fc_flash_stage_esc_enabled"
 _MOTOR_TEST_ENABLED_KEY = "fc_flash_stage_motor_test_enabled"
 _WRITE_PROTOCOL_KEY = "fc_flash_write_protocol"
+_COUNT_BY_PORT_KEY = "fc_flash_count_by_port"
 _DEFAULT_ESC_INDICES = (0, 1)  # ESC 1 + ESC 2 - the common case is a 2-in-1 ESC board on one FC
 
 _FIRMWARE_FILTER = "Firmware (*.hex *.bin);;All files (*)"
@@ -161,9 +162,10 @@ class FcFlashPage(QWidget):
         self.controller.motor_test_phase_changed.connect(self._on_motor_test_phase_changed)
         self.controller.motor_test_value_changed.connect(self._on_motor_test_value_changed)
         self.controller.dfu_flash_progress_changed.connect(self._on_dfu_flash_progress)
-        self.controller.fc_flash_succeeded.connect(lambda: self._fc_counter.increment())
-        self.controller.esc_flash_succeeded.connect(lambda: self._esc_counter.increment())
-        self.controller.motor_test_succeeded.connect(lambda: self._motor_counter.increment())
+        self._counted_ports: dict[str, str] = {}  # counter name -> COM port it last counted (count-by-port mode)
+        self.controller.fc_flash_succeeded.connect(lambda: self._count("fc", self._fc_counter))
+        self.controller.esc_flash_succeeded.connect(lambda: self._count("esc", self._esc_counter))
+        self.controller.motor_test_succeeded.connect(lambda: self._count("motor", self._motor_counter))
 
         self._restore_settings()
 
@@ -259,6 +261,15 @@ class FcFlashPage(QWidget):
         self._write_protocol_checkbox.toggled.connect(self._on_write_protocol_toggled)
         protocol_row.addSpacing(16)
         protocol_row.addWidget(self._write_protocol_checkbox)
+        self._count_by_port_checkbox = QCheckBox("Рахувати за новим COM-портом")
+        self._count_by_port_checkbox.setToolTip(
+            "Увімкнено: плата рахується один раз на кожен COM-порт (інша FC дає інший порт), повторна "
+            "прошивка тієї ж плати не додає +1. Вимкнено: +1 за кожну вдалу стадію."
+        )
+        self._count_by_port_checkbox.setChecked(load_int(_COUNT_BY_PORT_KEY, 0) != 0)
+        self._count_by_port_checkbox.toggled.connect(lambda c: save_int(_COUNT_BY_PORT_KEY, 1 if c else 0))
+        protocol_row.addSpacing(16)
+        protocol_row.addWidget(self._count_by_port_checkbox)
         protocol_row.addStretch(1)
         root.addLayout(protocol_row)
 
@@ -1011,7 +1022,16 @@ class FcFlashPage(QWidget):
     def _on_counters_changed(self, flashed: int, ok: int, errors: int) -> None:
         self._update_counters_label()
 
+    def _count(self, name: str, counter: ManualCounterWidget) -> None:
+        if self._count_by_port_checkbox.isChecked():
+            port = self.controller.port_device() or ""
+            if port and self._counted_ports.get(name) == port:
+                return  # same COM port as the board already counted - not a new FC
+            self._counted_ports[name] = port
+        counter.increment()
+
     def _on_reset_counters_clicked(self) -> None:
+        self._counted_ports.clear()
         self.controller.reset_counters()
         self._fc_counter.reset()
         self._esc_counter.reset()

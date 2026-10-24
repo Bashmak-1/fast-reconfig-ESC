@@ -101,6 +101,7 @@ class MotorTestManager(QObject):
     armed_check_result = pyqtSignal(bool, str)  # disarmed_confirmed, detail
     value_changed = pyqtSignal(list)  # `motor_count` raw MSP values (1000-2000), one per real motor slot
     phase_changed = pyqtSignal(str)  # PHASE_IDLE / PHASE_UP / PHASE_HOLD / PHASE_DOWN
+    sweep_completed = pyqtSignal()  # a run ran to its end (not stopped by hand) - one more FC+ESC checked
     battery_voltage = pyqtSignal(float)  # volts from MSP_BATTERY_STATE right after connect, -1 = unknown
     protocol_detected = pyqtSignal(int, str)  # index, display name - -1/"" means unknown (right after connect)
     protocol_change_result = pyqtSignal(bool, str)  # success, detail - success implies the FC is rebooting
@@ -550,9 +551,12 @@ class MotorTestManager(QObject):
         self._timer.stop()
         self._phase = PHASE_IDLE
         self._active_motor_index = None
+        completed = not self._manual_stop_requested
         self._manual_stop_requested = False
         self.phase_changed.emit(PHASE_IDLE)
         self._log("success", f"Прогон завершено, мотори на {msp_to_percent(self._min_target):.0f}%.")
+        if completed:
+            self.sweep_completed.emit()
 
     def _send_all(self, value: int) -> None:
         # MSP_SET_MOTOR's wire format always needs exactly 8 values

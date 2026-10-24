@@ -52,6 +52,7 @@ from .ramp_chart_math import MIN_PHASE_DURATION_S
 from .ramp_curve import DOWN_CURVE_KEY, TICK_KEY, UP_CURVE_KEY, RampCurve
 from .ramp_chart_widget import RampChartWidget
 from .serial_transport import list_fc_ports
+from .manual_counter_widget import ManualCounterWidget
 from .settings_store import load_float, load_int, load_str, save_float, save_int, save_str
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
 
@@ -344,6 +345,19 @@ class MotorTestPage(QWidget):
         btn_row.addWidget(self._stop_btn)
         root.addLayout(btn_row)
 
+        counter_row = QHBoxLayout()  # same running total as the hotspot-line tab: +1 per finished run, editable
+        counter_label = QLabel("Всього перероблено:")
+        counter_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        counter_row.addWidget(counter_label)
+        self._run_counter = ManualCounterWidget()
+        self._run_counter.setToolTip("+1 автоматично після кожного повного прогону (не зупиненого вручну). Можна виправити вручну.")
+        counter_row.addWidget(self._run_counter)
+        self._reset_counter_btn = QPushButton("Скинути")
+        self._reset_counter_btn.clicked.connect(self._run_counter.reset)
+        counter_row.addWidget(self._reset_counter_btn)
+        counter_row.addStretch(1)
+        root.addLayout(counter_row)
+
         self._hint_label = QLabel(
             "Будь-яка клавіша (поки ця вкладка у фокусі) = аварійна зупинка - той самий плавний спад, що й Стоп."
         )
@@ -449,6 +463,7 @@ class MotorTestPage(QWidget):
         self.manager.armed_check_result.connect(self._on_armed_check_result)
         self.manager.value_changed.connect(self._on_value_changed)
         self.manager.phase_changed.connect(self._on_phase_changed)
+        self.manager.sweep_completed.connect(self._run_counter.increment)
         self.manager.protocol_detected.connect(self._on_protocol_detected)
         self.manager.protocol_change_result.connect(self._on_protocol_change_result)
 
