@@ -461,7 +461,14 @@ class MotorTestPage(QWidget):
     def _auto_refresh_ports(self) -> None:
         """Re-scan the COM ports on a timer. A newly appeared port (a new board plugged in) is selected;
         nothing changes while connected or while the operator has the list open."""
-        if self._connected or self._port_combo.view().isVisible():
+        if self._connected:
+            # the board was unplugged (next FC+ESC): the open handle is dead - drop it so the next port can be picked
+            if self._selected_port() not in {p.device for p in list_fc_ports()}:
+                self._on_log_message("warning", "Порт зник (FC відключили) - відключаюсь.")
+                self._connect_btn.setEnabled(False)
+                self._disconnect_requested.emit()
+            return
+        if self._port_combo.view().isVisible():
             return
         known = [self._port_combo.itemData(i) for i in range(self._port_combo.count())]
         ports = list_fc_ports()
@@ -701,6 +708,11 @@ class MotorTestPage(QWidget):
         else:
             self._on_log_message("error", f"Старт заблоковано: {detail or 'не вдалось підтвердити стан disarmed'}")
             self._start_btn.setEnabled(self._connected)
+            if "WriteFile failed" in detail or "PermissionError" in detail:
+                # same dead handle after replugging under the same COM name: reconnect instead of staying stuck
+                self._on_log_message("warning", "З'єднання з FC втрачено - відключаюсь, підключіться знову.")
+                self._connect_btn.setEnabled(False)
+                self._disconnect_requested.emit()
 
     def _on_stop_clicked(self) -> None:
         self._stop_sweep_requested.emit()
