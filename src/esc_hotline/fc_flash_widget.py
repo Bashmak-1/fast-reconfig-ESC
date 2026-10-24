@@ -20,6 +20,7 @@ the usual cross-tab port-busy check.
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -106,6 +107,7 @@ _FLASH_ESC_ENABLED_KEY = "fc_flash_stage_esc_enabled"
 _MOTOR_TEST_ENABLED_KEY = "fc_flash_stage_motor_test_enabled"
 _WRITE_PROTOCOL_KEY = "fc_flash_write_protocol"
 _COUNT_BY_PORT_KEY = "fc_flash_count_by_port"
+_SOUND_KEY = "fc_flash_sound_cue"
 _DEFAULT_ESC_INDICES = (0, 1)  # ESC 1 + ESC 2 - the common case is a 2-in-1 ESC board on one FC
 
 _FIRMWARE_FILTER = "Firmware (*.hex *.bin);;All files (*)"
@@ -156,6 +158,7 @@ class FcFlashPage(QWidget):
         self._countdown_timer.setInterval(150)
         self._countdown_timer.timeout.connect(self._update_countdown)
 
+        self._last_phase = "idle"
         self.controller.phase_changed.connect(self._on_phase_changed)
         self.controller.esc_detail_changed.connect(self._on_esc_detail_changed)
         self.controller.dfu_detail_changed.connect(self._on_dfu_detail_changed)
@@ -265,6 +268,12 @@ class FcFlashPage(QWidget):
         self._write_protocol_checkbox.toggled.connect(self._on_write_protocol_toggled)
         protocol_row.addSpacing(16)
         protocol_row.addWidget(self._write_protocol_checkbox)
+        self._sound_checkbox = QCheckBox("Звук-підказка")
+        self._sound_checkbox.setToolTip("Стандартний звук Windows, коли FC готова й треба подати живлення на силові (лабораторник/батарею).")
+        self._sound_checkbox.setChecked(load_int(_SOUND_KEY, 1) != 0)
+        self._sound_checkbox.toggled.connect(lambda c: save_int(_SOUND_KEY, 1 if c else 0))
+        protocol_row.addSpacing(16)
+        protocol_row.addWidget(self._sound_checkbox)
         self._count_by_port_checkbox = QCheckBox("Рахувати за новим COM-портом")
         self._count_by_port_checkbox.setToolTip(
             "Увімкнено: плата рахується один раз на кожен COM-порт (інша FC дає інший порт), повторна "
@@ -802,7 +811,21 @@ class FcFlashPage(QWidget):
 
     # ---- rendering ------------------------------------------------
 
+    def _play_power_cue(self) -> None:
+        """Standard Windows sound: the operator has to switch the bench supply / ESC power on now."""
+        if sys.platform != "win32" or not self._sound_checkbox.isChecked():
+            return
+        try:
+            import winsound
+
+            winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS | winsound.SND_ASYNC)
+        except Exception:
+            pass  # a missing sound card must never disturb the flashing flow
+
     def _on_phase_changed(self, phase: str) -> None:
+        if phase == "watching" and self._last_phase == "connecting":
+            self._play_power_cue()  # FC is ready, ESCs are waiting for power
+        self._last_phase = phase
         self._render_banner()
         self._update_start_stop_button()
         self._update_countdown()
