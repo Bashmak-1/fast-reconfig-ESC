@@ -70,8 +70,8 @@ MOTOR_SLOTS = 8  # hard MSP_SET_MOTOR/MSP_MOTOR wire-format limit (for (i = 0; i
 ARMED_BIT = 0x04
 MANUAL_TICK_MS = 50
 MANUAL_STEP = 25  # raw MSP units per tick: full range in ~2 s, up and down
-TICK_MS = 100  # default motor-command / curve-sampling step
-TICK_CHOICES_MS = (100, 50, 20)  # operator-selectable "Крок оновлення"; the curve itself is solved exactly per tick
+TICK_MS = 50  # default motor-command / curve-sampling step
+TICK_CHOICES_MS = (50, 100, 20)  # operator-selectable "Крок оновлення"; the curve itself is solved exactly per tick
 
 PHASE_IDLE = "idle"
 PHASE_UP = "up"

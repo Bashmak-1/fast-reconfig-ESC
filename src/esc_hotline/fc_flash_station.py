@@ -103,7 +103,7 @@ from .fourway import FourWayClient
 from .i18n import tr
 from .motor_ramp import MOTOR_PROTOCOLS, build_advanced_config_payload
 from .ramp_curve import DOWN_CURVE_KEY, TICK_KEY, UP_CURVE_KEY, RampCurve
-from .motor_test_manager import ARMED_BIT, PHASE_IDLE as MOTOR_PHASE_IDLE, RAMP_BEZIER, RAMP_LINEAR, TEST_MODE_ALL, MotorTestManager
+from .motor_test_manager import ARMED_BIT, PHASE_IDLE as MOTOR_PHASE_IDLE, RAMP_BEZIER, RAMP_LINEAR, TEST_MODE_ALL, TICK_MS, MotorTestManager
 from .msp import MspClient, MspCommand, MspError
 from .serial_transport import PortInfo, SerialTransport, list_fc_ports
 from .settings_store import load_int, load_str
@@ -1384,7 +1384,7 @@ class FcFlashStationController(QObject):
         self._motor_set_curves_requested.emit(
             RampCurve.from_json(load_str(UP_CURVE_KEY)), RampCurve.from_json(load_str(DOWN_CURVE_KEY))
         )
-        self._motor_set_tick_requested.emit(load_int(TICK_KEY, 100))
+        self._motor_set_tick_requested.emit(load_int(TICK_KEY, TICK_MS))
         self._motor_set_test_mode_requested.emit(load_str(_MOTOR_TEST_MODE_KEY, TEST_MODE_ALL))
         self._motor_set_speed_bounds_requested.emit(
             float(load_int(_MOTOR_MIN_BOUND_KEY, DEFAULT_MOTOR_MIN_BOUND)),
