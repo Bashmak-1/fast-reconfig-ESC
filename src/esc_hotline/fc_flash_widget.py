@@ -108,6 +108,8 @@ _MOTOR_TEST_ENABLED_KEY = "fc_flash_stage_motor_test_enabled"
 _WRITE_PROTOCOL_KEY = "fc_flash_write_protocol"
 _COUNT_BY_PORT_KEY = "fc_flash_count_by_port"
 _SOUND_KEY = "fc_flash_sound_cue"
+CUE_REPEAT_MS = 30_000
+_CUE_PHASES = ("watching", "all_done")
 _DEFAULT_ESC_INDICES = (0, 1)  # ESC 1 + ESC 2 - the common case is a 2-in-1 ESC board on one FC
 
 _FIRMWARE_FILTER = "Firmware (*.hex *.bin);;All files (*)"
@@ -159,6 +161,11 @@ class FcFlashPage(QWidget):
         self._countdown_timer.timeout.connect(self._update_countdown)
 
         self._last_phase = "idle"
+        # reminder: same cue every 30 s while the operator is slow to switch the power on (watching) or off (all_done);
+        # runs only in those two phases, so Стоп / errors / DFU waiting stay silent
+        self._cue_timer = QTimer(self)
+        self._cue_timer.setInterval(CUE_REPEAT_MS)
+        self._cue_timer.timeout.connect(self._play_power_cue)
         self.controller.phase_changed.connect(self._on_phase_changed)
         self.controller.esc_detail_changed.connect(self._on_esc_detail_changed)
         self.controller.dfu_detail_changed.connect(self._on_dfu_detail_changed)
@@ -269,7 +276,7 @@ class FcFlashPage(QWidget):
         protocol_row.addSpacing(16)
         protocol_row.addWidget(self._write_protocol_checkbox)
         self._sound_checkbox = QCheckBox("Звук-підказка")
-        self._sound_checkbox.setToolTip("Стандартний звук Windows, коли FC готова й треба подати живлення на силові (лабораторник/батарею).")
+        self._sound_checkbox.setToolTip("Звук Windows «Notify», коли FC готова й треба подати живлення на силові (лабораторник/батарею); далі нагадує кожні 30 с, поки не подали, і так само після тесту, поки плату не вимкнули. Мовчить на Стоп, помилках і очікуванні DFU.")
         self._sound_checkbox.setChecked(load_int(_SOUND_KEY, 1) != 0)
         self._sound_checkbox.toggled.connect(lambda c: save_int(_SOUND_KEY, 1 if c else 0))
         protocol_row.addSpacing(16)
@@ -818,7 +825,7 @@ class FcFlashPage(QWidget):
         try:
             import winsound
 
-            winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS | winsound.SND_ASYNC)
+            winsound.PlaySound("SystemNotification", winsound.SND_ALIAS | winsound.SND_ASYNC)
         except Exception:
             pass  # a missing sound card must never disturb the flashing flow
 
@@ -826,6 +833,10 @@ class FcFlashPage(QWidget):
         if phase == "watching" and self._last_phase == "connecting":
             self._play_power_cue()  # FC is ready, ESCs are waiting for power
         self._last_phase = phase
+        if phase in _CUE_PHASES:
+            self._cue_timer.start()  # restarts the 30 s countdown
+        else:
+            self._cue_timer.stop()
         self._render_banner()
         self._update_start_stop_button()
         self._update_countdown()
