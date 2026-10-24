@@ -43,6 +43,24 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _install_crash_hooks() -> None:
+    """PyQt6 aborts the whole process on an unhandled exception inside a slot - log it and carry on instead,
+    and dump native crashes (access violations) to a file next to the log."""
+    import faulthandler
+
+    from .file_logger import LOG_DIR, get_logger
+
+    def hook(exc_type, exc, tb) -> None:
+        get_logger().error("Unhandled exception", exc_info=(exc_type, exc, tb))
+
+    sys.excepthook = hook
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        faulthandler.enable(open(LOG_DIR / "crash.log", "a", encoding="utf-8"))  # kept open for the process lifetime
+    except OSError:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv:
@@ -60,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     from .main_window import MainWindow
     from .theme import QSS
 
+    _install_crash_hooks()
     app = QApplication(sys.argv)
     app.setStyleSheet(QSS)
     window = MainWindow()

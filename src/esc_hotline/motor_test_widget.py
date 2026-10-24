@@ -219,7 +219,7 @@ class MotorTestPage(QWidget):
         conn_row.addWidget(self._port_combo)
         self._refresh_btn = QPushButton("↻")
         self._refresh_btn.setFixedSize(36, 30)
-        self._refresh_btn.clicked.connect(self._refresh_ports)
+        self._refresh_btn.clicked.connect(lambda _checked=False: self._refresh_ports())  # clicked(bool) must not land in `ports`
         conn_row.addWidget(self._refresh_btn)
         conn_row.addStretch(1)
         self._connect_btn = QPushButton("Підключити")
