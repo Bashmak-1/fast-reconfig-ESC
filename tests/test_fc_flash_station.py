@@ -69,10 +69,8 @@ def test_multiple_new_ports_with_none_marked_likely_falls_back_to_first():
     assert choose_reenumerated_port(candidates) == "COM5"
 
 
-def test_freshly_flashed_fc_gets_its_protocol_before_the_esc_stage(monkeypatch):
-    """Real-log regression: a board whose ESC never answered stayed on STANDARD because the protocol
-    was only written after every ESC was done. Now it is written first, right after the FC reconnects."""
-    import time
+def test_freshly_flashed_fc_goes_straight_to_the_esc_stage_then_one_full_reboot(monkeypatch):
+    """Flow: DFU flash (no protocol write / reboot) -> ESCs -> ONE protocol write + full FC reboot at the end."""
     from unittest.mock import MagicMock
 
     from PyQt6.QtWidgets import QApplication
@@ -89,23 +87,16 @@ def test_freshly_flashed_fc_gets_its_protocol_before_the_esc_stage(monkeypatch):
         c._fc_flashed_no_protocol = True  # set by the DFU-reset step
         c._write_protocol_requested = MagicMock()
         c._disconnect_requested = MagicMock()
+        c._discover_many_requested = MagicMock()
         monkeypatch.setattr(fs, "list_fc_ports", lambda: [])
 
         c._set_phase("connecting")
         c._on_connection_state_changed(True, 2)  # FC answered
-        assert c.phase == "writing_protocol" and c._protocol_stage_early  # NOT "watching"
-        c._disconnect_requested.emit.assert_called_once()
+        assert c.phase == "watching" and not c._write_protocol_requested.emit.called  # straight to the ESCs
 
+        c._begin_protocol_write()  # every ESC done
         c._on_connection_state_changed(False, 0)  # FourWay confirmed closed -> the write starts
-        c._write_protocol_requested.emit.assert_called_once_with("COM9", fs.DEFAULT_BAUD, c._protocol_index, True, False)
-
-        c._on_protocol_write_done(True, "ok")
-        assert c.phase == "waiting_fc_after_protocol" and not c._fc_flashed_no_protocol
-
-        c._after_protocol_since = time.monotonic() - 10  # reboot settle time has passed
-        monkeypatch.setattr(fs, "list_fc_ports", lambda: [PortInfo("COM9", "FC", "", True)])
-        c._on_poll_tick()
-        assert c.phase == "connecting"  # back to the normal ESC stage via a reconnect
+        c._write_protocol_requested.emit.assert_called_once_with("COM9", fs.DEFAULT_BAUD, c._protocol_index, True, True)
     finally:
         c._armed = False
         c.shutdown()
@@ -290,6 +281,11 @@ def test_motor_test_connect_waits_for_the_rebooting_fc_and_retries(monkeypatch):
         assert c.phase == "waiting_fc_for_motor_test" and not c._motor_connect_requested.emit.called
 
         c._after_protocol_since = time.monotonic() - 10
+        c._on_poll_tick()
+        assert c.phase == "waiting_motor_init" and not c._motor_connect_requested.emit.called  # motors left alone while they initialise
+        c._on_poll_tick()
+        assert c.phase == "waiting_motor_init"
+        c._motor_init_since = time.monotonic() - fs.MOTOR_INIT_WAIT_S - 1
         c._on_poll_tick()
         assert c.phase == "connecting_motor_test" and c._motor_connect_requested.emit.call_count == 1
 

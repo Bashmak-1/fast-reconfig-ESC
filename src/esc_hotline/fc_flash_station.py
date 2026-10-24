@@ -126,7 +126,8 @@ DEFAULT_MOTOR_MIN_BOUND = 0
 DEFAULT_MOTOR_MAX_BOUND = 100
 
 DEFAULT_BAUD = 115200
-MOTOR_ARM_LEAD_S = 2.5  # idle frames before the final motor test so the ESCs arm
+MOTOR_INIT_WAIT_S = 10.0  # after the FC is back from its reboot: let the ESCs finish initialising before any motor command
+MOTOR_ARM_LEAD_S = 1.0  # short idle lead-in after connecting
 MOTOR_CONNECT_ATTEMPTS = 5  # motor-test connect tries (1.5 s apart) before giving up
 # A freshly DFU-flashed FC needs a while before its USB-CDC port answers (real logs: Write timeout,
 # then 'Access is denied' for ~10s+), so give it ~a minute of 1s polls instead of giving up early.
@@ -152,6 +153,7 @@ PHASE_WATCHDOG_S = {
     "resetting_fc": (45.0, "fc_flash_error", "FC не відповів на запуск прошивки - перевідкрийте DFU й повторіть."),
     "writing_protocol": (90.0, "protocol_error", "Запис протоколу не завершився вчасно."),
     "waiting_fc_after_protocol": (60.0, "protocol_error", "FC не зявився після перезавантаження - перевірте USB."),
+    "waiting_motor_init": (60.0, "motor_test_error", "Очікування ініціалізації моторів затягнулось."),
     "waiting_fc_for_motor_test": (60.0, "motor_test_error", "FC не зявився після перезавантаження - перевірте USB."),
     "connecting_motor_test": (60.0, "motor_test_error", "Не вдалось підключитись для тесту моторів вчасно."),
     "checking_motor_armed": (30.0, "motor_test_error", "FC не відповів на перевірку стану."),
@@ -183,7 +185,7 @@ WATCH_PHASES = {"watching", "esc_ready", "esc_error"}
 RETRY_PHASES = {"error_connect", "fc_flash_error", "protocol_error", "motor_test_error"}
 # Phases where a motor-test worker call (or its reply) is in flight - used by
 # stop()/shutdown() to know when _motor_disconnect_requested is also needed.
-MOTOR_TEST_PHASES = {"waiting_fc_for_motor_test", "connecting_motor_test", "checking_motor_armed", "running_motor_test", "motor_test_error", "all_done"}
+MOTOR_TEST_PHASES = {"waiting_fc_for_motor_test", "waiting_motor_init", "connecting_motor_test", "checking_motor_armed", "running_motor_test", "motor_test_error", "all_done"}
 
 PHASE_STYLE = {
     "idle": (BG_PANEL, TEXT_MUTED),
@@ -200,6 +202,7 @@ PHASE_STYLE = {
     "error_connect": (ACCENT_ERROR, "white"),
     "writing_protocol": (ACCENT_AMBER, "white"),
     "waiting_fc_for_motor_test": (BG_PANEL, TEXT_MAIN),
+    "waiting_motor_init": (ACCENT_AMBER, "white"),
     "waiting_fc_after_protocol": (ACCENT_AMBER, "white"),
     "connecting_motor_test": (ACCENT_AMBER, "white"),
     "checking_motor_armed": (ACCENT_AMBER, "white"),
@@ -224,6 +227,7 @@ PHASE_LABEL = {
     "writing_protocol": "Запис протоколу й перезавантаження FC...",
     "waiting_fc_for_motor_test": "Очікування перезавантаження FC після зміни протоколу...",
     "waiting_fc_after_protocol": "Протокол записано, FC перезавантажується...",
+    "waiting_motor_init": "Очікування ініціалізації моторів (без команд на мотори)...",
     "connecting_motor_test": "Підключення для тесту моторів...",
     "checking_motor_armed": "Перевірка стану FC (має бути disarmed)...",
     "running_motor_test": "Тест моторів...",
@@ -639,6 +643,7 @@ class FcFlashStationController(QObject):
         self._motor_battery_v = -1.0
         self._motor_connect_attempts = 0
         self._after_protocol_since = 0.0
+        self._motor_init_since = 0.0
         self._phase_since = time.monotonic()
         self._flashed_indices: set[int] = set()  # ESCs flashed on the board currently in place (for the status lines)
         self._flashing_indices: list[int] = []  # what the running flash batch covers (for the banner)
@@ -1013,8 +1018,19 @@ class FcFlashStationController(QObject):
                     )
                     self._port_device = chosen
                     self.port_changed.emit(chosen)
-                self._set_phase("connecting_motor_test")
-                self._begin_motor_connect()
+                self._motor_init_since = time.monotonic()
+                self._set_phase("waiting_motor_init")
+            return
+
+        if self._phase == "waiting_motor_init":
+            # The ESCs re-arm on their own once the rebooted FC outputs idle again; they must be fully initialised
+            # BEFORE we touch the motors, or they jump to 20-30% by themselves when initialisation ends.
+            left = MOTOR_INIT_WAIT_S - (time.monotonic() - self._motor_init_since)
+            if left > 0:
+                self.dfu_detail_changed.emit(f"Очікую завершення ініціалізації моторів: ще {left:.0f} с...")
+                return
+            self._set_phase("connecting_motor_test")
+            self._begin_motor_connect()
             return
 
         if self._phase == "all_done":
@@ -1207,15 +1223,7 @@ class FcFlashStationController(QObject):
                 )
                 self._begin_protocol_write()
                 return
-            if self._fc_flashed_no_protocol and self._write_protocol_enabled:
-                # A freshly DFU-flashed FC is back on INAV's default (STANDARD) protocol. Writing the
-                # motor protocol only AFTER every ESC is done left boards on STANDARD whenever an ESC
-                # never answered and the operator gave up (real logs: ~3% of boards) - so do it now,
-                # first thing, independent of the ESC outcome. The usual final write still follows.
-                self._flog.info("FC flash station: freshly flashed FC - writing the motor protocol BEFORE the ESC stage")
-                self._protocol_stage_early = True
-                self._begin_protocol_write()
-                return
+            # No protocol write / reboot right after the DFU flash: ESCs first, then ONE full reboot with the protocol.
             self._last_esc_states = {}
             self._flashed_indices = set()
             self._tick_seen_states = {}
