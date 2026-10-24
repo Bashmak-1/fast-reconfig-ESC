@@ -344,7 +344,9 @@ class _ProtocolWorker(QObject):
 
     done = pyqtSignal(bool, str, bool)  # success, message, rebooted (False = the FC was left running as is)
 
-    def write_protocol_and_reboot(self, port: str, baud: int, protocol_index: int, allow_write: bool = True) -> None:
+    def write_protocol_and_reboot(
+        self, port: str, baud: int, protocol_index: int, allow_write: bool = True, force_reboot: bool = False
+    ) -> None:
         flog = get_logger()
         if not port:
             flog.error("Protocol write: no port given.")
@@ -391,7 +393,7 @@ class _ProtocolWorker(QObject):
 
             name = MOTOR_PROTOCOLS[protocol_index] if 0 <= protocol_index < len(MOTOR_PROTOCOLS) else str(protocol_index)
             cur_name = MOTOR_PROTOCOLS[cur_idx] if 0 <= cur_idx < len(MOTOR_PROTOCOLS) else str(cur_idx)
-            if cur_idx == protocol_index:
+            if cur_idx == protocol_index and not (force_reboot and allow_write):
                 # Detect first: already right -> nothing to write, and no pointless EEPROM write + reboot.
                 transport.close()
                 flog.info("Protocol write: FC already on %s - nothing to write, no reboot", name)
@@ -402,7 +404,12 @@ class _ProtocolWorker(QObject):
                 flog.warning("Protocol write: FC is on %s, expected %s - auto-write is switched off, left as is", cur_name, name)
                 self.done.emit(True, f"УВАГА: на FC протокол {cur_name}, а потрібен {name}. Автозапис вимкнено - протокол НЕ змінено.", False)
                 return
-            flog.info("Protocol write: wrong protocol %s (expected %s) - writing and rebooting", cur_name, name)
+            if cur_idx == protocol_index:
+                # Real logs: right after a DFU flash the FC REPORTS DSHOT300 but its motor outputs run on another
+                # protocol until it has been saved and rebooted once (ESCs beep, a manual "Застосувати" fixed it).
+                flog.info("Protocol write: %s already reported, but the FC was just flashed - saving and rebooting once", name)
+            else:
+                flog.info("Protocol write: wrong protocol %s (expected %s) - writing and rebooting", cur_name, name)
 
             status_resp = msp.send(MspCommand.MSP_STATUS_EX, timeout_s=0.5, retries=3)
             if len(status_resp.payload) < 15:
@@ -431,7 +438,10 @@ class _ProtocolWorker(QObject):
 
         transport.close()
         flog.info("Protocol write: done successfully (%s)", name)
-        self.done.emit(True, f"Був неправильний протокол {cur_name} - записано {name}. FC перезавантажується...", True)
+        if cur_idx == protocol_index:
+            self.done.emit(True, f"Після прошивки FC збережено протокол {name} і перезавантажено - щоб виходи моторів запрацювали на ньому.", True)
+        else:
+            self.done.emit(True, f"Був неправильний протокол {cur_name} - записано {name}. FC перезавантажується...", True)
 
 
 class _ProtocolWorkerThread:
@@ -546,7 +556,7 @@ class FcFlashStationController(QObject):
     _set_config_path_requested = pyqtSignal(str)
 
     # Internal-only: reach the private _ProtocolWorker.
-    _write_protocol_requested = pyqtSignal(str, int, int, bool)  # port, baud, protocol_index, allow_write
+    _write_protocol_requested = pyqtSignal(str, int, int, bool, bool)  # port, baud, protocol_index, allow_write, force_reboot
 
     # Internal-only: reach the private _DfuWorker.
     _list_devices_requested = pyqtSignal(str)
@@ -1178,7 +1188,8 @@ class FcFlashStationController(QObject):
             # from whatever was already there - same trick as the DFU reset.
             self._pre_dfu_port_snapshot = {info.device for info in list_fc_ports()}
             self._write_protocol_requested.emit(
-                self._port_device or "", DEFAULT_BAUD, self._protocol_index, self._write_protocol_enabled
+                self._port_device or "", DEFAULT_BAUD, self._protocol_index, self._write_protocol_enabled,
+                self._fc_flashed_no_protocol,  # freshly flashed FC: save + reboot once even if it already reports the right protocol
             )
             return
         if self._phase != "connecting":

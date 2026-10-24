@@ -97,7 +97,7 @@ def test_freshly_flashed_fc_gets_its_protocol_before_the_esc_stage(monkeypatch):
         c._disconnect_requested.emit.assert_called_once()
 
         c._on_connection_state_changed(False, 0)  # FourWay confirmed closed -> the write starts
-        c._write_protocol_requested.emit.assert_called_once_with("COM9", fs.DEFAULT_BAUD, c._protocol_index, True)
+        c._write_protocol_requested.emit.assert_called_once_with("COM9", fs.DEFAULT_BAUD, c._protocol_index, True, True)
 
         c._on_protocol_write_done(True, "ok")
         assert c.phase == "waiting_fc_after_protocol" and not c._fc_flashed_no_protocol
