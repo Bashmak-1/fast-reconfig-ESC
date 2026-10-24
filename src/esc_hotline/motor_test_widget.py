@@ -22,6 +22,7 @@ from PyQt6.QtCore import QEvent, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QWheelEvent
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QHBoxLayout,
@@ -56,6 +57,7 @@ from .manual_counter_widget import ManualCounterWidget
 from .settings_store import load_float, load_int, load_str, save_float, save_int, save_str
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
 
+_COUNT_BY_PORT_KEY = "motor_test_count_by_port"
 _PORT_KEY = "motor_test_port"
 _UP_DURATION_KEY = "motor_test_up_duration_s"
 _HOLD_DURATION_KEY = "motor_test_hold_duration_s"
@@ -166,6 +168,7 @@ class MotorTestPage(QWidget):
 
         self._connected = False
         self._sweep_idle = True
+        self._last_counted_port = ""
         self._port_scan_running = False
         self._ports_scanned.connect(self._apply_scanned_ports)
         self._protocol_known = False
@@ -353,8 +356,17 @@ class MotorTestPage(QWidget):
         self._run_counter.setToolTip("+1 автоматично після кожного повного прогону (не зупиненого вручну). Можна виправити вручну.")
         counter_row.addWidget(self._run_counter)
         self._reset_counter_btn = QPushButton("Скинути")
-        self._reset_counter_btn.clicked.connect(self._run_counter.reset)
+        self._reset_counter_btn.clicked.connect(self._reset_run_counter)
         counter_row.addWidget(self._reset_counter_btn)
+        self._count_by_port_checkbox = QCheckBox("Рахувати за новим COM-портом")
+        self._count_by_port_checkbox.setToolTip(
+            "Увімкнено: плата рахується один раз на кожен COM-порт (інша FC дає інший порт), повторний "
+            "прогін тієї ж плати не додає +1. Вимкнено: +1 за кожен повний прогін."
+        )
+        self._count_by_port_checkbox.setChecked(load_int(_COUNT_BY_PORT_KEY, 0) != 0)
+        self._count_by_port_checkbox.toggled.connect(lambda c: save_int(_COUNT_BY_PORT_KEY, 1 if c else 0))
+        counter_row.addSpacing(16)
+        counter_row.addWidget(self._count_by_port_checkbox)
         counter_row.addStretch(1)
         root.addLayout(counter_row)
 
@@ -463,7 +475,7 @@ class MotorTestPage(QWidget):
         self.manager.armed_check_result.connect(self._on_armed_check_result)
         self.manager.value_changed.connect(self._on_value_changed)
         self.manager.phase_changed.connect(self._on_phase_changed)
-        self.manager.sweep_completed.connect(self._run_counter.increment)
+        self.manager.sweep_completed.connect(self._count_run)
         self.manager.protocol_detected.connect(self._on_protocol_detected)
         self.manager.protocol_change_result.connect(self._on_protocol_change_result)
 
@@ -826,6 +838,18 @@ class MotorTestPage(QWidget):
             self._stop_btn.setEnabled(True)
             self._protocol_combo.setEnabled(False)
             self._apply_protocol_btn.setEnabled(False)
+
+    def _count_run(self) -> None:
+        if self._count_by_port_checkbox.isChecked():
+            port = self._selected_port() or ""
+            if port and port == self._last_counted_port:
+                return  # same COM port as the board already counted - not a new FC
+            self._last_counted_port = port
+        self._run_counter.increment()
+
+    def _reset_run_counter(self) -> None:
+        self._last_counted_port = ""
+        self._run_counter.reset()
 
     def _update_manual_enabled(self) -> None:
         for slider in self._motor_sliders:
