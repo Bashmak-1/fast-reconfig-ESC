@@ -1029,6 +1029,11 @@ class FcFlashStationController(QObject):
                     )
                     self._port_device = chosen
                     self.port_changed.emit(chosen)
+                if not self._motor_test_enabled:
+                    # the FC is back after its final reboot: done (and it is still plugged in, so all_done waits for it to go)
+                    self._flog.info("FC flash station: motor-test stage disabled by operator - FC is back after the final reboot")
+                    self._set_phase("all_done")
+                    return
                 self._motor_init_since = time.monotonic()
                 self._set_phase("waiting_motor_init")
             return
@@ -1224,13 +1229,10 @@ class FcFlashStationController(QObject):
             return
         if connected:
             if not self._flash_esc_enabled:
-                if not self._motor_test_enabled:
-                    self._flog.info("FC flash station: ESC-flash and motor-test stages both disabled - nothing left to do")
-                    self._set_phase("all_done")
-                    return
+                # whatever else is switched off, the protocol write + full FC reboot always runs
                 self._flog.info(
                     "FC flash station: ESC-flash stage disabled by operator - still writing the motor "
-                    "protocol before the motor test (the ESC can't arm/initialize on the wrong one)"
+                    "protocol and rebooting the FC (the ESC can't arm/initialize on the wrong one)"
                 )
                 self._begin_protocol_write()
                 return
@@ -1373,8 +1375,8 @@ class FcFlashStationController(QObject):
                 self._connect_attempts = 0  # nothing was rebooted: reconnect straight away
                 self._set_phase("connecting")
             return
-        if not self._motor_test_enabled:
-            self._flog.info("FC flash station: motor-test stage disabled by operator - stopping after protocol write")
+        if not self._motor_test_enabled and not rebooted:
+            self._flog.info("FC flash station: motor-test stage disabled by operator - protocol write done, nothing was rebooted")
             self._set_phase("all_done")
             return
         if rebooted:

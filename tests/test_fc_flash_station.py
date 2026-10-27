@@ -319,3 +319,33 @@ def test_watchdog_moves_stuck_phase_to_error():
         assert c._phase == "fc_flash_error"
     finally:
         c.shutdown()
+
+
+def test_protocol_reboot_runs_even_with_esc_flash_and_motor_test_both_off(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from PyQt6.QtWidgets import QApplication
+
+    from esc_hotline import fc_flash_station as fs
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    c = fs.FcFlashStationController()
+    try:
+        c._armed, c._port_device = True, "COM9"
+        c._flash_esc_enabled = c._motor_test_enabled = False
+        c._begin_protocol_write = MagicMock()
+        c._set_phase("connecting")
+        c._on_connection_state_changed(True, 0)
+        c._begin_protocol_write.assert_called_once()  # no shortcut to all_done: the FC is still rebooted with the protocol
+
+        # after the reboot: wait for the FC to come back, then finish (no motor test, no motor-init wait)
+        monkeypatch.setattr(fs, "list_fc_ports", lambda: [fs.PortInfo("COM9", "FC", 0x0483, True)])
+        c._set_phase("writing_protocol")
+        c._on_protocol_write_done(True, "ok", True)
+        assert c.phase == "waiting_fc_for_motor_test"
+        c._after_protocol_since -= 10
+        c._on_poll_tick()
+        assert c.phase == "all_done"
+    finally:
+        c._armed = False
+        c.shutdown()
