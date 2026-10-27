@@ -857,13 +857,18 @@ class FcFlashPage(QWidget):
     def _on_phase_changed(self, phase: str) -> None:
         if phase == "watching" and self._last_phase == "connecting":
             self._play_power_cue()  # FC is ready, ESCs are waiting for power
+        # the station re-emits the SAME phase on every poll; restarting the timers on those would keep pushing
+        # the 30 s / 1 min deadline away so the reminder never fired (or fired once) - only a real change restarts
+        changed = phase != self._last_phase
         self._last_phase = phase
         if phase in _CUE_PHASES:
-            self._cue_timer.start()  # restarts the 30 s countdown
+            if changed or not self._cue_timer.isActive():
+                self._cue_timer.start()
         else:
             self._cue_timer.stop()
         if phase == "watching":
-            self._popup_timer.start()  # restarts the one-minute countdown
+            if changed or not self._popup_timer.isActive():
+                self._popup_timer.start()
         else:
             self._popup_timer.stop()
             if self._power_popup is not None:
