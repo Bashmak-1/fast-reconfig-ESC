@@ -497,3 +497,30 @@ def test_motors_tab_stop_button_follows_a_slider_driven_motor_():
         assert not page._stop_btn.isEnabled()
     finally:
         page.shutdown() if hasattr(page, "shutdown") else None
+
+
+def test_fc_tab_layout_does_not_jump_when_hints_appear_and_disappear():
+    import os
+    import tempfile
+
+    from PyQt6.QtWidgets import QApplication
+
+    os.environ.setdefault("USERPROFILE", tempfile.mkdtemp())
+    from esc_hotline.fc_flash_widget import FcFlashPage
+
+    app = QApplication.instance() or QApplication([])
+    page = FcFlashPage()
+    page.resize(1000, 900)
+    page.show()
+    try:
+        def ys():
+            app.processEvents()
+            return page._counters_label.geometry().y(), page._motor_start_btn.geometry().y()
+
+        base = ys()
+        for phase in ("watching", "flashing", "all_done", "waiting_device"):
+            page.controller._set_phase(phase)
+            page._set_start_hint("Неможливо зупинити під час прошивки." if phase == "flashing" else "")
+            assert ys() == base, phase
+    finally:
+        page.shutdown()

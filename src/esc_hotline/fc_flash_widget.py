@@ -192,6 +192,13 @@ class FcFlashPage(QWidget):
         self.controller.esc_flash_succeeded.connect(lambda: self._count("esc", self._esc_counter))
         self.controller.motor_test_succeeded.connect(lambda: self._count("motor", self._motor_counter))
 
+        # these labels/buttons come and go with the phase: keep their room so the layout (and the eyes) do not jump
+        for w in (self._start_hint_label, self._lab_power_hint_label, self._power_cycle_hint_label,
+                  self._progress_bar, self._retry_btn):
+            policy = w.sizePolicy()
+            policy.setRetainSizeWhenHidden(True)
+            w.setSizePolicy(policy)
+        self._start_hint_label.setMinimumHeight(self._start_hint_label.fontMetrics().height() + 4)
         self._restore_settings()
 
     # ---- construction ------------------------------------------------
