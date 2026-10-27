@@ -292,3 +292,17 @@ def test_sent_value_never_jumps_faster_than_the_slew_limit():
         mgr._on_tick()
     steps = [abs(b - a) for a, b in zip(sent, sent[1:])]
     assert sent and max(steps) <= round(m.MAX_SLEW_PER_S * 0.05) + 1
+
+
+def test_chart_table_points_are_exactly_the_table_the_motor_is_driven_from():
+    from esc_hotline.motor_ramp import msp_to_percent
+    from esc_hotline.ramp_chart_widget import RampChartWidget
+
+    mgr = _armed_manager()
+    mgr.set_ramp_mode("bezier")
+    mgr.start_sweep(2.0, 0.0, 2.0)
+    chart = RampChartWidget()
+    chart.set_curve_mode("bezier")
+    chart.set_durations(2.0, 0.0, 2.0)
+    up, _down = chart._table_points()
+    assert [round(p, 6) for _t, p in up] == [round(msp_to_percent(v), 6) for v in mgr._leg_table]

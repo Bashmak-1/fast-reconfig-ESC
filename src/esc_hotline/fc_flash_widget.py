@@ -69,7 +69,7 @@ from .motor_test_widget import _NoWheelComboBox as QComboBox
 from .motor_test_widget import _make_duration_spinbox
 from .ramp_chart_math import MIN_PHASE_DURATION_S
 from .motor_test_manager import TICK_MS
-from .ramp_curve import DOWN_CURVE_KEY, TICK_KEY, UP_CURVE_KEY, RampCurve
+from .ramp_curve import DOWN_CURVE_KEY, SHOW_POINTS_KEY, TICK_KEY, UP_CURVE_KEY, RampCurve
 from .ramp_chart_widget import RampChartWidget
 from .serial_transport import list_fc_ports
 from .settings_store import load_float, load_int, load_str, save_float, save_int, save_str
@@ -138,6 +138,7 @@ class FcFlashPage(QWidget):
     # Order: up_s, hold_s, down_s, ramp_mode, test_mode, min_percent, max_percent.
     ramp_settings_changed = pyqtSignal(float, float, float, str, str, float, float)
     curves_changed = pyqtSignal(object, object)  # see motor_test_widget
+    chart_view_changed = pyqtSignal(bool, int)  # see motor_test_widget
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -493,6 +494,10 @@ class FcFlashPage(QWidget):
         motor_rate_row.addWidget(self._motor_recalc_btn)
         self._motor_recalc_label = QLabel()
         motor_rate_row.addWidget(self._motor_recalc_label)
+        self._motor_points_checkbox = QCheckBox("Точки таблиці")
+        self._motor_points_checkbox.setToolTip("Малює на графіку точки, які реально йдуть на мотор (значення таблиці по тіках).")
+        self._motor_points_checkbox.toggled.connect(self._on_motor_points_toggled)
+        motor_rate_row.addWidget(self._motor_points_checkbox)
         motor_rate_row.addSpacing(24)
         motor_rate_row.addWidget(QLabel("Режим тесту:"))
         self._motor_test_mode_combo = QComboBox()
@@ -696,6 +701,18 @@ class FcFlashPage(QWidget):
         self._motor_config_container.setVisible(checked or self._motor_manual_checkbox.isChecked())
         self._update_start_stop_button()
 
+    def _on_motor_points_toggled(self, checked: bool) -> None:
+        save_int(SHOW_POINTS_KEY, 1 if checked else 0)
+        self._motor_chart.set_show_points(checked)
+        self.chart_view_changed.emit(checked, load_int(TICK_KEY, TICK_MS))
+
+    def apply_external_chart_view(self, show: bool, tick_ms: int) -> None:
+        self._motor_points_checkbox.blockSignals(True)
+        self._motor_points_checkbox.setChecked(show)
+        self._motor_points_checkbox.blockSignals(False)
+        self._motor_chart.set_show_points(show)
+        self._motor_chart.set_tick_ms(tick_ms)
+
     def _on_motor_recalculate(self) -> None:
         short, full = self._motor_chart.recalculate(load_int(TICK_KEY, TICK_MS))
         self._motor_recalc_label.setText(short)
@@ -736,6 +753,8 @@ class FcFlashPage(QWidget):
         # "restore can match the constructed default" reasoning as the
         # ramp-mode/test-mode combo restores below.
         motor_manual = load_int(_MOTOR_TEST_MANUAL_KEY, 0) != 0
+        self._motor_chart.set_tick_ms(load_int(TICK_KEY, TICK_MS))
+        self._motor_points_checkbox.setChecked(load_int(SHOW_POINTS_KEY, 0) != 0)
         self._motor_manual_checkbox.setChecked(motor_manual)
         self.controller.set_motor_test_manual(motor_manual)
         self._motor_config_container.setVisible(motor_test_enabled or motor_manual)

@@ -35,6 +35,7 @@ Point = tuple[float, float]
 UP_CURVE_KEY = "motor_test_up_curve"
 DOWN_CURVE_KEY = "motor_test_down_curve"
 TICK_KEY = "motor_test_tick_ms"
+SHOW_POINTS_KEY = "motor_test_show_points"
 
 MIN_ANCHOR_GAP = 0.05  # keep anchors this far (in x) from each other / the ends
 _SOLVE_ITERATIONS = 50

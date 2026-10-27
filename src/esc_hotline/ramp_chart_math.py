@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .motor_ramp import cubic_bezier_ease
+from .motor_ramp import cubic_bezier_ease, msp_to_percent, percent_to_msp
 from .ramp_curve import RampCurve
 
 MIN_BOUND_GAP_PERCENT = 5.0
@@ -56,6 +56,15 @@ def build_leg_table(
     table = [segment_value(use_bezier, k * tick_s, duration_s, start_percent, end_percent, curve) for k in range(steps)]
     table.append(end_percent)
     return table
+
+
+def leg_table_msp(
+    use_bezier: bool, duration_s: float, start_msp: int, end_msp: int, curve: Optional[RampCurve], tick_s: float,
+) -> list[int]:
+    """THE table the motor is driven from: raw MSP value per tick for one up/down leg. The motor manager and the
+    chart's "show table points" both call this, so what the chart shows is what is sent."""
+    percents = build_leg_table(use_bezier, duration_s, msp_to_percent(start_msp), msp_to_percent(end_msp), curve, tick_s)
+    return [percent_to_msp(p) for p in percents]
 
 
 def profile_value_at_time(

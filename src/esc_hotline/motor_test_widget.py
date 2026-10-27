@@ -50,7 +50,7 @@ from .motor_test_manager import (
     MotorTestManager,
 )
 from .ramp_chart_math import MIN_PHASE_DURATION_S
-from .ramp_curve import DOWN_CURVE_KEY, TICK_KEY, UP_CURVE_KEY, RampCurve
+from .ramp_curve import DOWN_CURVE_KEY, SHOW_POINTS_KEY, TICK_KEY, UP_CURVE_KEY, RampCurve
 from .ramp_chart_widget import RampChartWidget
 from .serial_transport import list_fc_ports
 from .manual_counter_widget import ManualCounterWidget
@@ -157,6 +157,7 @@ class MotorTestPage(QWidget):
     ramp_settings_changed = pyqtSignal(float, float, float, str, str, float, float)
     # up_curve, down_curve (RampCurve) - same cross-tab sync idea, for the editable Bezier shapes.
     curves_changed = pyqtSignal(object, object)
+    chart_view_changed = pyqtSignal(bool, int)  # show table points, tick ms - mirrored to the sibling tab
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -298,6 +299,10 @@ class MotorTestPage(QWidget):
         rate_row.addWidget(self._recalc_btn)
         self._recalc_label = QLabel()
         rate_row.addWidget(self._recalc_label)
+        self._points_checkbox = QCheckBox("Точки таблиці")
+        self._points_checkbox.setToolTip("Малює на графіку точки, які реально йдуть на мотор (значення таблиці по тіках).")
+        self._points_checkbox.toggled.connect(self._on_points_toggled)
+        rate_row.addWidget(self._points_checkbox)
         rate_row.addSpacing(12)
         rate_row.addWidget(QLabel("Крок:"))
         self._tick_combo = _NoWheelComboBox()
@@ -589,6 +594,24 @@ class MotorTestPage(QWidget):
         tick_idx = self._tick_combo.findData(load_int(TICK_KEY, TICK_CHOICES_MS[0]))
         self._tick_combo.setCurrentIndex(max(0, tick_idx))
         self._set_tick_requested.emit(self._tick_combo.currentData())
+        self._ramp_chart.set_tick_ms(self._tick_combo.currentData())
+        self._points_checkbox.setChecked(load_int(SHOW_POINTS_KEY, 0) != 0)
+
+    def _on_points_toggled(self, checked: bool) -> None:
+        save_int(SHOW_POINTS_KEY, 1 if checked else 0)
+        self._ramp_chart.set_show_points(checked)
+        self.chart_view_changed.emit(checked, self._tick_combo.currentData())
+
+    def apply_external_chart_view(self, show: bool, tick_ms: int) -> None:
+        """The sibling tab changed the points checkbox / tick: mirror it without echoing back."""
+        self._points_checkbox.blockSignals(True)
+        self._points_checkbox.setChecked(show)
+        self._points_checkbox.blockSignals(False)
+        self._ramp_chart.set_show_points(show)
+        idx = self._tick_combo.findData(tick_ms)
+        if idx >= 0 and idx != self._tick_combo.currentIndex():
+            self._tick_combo.setCurrentIndex(idx)  # saves + pushes to the manager itself
+        self._ramp_chart.set_tick_ms(tick_ms)
 
     def _on_chart_curves_changed(self, up: RampCurve, down: RampCurve) -> None:
         save_str(UP_CURVE_KEY, up.to_json())
@@ -613,6 +636,8 @@ class MotorTestPage(QWidget):
         ms = self._tick_combo.currentData()
         save_int(TICK_KEY, ms)
         self._set_tick_requested.emit(ms)
+        self._ramp_chart.set_tick_ms(ms)
+        self.chart_view_changed.emit(self._points_checkbox.isChecked(), ms)
 
     def _current_ramp_settings_tuple(self) -> tuple[float, float, float, str, str, float, float]:
         return (

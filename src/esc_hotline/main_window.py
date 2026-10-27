@@ -361,6 +361,8 @@ class MainWindow(QMainWindow):
         self.fc_flash_page.ramp_settings_changed.connect(self.motor_test_page.apply_external_ramp_settings)
         self.motor_test_page.curves_changed.connect(self.fc_flash_page.apply_external_curves)
         self.fc_flash_page.curves_changed.connect(self.motor_test_page.apply_external_curves)
+        self.motor_test_page.chart_view_changed.connect(self.fc_flash_page.apply_external_chart_view)
+        self.fc_flash_page.chart_view_changed.connect(self.motor_test_page.apply_external_chart_view)
 
     # ---- i18n ------------------------------------------------
 

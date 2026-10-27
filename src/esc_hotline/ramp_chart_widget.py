@@ -63,9 +63,9 @@ from .ramp_chart_math import (
     DEFAULT_MIN_PERCENT,
     DEFAULT_UP_DURATION_S,
     MAX_PHASE_DURATION_S,
-    build_leg_table,
     clamp_bound_pair,
     clamp_duration_s,
+    leg_table_msp,
     percent_to_pixel_y,
     pixel_x_to_time,
     pixel_y_to_percent,
@@ -114,6 +114,9 @@ class RampChartWidget(QWidget):
         self._up_curve = RampCurve.default()
         self._down_curve = RampCurve.default()
         self._selected: Optional[str] = None  # "U" / "D": whose handles are shown
+        self._tick_ms = 50
+        self._show_points = False  # draw the motor's per-tick table values on the curve
+        self._points_cache: tuple = ()
 
     # ---- inward setters - never emit profile_changed ------------------------------------------------
 
@@ -126,6 +129,30 @@ class RampChartWidget(QWidget):
         self._up_curve, self._down_curve = up, down
         self.update()
 
+    def set_tick_ms(self, ms: int) -> None:
+        self._tick_ms = ms
+        self.update()
+
+    def set_show_points(self, show: bool) -> None:
+        self._show_points = show
+        self.update()
+
+    def _table_points(self) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+        """(time s, percent) of every table sample of both legs - the same table the motor gets (leg_table_msp)."""
+        key = (self._use_bezier, self._up_duration_s, self._down_duration_s, self._min_percent, self._max_percent,
+               self._up_curve, self._down_curve, self._tick_ms)
+        if not self._points_cache or self._points_cache[0] != key:
+            tick_s = self._tick_ms / 1000
+            lo, hi = percent_to_msp(self._min_percent), percent_to_msp(self._max_percent)
+            up = leg_table_msp(self._use_bezier, self._up_duration_s, lo, hi, self._up_curve, tick_s)
+            down = leg_table_msp(self._use_bezier, self._down_duration_s, hi, lo, self._down_curve, tick_s)
+            t0 = self._up_duration_s + self._hold_duration_s
+            self._points_cache = (key, (
+                [(k * tick_s, msp_to_percent(v)) for k, v in enumerate(up)],
+                [(t0 + k * tick_s, msp_to_percent(v)) for k, v in enumerate(down)],
+            ))
+        return self._points_cache[1]
+
     def recalculate(self, tick_ms: int) -> tuple[str, str]:
         """Solve both legs again from what the chart shows right now, exactly as the motor does (per-tick table,
         raw MSP values) and check the result. Returns (short text, full report)."""
@@ -135,7 +162,7 @@ class RampChartWidget(QWidget):
             ("Розгін", self._up_duration_s, self._min_percent, self._max_percent, self._up_curve),
             ("Спад", self._down_duration_s, self._max_percent, self._min_percent, self._down_curve),
         ):
-            table = [percent_to_msp(p) for p in build_leg_table(self._use_bezier, dur, a, b, curve, tick_s)]
+            table = leg_table_msp(self._use_bezier, dur, percent_to_msp(a), percent_to_msp(b), curve, tick_s)
             step = max((abs(y - x) for x, y in zip(table, table[1:])), default=0) / 10  # % per tick (1 MSP unit = 0.1 %)
             worst = max(worst, step)
             ends = table[0] == percent_to_msp(a) and table[-1] == percent_to_msp(b)
@@ -451,6 +478,14 @@ class RampChartWidget(QWidget):
         painter.setPen(QPen(QColor(TEXT_MAIN), 2))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(curve)
+
+        if self._show_points:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(ACCENT_AMBER))
+            for leg_points in self._table_points():
+                for t, pct in leg_points:
+                    painter.drawEllipse(QPointF(time_to_pixel_x(t, total, left, plot_width),
+                                                percent_to_pixel_y(pct, h, _TOP_MARGIN, _BOTTOM_MARGIN)), 2, 2)
 
         # curve anchors (squares) + the selected anchor's tangent handles (hollow circles)
         if self._curve_handles_visible():

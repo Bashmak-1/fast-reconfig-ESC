@@ -60,7 +60,7 @@ from .motor_ramp import (
     protocol_name,
 )
 from .msp import MspClient, MspCommand, MspError
-from .ramp_chart_math import MAX_PHASE_DURATION_S, build_leg_table, clamp_bound_pair, clamp_duration_s
+from .ramp_chart_math import MAX_PHASE_DURATION_S, clamp_bound_pair, clamp_duration_s, leg_table_msp
 from .ramp_curve import RampCurve
 from .serial_transport import SerialTransport
 
@@ -510,8 +510,7 @@ class MotorTestManager(QObject):
         tick_s = self._timer.interval() / 1000
         key = (use_bezier, duration_s, start, target, tick_s, id(curve))
         if key not in self._leg_cache:
-            percents = build_leg_table(use_bezier, duration_s, msp_to_percent(start), msp_to_percent(target), curve, tick_s)
-            self._leg_cache[key] = [percent_to_msp(p) for p in percents]
+            self._leg_cache[key] = leg_table_msp(use_bezier, duration_s, start, target, curve, tick_s)
         return self._leg_cache[key]
 
     def _on_tick(self) -> None:
