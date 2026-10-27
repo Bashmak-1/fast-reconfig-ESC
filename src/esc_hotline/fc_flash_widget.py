@@ -28,6 +28,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -109,6 +110,7 @@ _WRITE_PROTOCOL_KEY = "fc_flash_write_protocol"
 _COUNT_BY_PORT_KEY = "fc_flash_count_by_port"
 _SOUND_KEY = "fc_flash_sound_cue"
 CUE_REPEAT_MS = 30_000
+POWER_POPUP_MS = 60_000  # no power for this long -> a loud always-on-top window (sound alone gets lost in a noisy room)
 _CUE_PHASES = ("watching", "all_done")
 _DEFAULT_ESC_INDICES = (0, 1)  # ESC 1 + ESC 2 - the common case is a 2-in-1 ESC board on one FC
 
@@ -166,6 +168,10 @@ class FcFlashPage(QWidget):
         self._cue_timer = QTimer(self)
         self._cue_timer.setInterval(CUE_REPEAT_MS)
         self._cue_timer.timeout.connect(self._play_power_cue)
+        self._popup_timer = QTimer(self)
+        self._popup_timer.setInterval(POWER_POPUP_MS)
+        self._popup_timer.timeout.connect(self._show_power_popup)
+        self._power_popup: Optional[QDialog] = None
         self.controller.phase_changed.connect(self._on_phase_changed)
         self.controller.esc_detail_changed.connect(self._on_esc_detail_changed)
         self.controller.dfu_detail_changed.connect(self._on_dfu_detail_changed)
@@ -829,6 +835,25 @@ class FcFlashPage(QWidget):
         except Exception:
             pass  # a missing sound card must never disturb the flashing flow
 
+    def _show_power_popup(self) -> None:
+        """Always-on-top reminder window; comes back every minute while the ESCs still have no power."""
+        if self._power_popup is None:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Увімкніть живлення")
+            dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+            lay = QVBoxLayout(dlg)
+            text = QLabel("⚡ УВІМКНІТЬ ЖИВЛЕННЯ\n\nПодайте напругу на силові (лабораторний блок / батарею) — ESC чекають.")
+            text.setStyleSheet(f"color: {ACCENT_AMBER}; font-size: 22px; font-weight: 700;")
+            text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(text)
+            ok = QPushButton("Зрозуміло")
+            ok.clicked.connect(dlg.hide)
+            lay.addWidget(ok)
+            self._power_popup = dlg
+        self._power_popup.show()
+        self._power_popup.raise_()
+        self._power_popup.activateWindow()
+
     def _on_phase_changed(self, phase: str) -> None:
         if phase == "watching" and self._last_phase == "connecting":
             self._play_power_cue()  # FC is ready, ESCs are waiting for power
@@ -837,6 +862,12 @@ class FcFlashPage(QWidget):
             self._cue_timer.start()  # restarts the 30 s countdown
         else:
             self._cue_timer.stop()
+        if phase == "watching":
+            self._popup_timer.start()  # restarts the one-minute countdown
+        else:
+            self._popup_timer.stop()
+            if self._power_popup is not None:
+                self._power_popup.hide()
         self._render_banner()
         self._update_start_stop_button()
         self._update_countdown()
