@@ -379,3 +379,39 @@ def test_station_motor_test_uses_the_exact_fractional_durations_and_bounds(monke
     finally:
         c._armed = False
         c.shutdown()
+
+
+def test_manual_motor_test_waits_for_the_button_and_ignores_what_was_flashed(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from PyQt6.QtWidgets import QApplication
+
+    from esc_hotline import fc_flash_station as fs
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    c = fs.FcFlashStationController()
+    try:
+        c._armed, c._port_device = True, "COM9"
+        c.set_motor_test_manual(True)
+        c._motor_connect_requested = MagicMock()
+        monkeypatch.setattr(fs, "list_fc_ports", lambda: [fs.PortInfo("COM9", "FC", 0x0483, True)])
+        c._set_phase("waiting_motor_init")
+        c._motor_init_since -= 999
+        c._on_poll_tick()
+        assert c.phase == "waiting_motor_start"  # no automatic test, the FC was rebooted with the protocol before
+        c._on_poll_tick()
+        assert c.phase == "waiting_motor_start"
+        c.start_motor_test()
+        assert c.phase == "connecting_motor_test"
+        c._motor_connect_requested.emit.assert_called_once_with("COM9", fs.DEFAULT_BAUD)
+
+        c._set_phase("waiting_motor_start")  # unplugged while waiting: on to the next board
+        monkeypatch.setattr(fs, "list_fc_ports", lambda: [])
+        c._on_poll_tick()
+        assert c.phase == "all_done"
+
+        c.start_motor_test()  # a stray press outside the waiting phase does nothing
+        assert c.phase == "all_done"
+    finally:
+        c._armed = False
+        c.shutdown()

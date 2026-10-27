@@ -188,7 +188,7 @@ WATCH_PHASES = {"watching", "esc_ready", "esc_error"}
 RETRY_PHASES = {"error_connect", "fc_flash_error", "protocol_error", "motor_test_error"}
 # Phases where a motor-test worker call (or its reply) is in flight - used by
 # stop()/shutdown() to know when _motor_disconnect_requested is also needed.
-MOTOR_TEST_PHASES = {"waiting_fc_for_motor_test", "waiting_motor_init", "connecting_motor_test", "checking_motor_armed", "running_motor_test", "motor_test_error", "all_done"}
+MOTOR_TEST_PHASES = {"waiting_fc_for_motor_test", "waiting_motor_init", "waiting_motor_start", "connecting_motor_test", "checking_motor_armed", "running_motor_test", "motor_test_error", "all_done"}
 
 PHASE_STYLE = {
     "idle": (BG_PANEL, TEXT_MUTED),
@@ -206,6 +206,7 @@ PHASE_STYLE = {
     "writing_protocol": (ACCENT_AMBER, "white"),
     "waiting_fc_for_motor_test": (BG_PANEL, TEXT_MAIN),
     "waiting_motor_init": (ACCENT_AMBER, "white"),
+    "waiting_motor_start": (ACCENT_GREEN, "white"),
     "waiting_fc_after_protocol": (ACCENT_AMBER, "white"),
     "connecting_motor_test": (ACCENT_AMBER, "white"),
     "checking_motor_armed": (ACCENT_AMBER, "white"),
@@ -231,6 +232,7 @@ PHASE_LABEL = {
     "waiting_fc_for_motor_test": "Очікування перезавантаження FC після зміни протоколу...",
     "waiting_fc_after_protocol": "Протокол записано, FC перезавантажується...",
     "waiting_motor_init": "Очікування ініціалізації моторів (без команд на мотори)...",
+    "waiting_motor_start": "FC готова. Натисніть «Старт тесту моторів», коли потрібно.",
     "connecting_motor_test": "Підключення для тесту моторів...",
     "checking_motor_armed": "Перевірка стану FC (має бути disarmed)...",
     "running_motor_test": "Тест моторів...",
@@ -637,6 +639,7 @@ class FcFlashStationController(QObject):
         self._flash_fc_enabled = True
         self._flash_esc_enabled = True
         self._motor_test_enabled = True
+        self._motor_test_manual = False  # test only on the operator's button (phase waiting_motor_start)
         self._esc_indices: list[int] = [0]
         self._protocol_index: int = MOTOR_PROTOCOLS.index("DSHOT300")
         self._fc_flashed_no_protocol = False
@@ -752,6 +755,27 @@ class FcFlashStationController(QObject):
 
     def set_protocol_index(self, index: int) -> None:
         self._protocol_index = index
+
+    def set_motor_test_manual(self, manual: bool) -> None:
+        """True: after the final reboot and the motor-init wait the station stops at waiting_motor_start and runs
+        the test only when the operator presses the button (start_motor_test) - no check what was flashed."""
+        self._motor_test_manual = manual
+
+    def start_motor_test(self) -> None:
+        if self._armed and self._phase == "waiting_motor_start":
+            self._set_phase("connecting_motor_test")
+            self._begin_motor_connect()
+
+    def _after_motor_init(self) -> None:
+        """The FC has been rebooted with the protocol (or needed no reboot) and the motors have initialised."""
+        if self._motor_test_manual:
+            self._set_phase("waiting_motor_start")
+        elif not self._motor_test_enabled:
+            self._flog.info("FC flash station: motor-test stage disabled by operator - FC rebooted and motors initialised")
+            self._set_phase("all_done")
+        else:
+            self._set_phase("connecting_motor_test")
+            self._begin_motor_connect()
 
     def set_write_protocol_enabled(self, enabled: bool) -> None:
         """True: a wrong FC protocol is fixed (write + reboot). False: it is only detected and reported;
@@ -1040,13 +1064,12 @@ class FcFlashStationController(QObject):
             if left > 0:
                 self.dfu_detail_changed.emit(f"Очікую завершення ініціалізації моторів: ще {left:.0f} с...")
                 return
-            if not self._motor_test_enabled:
-                # motors are initialised; no test requested: done (the FC stays plugged in, so all_done waits for it to go)
-                self._flog.info("FC flash station: motor-test stage disabled by operator - FC rebooted and motors initialised")
-                self._set_phase("all_done")
-                return
-            self._set_phase("connecting_motor_test")
-            self._begin_motor_connect()
+            self._after_motor_init()
+            return
+
+        if self._phase == "waiting_motor_start":
+            if self._port_device and self._port_device not in {info.device for info in list_fc_ports()}:
+                self._set_phase("all_done")  # the board was unplugged while waiting: on to the next one
             return
 
         if self._phase == "all_done":
@@ -1375,7 +1398,7 @@ class FcFlashStationController(QObject):
                 self._connect_attempts = 0  # nothing was rebooted: reconnect straight away
                 self._set_phase("connecting")
             return
-        if not self._motor_test_enabled and not rebooted:
+        if not (self._motor_test_enabled or self._motor_test_manual) and not rebooted:
             self._flog.info("FC flash station: motor-test stage disabled by operator - protocol write done, nothing was rebooted")
             self._set_phase("all_done")
             return
@@ -1383,8 +1406,7 @@ class FcFlashStationController(QObject):
             self._after_protocol_since = time.monotonic()
             self._set_phase("waiting_fc_for_motor_test")
         else:  # the FC was never rebooted, so there is nothing to wait for
-            self._set_phase("connecting_motor_test")
-            self._begin_motor_connect()
+            self._after_motor_init()
 
     # ---- final motor-test phase (reuses MotorTestManager as-is) ---------
 

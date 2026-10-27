@@ -106,6 +106,7 @@ _MOTOR_INIT_KEY = "fc_flash_motor_init_wait_ms"
 _FLASH_FC_ENABLED_KEY = "fc_flash_stage_fc_enabled"
 _FLASH_ESC_ENABLED_KEY = "fc_flash_stage_esc_enabled"
 _MOTOR_TEST_ENABLED_KEY = "fc_flash_stage_motor_test_enabled"
+_MOTOR_TEST_MANUAL_KEY = "fc_flash_motor_test_manual"
 _WRITE_PROTOCOL_KEY = "fc_flash_write_protocol"
 _COUNT_BY_PORT_KEY = "fc_flash_count_by_port"
 _SOUND_KEY = "fc_flash_sound_cue"
@@ -446,6 +447,17 @@ class FcFlashPage(QWidget):
         self._motor_test_checkbox.setChecked(True)
         self._motor_test_checkbox.toggled.connect(self._on_motor_test_toggled)
         motor_header_row.addWidget(self._motor_test_checkbox)
+        self._motor_manual_checkbox = QCheckBox("Тест лише вручну (кнопка)")
+        self._motor_manual_checkbox.setToolTip(
+            "Після прошивки, перезапуску FC з протоколом і очікування ініціалізації моторів тест сам не стартує: "
+            "його запускає оператор кнопкою, коли потрібно (без перевірки, що саме прошивалось)."
+        )
+        self._motor_manual_checkbox.toggled.connect(self._on_motor_manual_toggled)
+        motor_header_row.addWidget(self._motor_manual_checkbox)
+        self._motor_start_btn = QPushButton("Старт тесту моторів")
+        self._motor_start_btn.setEnabled(False)
+        self._motor_start_btn.clicked.connect(lambda _checked=False: self.controller.start_motor_test())
+        motor_header_row.addWidget(self._motor_start_btn)
         motor_header_row.addStretch(1)
         root.addLayout(motor_header_row)
 
@@ -674,8 +686,13 @@ class FcFlashPage(QWidget):
     def _on_motor_test_toggled(self, checked: bool) -> None:
         save_int(_MOTOR_TEST_ENABLED_KEY, 1 if checked else 0)
         self.controller.set_motor_test_enabled(checked)
-        self._motor_config_container.setVisible(checked)
+        self._motor_config_container.setVisible(checked or self._motor_manual_checkbox.isChecked())
         self._update_start_stop_button()
+
+    def _on_motor_manual_toggled(self, checked: bool) -> None:
+        save_int(_MOTOR_TEST_MANUAL_KEY, 1 if checked else 0)
+        self.controller.set_motor_test_manual(checked)
+        self._motor_config_container.setVisible(checked or self._motor_test_checkbox.isChecked())
 
     def _update_poll_interval_seconds_label(self) -> None:
         seconds = self._poll_interval_stepper.value() / 1000
@@ -706,7 +723,10 @@ class FcFlashPage(QWidget):
         # default (True) - explicitly sync visibility here too, same
         # "restore can match the constructed default" reasoning as the
         # ramp-mode/test-mode combo restores below.
-        self._motor_config_container.setVisible(motor_test_enabled)
+        motor_manual = load_int(_MOTOR_TEST_MANUAL_KEY, 0) != 0
+        self._motor_manual_checkbox.setChecked(motor_manual)
+        self.controller.set_motor_test_manual(motor_manual)
+        self._motor_config_container.setVisible(motor_test_enabled or motor_manual)
 
         firmware_path = load_str(_FIRMWARE_PATH_KEY)
         if firmware_path and Path(firmware_path).is_file():
@@ -861,6 +881,7 @@ class FcFlashPage(QWidget):
         # the 30 s / 1 min deadline away so the reminder never fired (or fired once) - only a real change restarts
         changed = phase != self._last_phase
         self._last_phase = phase
+        self._motor_start_btn.setEnabled(phase == "waiting_motor_start")
         if phase in _CUE_PHASES:
             if changed or not self._cue_timer.isActive():
                 self._cue_timer.start()
