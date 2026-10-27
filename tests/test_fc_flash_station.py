@@ -345,6 +345,9 @@ def test_protocol_reboot_runs_even_with_esc_flash_and_motor_test_both_off(monkey
         assert c.phase == "waiting_fc_for_motor_test"
         c._after_protocol_since -= 10
         c._on_poll_tick()
+        assert c.phase == "waiting_motor_init"  # the motor-init wait stays, also without a motor test
+        c._motor_init_since -= 999
+        c._on_poll_tick()
         assert c.phase == "all_done"
     finally:
         c._armed = False

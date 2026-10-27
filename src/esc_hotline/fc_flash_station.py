@@ -1029,11 +1029,6 @@ class FcFlashStationController(QObject):
                     )
                     self._port_device = chosen
                     self.port_changed.emit(chosen)
-                if not self._motor_test_enabled:
-                    # the FC is back after its final reboot: done (and it is still plugged in, so all_done waits for it to go)
-                    self._flog.info("FC flash station: motor-test stage disabled by operator - FC is back after the final reboot")
-                    self._set_phase("all_done")
-                    return
                 self._motor_init_since = time.monotonic()
                 self._set_phase("waiting_motor_init")
             return
@@ -1044,6 +1039,11 @@ class FcFlashStationController(QObject):
             left = self._motor_init_wait_s - (time.monotonic() - self._motor_init_since)
             if left > 0:
                 self.dfu_detail_changed.emit(f"Очікую завершення ініціалізації моторів: ще {left:.0f} с...")
+                return
+            if not self._motor_test_enabled:
+                # motors are initialised; no test requested: done (the FC stays plugged in, so all_done waits for it to go)
+                self._flog.info("FC flash station: motor-test stage disabled by operator - FC rebooted and motors initialised")
+                self._set_phase("all_done")
                 return
             self._set_phase("connecting_motor_test")
             self._begin_motor_connect()
