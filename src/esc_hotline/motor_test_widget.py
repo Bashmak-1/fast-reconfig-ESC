@@ -141,6 +141,7 @@ class MotorTestPage(QWidget):
     _set_speed_bounds_requested = pyqtSignal(float, float)
     _set_curves_requested = pyqtSignal(object, object)
     _set_tick_requested = pyqtSignal(int)
+    _recalculate_requested = pyqtSignal()
     _manual_target_requested = pyqtSignal(int, int)
     _ports_scanned = pyqtSignal(object)
 
@@ -292,6 +293,11 @@ class MotorTestPage(QWidget):
         self._reset_chart_btn = QPushButton("Скинути графік")
         self._reset_chart_btn.setToolTip("Повертає криву Безе, точки, тривалості й межі до стандартних.")
         rate_row.addWidget(self._reset_chart_btn)
+        self._recalc_btn = QPushButton("Розрахувати графік")
+        self._recalc_btn.setToolTip("Ще раз розраховує обидва відрізки по графіку й перевіряє значення. Робиться й автоматично.")
+        rate_row.addWidget(self._recalc_btn)
+        self._recalc_label = QLabel()
+        rate_row.addWidget(self._recalc_label)
         rate_row.addSpacing(12)
         rate_row.addWidget(QLabel("Крок:"))
         self._tick_combo = _NoWheelComboBox()
@@ -462,6 +468,8 @@ class MotorTestPage(QWidget):
         self._set_curves_requested.connect(self.manager.set_curves)
         self._set_tick_requested.connect(self.manager.set_tick_ms)
         self._reset_chart_btn.clicked.connect(self._ramp_chart.reset_all)
+        self._recalculate_requested.connect(self.manager.recalculate)
+        self._recalc_btn.clicked.connect(lambda _checked=False: self._on_recalculate())
         self._ramp_chart.curves_changed.connect(self._on_chart_curves_changed)
 
         self._ramp_chart.profile_changed.connect(self._on_chart_profile_changed)
@@ -592,6 +600,14 @@ class MotorTestPage(QWidget):
         """The sibling tab already saved them - only mirror into this chart/manager (no re-emit)."""
         self._ramp_chart.set_curves(up, down)
         self._set_curves_requested.emit(up, down)
+
+    def _on_recalculate(self) -> None:
+        tick = self._tick_combo.currentData() or TICK_CHOICES_MS[0]
+        short, full = self._ramp_chart.recalculate(tick)
+        self._recalculate_requested.emit()
+        self._set_ramp_mode_requested.emit(self._ramp_mode_combo.currentData())
+        self._recalc_label.setText(short)
+        self._on_log_message("info", "Розрахунок графіка:\n" + full)
 
     def _on_tick_changed(self, _index: int) -> None:
         ms = self._tick_combo.currentData()

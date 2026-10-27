@@ -53,9 +53,9 @@ from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPaintEvent, QPen
 from PyQt6.QtWidgets import QMenu, QWidget
 
-from .motor_ramp import msp_to_percent
+from .motor_ramp import msp_to_percent, percent_to_msp
 from .ramp_curve import INDEPENDENT, SMOOTH, RampCurve
-from .motor_test_manager import PHASE_DOWN, PHASE_HOLD, PHASE_IDLE, PHASE_UP, RAMP_BEZIER
+from .motor_test_manager import MAX_SLEW_PER_S, PHASE_DOWN, PHASE_HOLD, PHASE_IDLE, PHASE_UP, RAMP_BEZIER
 from .ramp_chart_math import (
     DEFAULT_DOWN_DURATION_S,
     DEFAULT_HOLD_DURATION_S,
@@ -63,6 +63,7 @@ from .ramp_chart_math import (
     DEFAULT_MIN_PERCENT,
     DEFAULT_UP_DURATION_S,
     MAX_PHASE_DURATION_S,
+    build_leg_table,
     clamp_bound_pair,
     clamp_duration_s,
     percent_to_pixel_y,
@@ -124,6 +125,31 @@ class RampChartWidget(QWidget):
         """Programmatic update - like set_bounds(), never emits curves_changed."""
         self._up_curve, self._down_curve = up, down
         self.update()
+
+    def recalculate(self, tick_ms: int) -> tuple[str, str]:
+        """Solve both legs again from what the chart shows right now, exactly as the motor does (per-tick table,
+        raw MSP values) and check the result. Returns (short text, full report)."""
+        tick_s = tick_ms / 1000
+        lines, worst, ok = [], 0.0, True
+        for name, dur, a, b, curve in (
+            ("Розгін", self._up_duration_s, self._min_percent, self._max_percent, self._up_curve),
+            ("Спад", self._down_duration_s, self._max_percent, self._min_percent, self._down_curve),
+        ):
+            table = [percent_to_msp(p) for p in build_leg_table(self._use_bezier, dur, a, b, curve, tick_s)]
+            step = max((abs(y - x) for x, y in zip(table, table[1:])), default=0) / 10  # % per tick (1 MSP unit = 0.1 %)
+            worst = max(worst, step)
+            ends = table[0] == percent_to_msp(a) and table[-1] == percent_to_msp(b)
+            inside = all(min(percent_to_msp(a), percent_to_msp(b)) <= v <= max(percent_to_msp(a), percent_to_msp(b)) for v in table)
+            ok = ok and ends and inside
+            lines.append(f"{name}: {len(table)} точок по {tick_ms} мс, {table[0] / 10 - 100:.1f}% -> {table[-1] / 10 - 100:.1f}%, "
+                         f"найбільший крок {step:.2f}% за тік")
+        limit = MAX_SLEW_PER_S / 10 * tick_s  # % per tick the safety guard allows
+        slow = worst > limit
+        lines.append(f"Утримання: {self._hold_duration_s:.2f} с на {self._max_percent:.2f}%. Межі {self._min_percent:.2f}-{self._max_percent:.2f}%.")
+        if slow:
+            lines.append(f"Увага: крок більший за дозволений захистом ({limit:.1f}% за тік) - мотор піде повільніше, ніж на графіку.")
+        short = ("✓ Розраховано" if ok and not slow else "⚠ Розраховано з попередженням") + f": найбільший крок {worst:.2f}% за тік"
+        return short, "\n".join(lines)
 
     def reset_all(self) -> None:
         """"Скинути графік": default curves AND default points (durations + bounds)."""

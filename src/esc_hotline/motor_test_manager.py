@@ -401,6 +401,10 @@ class MotorTestManager(QObject):
         self._leg_cache.clear()
         self._begin_leg()
 
+    def recalculate(self) -> None:
+        """"Розрахувати графік" button: drop every solved table so the next Start solves them again."""
+        self._leg_cache.clear()
+
     def set_curves(self, up: Optional[RampCurve], down: Optional[RampCurve]) -> None:
         """Operator-edited shapes for розгін/спад (used only in RAMP_BEZIER mode); takes effect from the next tick."""
         self._up_curve, self._down_curve = up, down

@@ -68,7 +68,8 @@ from .motor_test_manager import (
 from .motor_test_widget import _NoWheelComboBox as QComboBox
 from .motor_test_widget import _make_duration_spinbox
 from .ramp_chart_math import MIN_PHASE_DURATION_S
-from .ramp_curve import DOWN_CURVE_KEY, UP_CURVE_KEY, RampCurve
+from .motor_test_manager import TICK_MS
+from .ramp_curve import DOWN_CURVE_KEY, TICK_KEY, UP_CURVE_KEY, RampCurve
 from .ramp_chart_widget import RampChartWidget
 from .serial_transport import list_fc_ports
 from .settings_store import load_float, load_int, load_str, save_float, save_int, save_str
@@ -487,6 +488,11 @@ class FcFlashPage(QWidget):
         self._motor_reset_chart_btn = QPushButton("Скинути графік")
         self._motor_reset_chart_btn.setToolTip("Повертає криву Безе, точки, тривалості й межі до стандартних.")
         motor_rate_row.addWidget(self._motor_reset_chart_btn)
+        self._motor_recalc_btn = QPushButton("Розрахувати графік")
+        self._motor_recalc_btn.setToolTip("Ще раз розраховує обидва відрізки по графіку й перевіряє значення. Робиться й автоматично.")
+        motor_rate_row.addWidget(self._motor_recalc_btn)
+        self._motor_recalc_label = QLabel()
+        motor_rate_row.addWidget(self._motor_recalc_label)
         motor_rate_row.addSpacing(24)
         motor_rate_row.addWidget(QLabel("Режим тесту:"))
         self._motor_test_mode_combo = QComboBox()
@@ -520,6 +526,7 @@ class FcFlashPage(QWidget):
         self._motor_chart.profile_changed.connect(self._on_motor_chart_profile_changed)
         self._motor_chart.curves_changed.connect(self._on_motor_chart_curves_changed)
         self._motor_reset_chart_btn.clicked.connect(self._motor_chart.reset_all)
+        self._motor_recalc_btn.clicked.connect(lambda _checked=False: self._on_motor_recalculate())
         motor_config_layout.addWidget(self._motor_chart)
 
         root.addWidget(self._motor_config_container)
@@ -688,6 +695,11 @@ class FcFlashPage(QWidget):
         self.controller.set_motor_test_enabled(checked)
         self._motor_config_container.setVisible(checked or self._motor_manual_checkbox.isChecked())
         self._update_start_stop_button()
+
+    def _on_motor_recalculate(self) -> None:
+        short, full = self._motor_chart.recalculate(load_int(TICK_KEY, TICK_MS))
+        self._motor_recalc_label.setText(short)
+        self._activity_log.appendPlainText("Розрахунок графіка:\n" + full)
 
     def _on_motor_manual_toggled(self, checked: bool) -> None:
         save_int(_MOTOR_TEST_MANUAL_KEY, 1 if checked else 0)

@@ -92,3 +92,18 @@ def test_handle_types_survive_json_and_old_v1_still_loads():
     assert RampCurve.from_json(c.to_json()).modes == (INDEPENDENT,)
     old = '{"v":1,"p":' + RampCurve.default().to_json().split('"p":')[1].split(',"m"')[0] + "}"
     assert RampCurve.from_json(old).mode_of(1) == SMOOTH
+
+
+def test_chart_recalculate_reports_a_good_profile_and_warns_about_a_too_steep_one():
+    from PyQt6.QtWidgets import QApplication
+
+    from esc_hotline.ramp_chart_widget import RampChartWidget
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    chart = RampChartWidget()
+    chart.set_curve_mode("bezier")
+    short, full = chart.recalculate(50)
+    assert short.startswith("✓") and "81 точок" in full
+    chart.set_durations(0.1, 0.0, 0.1)  # the whole range in two ticks: the slew guard would slow it down
+    short, full = chart.recalculate(50)
+    assert short.startswith("⚠") and "Увага" in full
