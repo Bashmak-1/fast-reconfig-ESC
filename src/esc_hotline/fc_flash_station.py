@@ -573,6 +573,7 @@ class FcFlashStationController(QObject):
     # Internal-only: reach the private MotorTestManager (final motor-test step).
     _motor_connect_requested = pyqtSignal(str, int)
     _motor_disconnect_requested = pyqtSignal()
+    _motor_stop_requested = pyqtSignal()  # smooth spin-down of a running test (MotorTestManager.stop_sweep)
     _motor_check_disarmed_requested = pyqtSignal()
     _motor_start_sweep_requested = pyqtSignal(float, float, float)
     _motor_set_ramp_mode_requested = pyqtSignal(str)
@@ -615,6 +616,7 @@ class FcFlashStationController(QObject):
         self._motor_connect_requested.connect(motor_mgr.connect)
         self.dfu_detail_changed.connect(lambda text: self._flog.info("FC-tab message: %s", text))  # whatever the operator sees, the log keeps
         self._motor_disconnect_requested.connect(motor_mgr.disconnect)
+        self._motor_stop_requested.connect(motor_mgr.stop_sweep)
         self._motor_check_disarmed_requested.connect(motor_mgr.check_disarmed)
         self._motor_start_sweep_requested.connect(motor_mgr.start_sweep)
         self._motor_set_ramp_mode_requested.connect(motor_mgr.set_ramp_mode)
@@ -640,6 +642,8 @@ class FcFlashStationController(QObject):
         self._flash_esc_enabled = True
         self._motor_test_enabled = True
         self._motor_test_manual = False  # test only on the operator's button (phase waiting_motor_start)
+        self._motor_stop_pending = False  # a smooth spin-down was requested and has not finished yet
+        self._motor_stop_disarm = False  # ... by the global Стоп: disarm the station when it finishes
         self._esc_indices: list[int] = [0]
         self._protocol_index: int = MOTOR_PROTOCOLS.index("DSHOT300")
         self._fc_flashed_no_protocol = False
@@ -829,9 +833,46 @@ class FcFlashStationController(QObject):
             self._set_phase("waiting_fc_normal")
         self._poll_timer.start()
 
+    def _request_smooth_motor_stop(self, disarm: bool) -> None:
+        """Стоп during the motor test: spin down along the down curve (an abrupt drop burned FC controllers before).
+        A second press stops at once; a watchdog forces it if the spin-down never reports back."""
+        self._motor_stop_pending, self._motor_stop_disarm = True, disarm
+        self.dfu_detail_changed.emit("Зупинка моторів: плавний спад... Натисніть Стоп ще раз для негайної зупинки.")
+        self._motor_stop_requested.emit()
+        QTimer.singleShot(75_000, self._force_motor_stop)
+
+    def _force_motor_stop(self) -> None:
+        if self._armed and self._motor_stop_pending:
+            self.stop_motor_test()
+
+    def _after_motor_stop(self) -> None:
+        """The motors are stopped (smoothly or at once): back to waiting for the button, or finished."""
+        disarm, self._motor_stop_pending, self._motor_stop_disarm = self._motor_stop_disarm, False, False
+        self._motor_disconnect_requested.emit()
+        self._set_phase("waiting_motor_start" if self._motor_test_manual and not disarm else "all_done")
+        if disarm:
+            self.stop()
+
+    def stop_motor_test(self) -> None:
+        """The motor-test Стоп button (the station stays armed)."""
+        if not self._armed:
+            return
+        if self._phase == "running_motor_test":
+            if self._motor_stop_pending:
+                self._flog.info("FC flash station: second Стоп - stopping the motors at once")
+                self._after_motor_stop()
+            else:
+                self._request_smooth_motor_stop(False)
+        elif self._phase in ("connecting_motor_test", "checking_motor_armed"):
+            self._after_motor_stop()
+
     def stop(self) -> None:
         if not self._armed:
             return
+        if self._phase == "running_motor_test" and not self._motor_stop_pending:
+            self._request_smooth_motor_stop(True)  # the global Стоп also spins down first, then disarms
+            return
+        self._motor_stop_pending = self._motor_stop_disarm = False
         self._armed = False
         self.armed_changed.emit(False)
         self._poll_timer.stop()
@@ -1501,6 +1542,10 @@ class FcFlashStationController(QObject):
 
     def _on_motor_phase_changed(self, phase: str) -> None:
         if not self._armed or self._phase != "running_motor_test":
+            return
+        if phase == MOTOR_PHASE_IDLE and self._motor_stop_pending:
+            self._flog.info("FC flash station: motors spun down after Стоп")
+            self._after_motor_stop()
             return
         if phase == MOTOR_PHASE_IDLE:
             self._flog.info("FC flash station: final motor test finished - all done")

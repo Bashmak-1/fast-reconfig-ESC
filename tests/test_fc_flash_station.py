@@ -415,3 +415,85 @@ def test_manual_motor_test_waits_for_the_button_and_ignores_what_was_flashed(mon
     finally:
         c._armed = False
         c.shutdown()
+
+
+def test_stop_during_the_motor_test_spins_down_first_and_a_second_press_stops_at_once():
+    from unittest.mock import MagicMock
+
+    from PyQt6.QtWidgets import QApplication
+
+    from esc_hotline import fc_flash_station as fs
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    c = fs.FcFlashStationController()
+    try:
+        c._armed = True
+        c._motor_stop_requested = MagicMock()
+        c._motor_disconnect_requested = MagicMock()
+        c._set_phase("running_motor_test")
+        c.stop()  # global Стоп: smooth spin-down requested, station still armed
+        c._motor_stop_requested.emit.assert_called_once()
+        assert c._armed and c._motor_stop_pending
+        c._on_motor_phase_changed("idle")  # the manager finished the spin-down
+        assert not c._armed and c.phase == "idle" and not c._motor_stop_pending
+        c._motor_disconnect_requested.emit.assert_called()
+
+        c._armed = True
+        c._motor_test_manual = True
+        c._motor_stop_requested.reset_mock()
+        c._set_phase("running_motor_test")
+        c.stop_motor_test()  # the motor-test button: back to waiting for the next press, station stays armed
+        c._motor_stop_requested.emit.assert_called_once()
+        c.stop_motor_test()  # second press: at once
+        assert c._armed and c.phase == "waiting_motor_start" and not c._motor_stop_pending
+
+        c._set_phase("connecting_motor_test")  # not spinning yet: just abort
+        c.stop_motor_test()
+        assert c.phase == "waiting_motor_start"
+    finally:
+        c._armed = False
+        c.shutdown()
+
+
+def test_stop_button_stays_enabled_while_the_motors_are_tested():
+    import os
+    import tempfile
+
+    from PyQt6.QtWidgets import QApplication
+
+    os.environ.setdefault("USERPROFILE", tempfile.mkdtemp())
+    from esc_hotline.fc_flash_widget import FcFlashPage
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    page = FcFlashPage()
+    page.controller._armed = True
+    try:
+        for phase in ("connecting_motor_test", "checking_motor_armed", "running_motor_test"):
+            page.controller._set_phase(phase)
+            assert page._start_stop_btn.isEnabled() and page._motor_stop_btn.isEnabled(), phase
+        page.controller._set_phase("flashing")  # flashing itself stays protected
+        assert not page._start_stop_btn.isEnabled() and not page._motor_stop_btn.isEnabled()
+    finally:
+        page.controller._armed = False
+        page.shutdown()
+
+
+def test_motors_tab_stop_button_follows_a_slider_driven_motor_():
+    import os
+    import tempfile
+
+    from PyQt6.QtWidgets import QApplication
+
+    os.environ.setdefault("USERPROFILE", tempfile.mkdtemp())
+    from esc_hotline.motor_test_widget import MotorTestPage
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    page = MotorTestPage()
+    try:
+        page._connected = page._sweep_idle = True
+        page._on_value_changed([1200, 1000])
+        assert page._stop_btn.isEnabled()
+        page._on_value_changed([1000, 1000])
+        assert not page._stop_btn.isEnabled()
+    finally:
+        page.shutdown() if hasattr(page, "shutdown") else None

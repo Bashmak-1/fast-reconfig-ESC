@@ -73,7 +73,9 @@ from .ramp_curve import DOWN_CURVE_KEY, SHOW_POINTS_KEY, TICK_KEY, UP_CURVE_KEY,
 from .ramp_chart_widget import RampChartWidget
 from .serial_transport import list_fc_ports
 from .settings_store import load_float, load_int, load_str, save_float, save_int, save_str
-from .theme import ACCENT_AMBER, ACCENT_ERROR, TEXT_MUTED
+from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
+_BTN_DISABLED = "QPushButton:disabled { background-color: #4a4a4a; color: #999999; }"  # a dimmed button must not keep its bright colour
+
 
 # Same persisted keys "Прогон мотором" (motor_test_widget.py) owns -
 # deliberately the SAME keys, not a separate set, so changing the ramp
@@ -456,11 +458,20 @@ class FcFlashPage(QWidget):
         )
         self._motor_manual_checkbox.toggled.connect(self._on_motor_manual_toggled)
         motor_header_row.addWidget(self._motor_manual_checkbox)
+        motor_header_row.addStretch(1)  # the important buttons sit on the right, like the main Старт/Стоп
         self._motor_start_btn = QPushButton("Старт тесту моторів")
         self._motor_start_btn.setEnabled(False)
+        self._motor_start_btn.setMinimumSize(200, 52)
+        self._motor_start_btn.setStyleSheet("QPushButton { font-size: 17px; font-weight: 700; background-color: " + ACCENT_GREEN + "; color: white; } " + _BTN_DISABLED)
         self._motor_start_btn.clicked.connect(lambda _checked=False: self.controller.start_motor_test())
         motor_header_row.addWidget(self._motor_start_btn)
-        motor_header_row.addStretch(1)
+        self._motor_stop_btn = QPushButton("Стоп моторів")
+        self._motor_stop_btn.setEnabled(False)
+        self._motor_stop_btn.setMinimumSize(160, 52)
+        self._motor_stop_btn.setStyleSheet("QPushButton { font-size: 17px; font-weight: 700; background-color: " + ACCENT_ERROR + "; color: white; } " + _BTN_DISABLED)
+        self._motor_stop_btn.setToolTip("Плавно зупиняє мотори. Друге натискання - негайна зупинка.")
+        self._motor_stop_btn.clicked.connect(lambda _checked=False: self.controller.stop_motor_test())
+        motor_header_row.addWidget(self._motor_stop_btn)
         root.addLayout(motor_header_row)
 
         # Ramp config for the final automatic motor-test step this tab runs
@@ -913,6 +924,7 @@ class FcFlashPage(QWidget):
         changed = phase != self._last_phase
         self._last_phase = phase
         self._motor_start_btn.setEnabled(phase == "waiting_motor_start")
+        self._motor_stop_btn.setEnabled(phase in ("connecting_motor_test", "checking_motor_armed", "running_motor_test"))
         if phase in _CUE_PHASES:
             if changed or not self._cue_timer.isActive():
                 self._cue_timer.start()
@@ -1119,8 +1131,7 @@ class FcFlashPage(QWidget):
             self._start_stop_btn.setText("Стоп")
             busy_phase = self.controller.phase in (
                 "flashing_fc", "resetting_fc", "flashing", "writing_protocol",
-                "connecting_motor_test", "checking_motor_armed", "running_motor_test",
-            )
+            )  # the motor test can always be stopped
             self._start_stop_btn.setEnabled(not busy_phase)
             self._set_start_hint("Неможливо зупинити під час прошивки." if busy_phase else "")
             return

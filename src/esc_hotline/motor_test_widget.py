@@ -56,6 +56,8 @@ from .serial_transport import list_fc_ports
 from .manual_counter_widget import ManualCounterWidget
 from .settings_store import load_float, load_int, load_str, save_float, save_int, save_str
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, TEXT_MUTED
+_BTN_DISABLED = "QPushButton:disabled { background-color: #4a4a4a; color: #999999; }"  # a dimmed button must not keep its bright colour
+
 
 _COUNT_BY_PORT_KEY = "motor_test_count_by_port"
 _PORT_KEY = "motor_test_port"
@@ -352,11 +354,15 @@ class MotorTestPage(QWidget):
         self._start_btn.setObjectName("connectButton")
         self._start_btn.setEnabled(False)
         self._start_btn.clicked.connect(self._on_start_clicked)
-        btn_row.addWidget(self._start_btn)
+        self._start_btn.setMinimumHeight(60)
+        self._start_btn.setStyleSheet("QPushButton { font-size: 22px; font-weight: 700; } QPushButton:disabled { color: #999999; }")
+        btn_row.addWidget(self._start_btn, 1)
         self._stop_btn = QPushButton("Стоп")
         self._stop_btn.setEnabled(False)
         self._stop_btn.clicked.connect(self._on_stop_clicked)
-        btn_row.addWidget(self._stop_btn)
+        self._stop_btn.setMinimumHeight(60)
+        self._stop_btn.setStyleSheet("QPushButton { font-size: 22px; font-weight: 700; background-color: " + ACCENT_ERROR + "; color: white; } " + _BTN_DISABLED)
+        btn_row.addWidget(self._stop_btn, 1)
         root.addLayout(btn_row)
 
         counter_row = QHBoxLayout()  # same running total as the hotspot-line tab: +1 per finished run, editable
@@ -912,6 +918,8 @@ class MotorTestPage(QWidget):
             if not slider.isSliderDown():
                 slider.setValue(v)
             label.setText(f"{msp_to_percent(v):.1f}%")
+        if self._sweep_idle:  # a motor driven by its slider can be stopped with the button too
+            self._stop_btn.setEnabled(top > MSP_MIN)
 
     def _on_log_message(self, level: str, text: str) -> None:
         self._status_label.setStyleSheet(f"color: {_STATUS_COLORS.get(level, TEXT_MUTED)};")
