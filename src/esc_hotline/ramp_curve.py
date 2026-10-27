@@ -13,6 +13,10 @@ Default = the old fixed "Безе" curve 3t^2 - 2t^3 split exactly at t=0.5 into
 two Bezier segments (so a default curve behaves bit-for-bit like before,
 and the middle anchor already sits on it).
 
+Every interior anchor has a handle type (saved with the curve): SMOOTH - the two handles stay on one
+straight line through the anchor (180 degrees, dragging one turns the other); INDEPENDENT - each handle is
+moved on its own, so the curve can bend sharply or leave the anchor along one handle only.
+
 Safety rules (enforced by every constructor/editor here, not by the UI):
 - anchors strictly increase in x and control x stays inside its own segment,
   so x(t) is monotonic - the curve is always a real function of time;
@@ -34,6 +38,7 @@ TICK_KEY = "motor_test_tick_ms"
 
 MIN_ANCHOR_GAP = 0.05  # keep anchors this far (in x) from each other / the ends
 _SOLVE_ITERATIONS = 50
+SMOOTH, INDEPENDENT = 0, 1  # per-anchor handle type
 
 _DEFAULT_POINTS: tuple[Point, ...] = (
     (0.0, 0.0), (1 / 6, 0.0), (1 / 3, 0.25), (0.5, 0.5), (2 / 3, 0.75), (5 / 6, 1.0), (1.0, 1.0),
@@ -71,6 +76,10 @@ def _valid(pts: tuple[Point, ...]) -> bool:
 @dataclass(frozen=True)
 class RampCurve:
     pts: tuple[Point, ...]
+    modes: tuple[int, ...] = ()  # handle type per interior anchor (anchor k -> modes[k - 1]); missing = SMOOTH
+
+    def mode_of(self, anchor: int) -> int:
+        return self.modes[anchor - 1] if 0 < anchor <= len(self.modes) else SMOOTH
 
     # ---- construction ------------------------------------------------
 
@@ -79,20 +88,21 @@ class RampCurve:
         return RampCurve(_DEFAULT_POINTS)
 
     @staticmethod
-    def from_points(points) -> Optional["RampCurve"]:
+    def from_points(points, modes=()) -> Optional["RampCurve"]:
         try:
             pts = tuple((float(x), float(y)) for x, y in points)
+            modes = tuple(INDEPENDENT if int(m) == INDEPENDENT else SMOOTH for m in modes)
         except (TypeError, ValueError):
             return None
-        return RampCurve(pts) if _valid(pts) else None
+        return RampCurve(pts, modes) if _valid(pts) else None
 
     @staticmethod
     def from_json(text: str) -> "RampCurve":
         """Never raises: anything missing/corrupt/unsafe falls back to the default curve."""
         try:
             data = json.loads(text)
-            if data.get("v") == 1:
-                curve = RampCurve.from_points(data["p"])
+            if data.get("v") in (1, 2):  # v1 (older builds) has no handle types - all smooth
+                curve = RampCurve.from_points(data["p"], data.get("m", ()))
                 if curve is not None:
                     return curve
         except (TypeError, ValueError, KeyError, AttributeError):
@@ -100,7 +110,8 @@ class RampCurve:
         return RampCurve.default()
 
     def to_json(self) -> str:
-        return json.dumps({"v": 1, "p": [[round(x, 5), round(y, 5)] for x, y in self.pts]}, separators=(",", ":"))
+        data = {"v": 2, "p": [[round(x, 5), round(y, 5)] for x, y in self.pts], "m": list(self.modes)}
+        return json.dumps(data, separators=(",", ":"))
 
     # ---- evaluation ------------------------------------------------
 
@@ -152,11 +163,22 @@ class RampCurve:
         for k in range(len(pts)):  # the neighbouring segments' far handles may now poke outside their range too
             if k % 3:
                 pts[k] = self._fit_handle(k, pts[k], anchor_xs)
-        return RampCurve(tuple(pts))
+        return RampCurve(tuple(pts), self.modes)
+
+    def with_mode(self, anchor: int, mode: int) -> "RampCurve":
+        """Set an interior anchor's handle type. Switching to SMOOTH turns the out-handle onto the line of the
+        in-handle (keeping its length), so the point is smooth right away."""
+        if not 0 < anchor < self.segments:
+            return self
+        modes = list(self.modes) + [SMOOTH] * (self.segments - 1 - len(self.modes))
+        modes[anchor - 1] = INDEPENDENT if mode == INDEPENDENT else SMOOTH
+        out = RampCurve(self.pts, tuple(modes))
+        return out.move_handle(3 * anchor - 1, self.pts[3 * anchor - 1], True) if modes[anchor - 1] == SMOOTH else out
 
     def move_handle(self, k: int, pos: Point, smooth: bool = True) -> "RampCurve":
         """Move control point `k` (a handle, not an anchor). With `smooth` the opposite handle of an
-        interior anchor turns to stay in line (keeping its own length), like a smooth Illustrator point."""
+        interior anchor turns to stay in line (keeping its own length), like a smooth Illustrator point.
+        Callers pass smooth=curve.mode_of(anchor) == SMOOTH (and not Alt)."""
         if k % 3 == 0 or not 0 < k < len(self.pts) - 1:
             return self
         pts = list(self.pts)
@@ -171,4 +193,4 @@ class RampCurve:
             if n > 1e-9:
                 olen = ((pts[other][0] - ax) ** 2 + (pts[other][1] - ay) ** 2) ** 0.5
                 pts[other] = self._fit_handle(other, (ax - vx / n * olen, ay - vy / n * olen), anchor_xs)
-        return RampCurve(tuple(pts))
+        return RampCurve(tuple(pts), self.modes)

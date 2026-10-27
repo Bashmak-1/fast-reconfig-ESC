@@ -51,10 +51,10 @@ from typing import Optional
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPaintEvent, QPen
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QMenu, QWidget
 
 from .motor_ramp import msp_to_percent
-from .ramp_curve import RampCurve
+from .ramp_curve import INDEPENDENT, SMOOTH, RampCurve
 from .motor_test_manager import PHASE_DOWN, PHASE_HOLD, PHASE_IDLE, PHASE_UP, RAMP_BEZIER
 from .ramp_chart_math import (
     DEFAULT_DOWN_DURATION_S,
@@ -270,6 +270,31 @@ class RampChartWidget(QWidget):
             self._selected = None
         self.update()
 
+    def contextMenuEvent(self, event) -> None:
+        """Right click on a curve anchor: choose its handle type (saved with the curve)."""
+        if not self._interactive or not self._curve_handles_visible():
+            return
+        hit = self._hit_test(QPointF(event.pos()))
+        if hit not in ("U", "D"):
+            return
+        self._selected = hit
+        curve = self._curve_of(hit)
+        menu = QMenu(self)
+        smooth = menu.addAction("Гладка точка: ручки по прямій (180°)")
+        independent = menu.addAction("Окремі ручки: кожна гнеться сама (Alt - тимчасово)")
+        for act, mode in ((smooth, SMOOTH), (independent, INDEPENDENT)):
+            act.setCheckable(True)
+            act.setChecked(curve.mode_of(1) == mode)
+        chosen = menu.exec(event.globalPos())
+        if chosen in (smooth, independent):
+            new = curve.with_mode(1, SMOOTH if chosen is smooth else INDEPENDENT)
+            if hit == "U":
+                self._up_curve = new
+            else:
+                self._down_curve = new
+            self.update()
+            self.curves_changed.emit(self._up_curve, self._down_curve)
+
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         if not self._interactive:
             return
@@ -293,7 +318,7 @@ class RampChartWidget(QWidget):
             if len(self._dragging) == 1:
                 new = curve.move_anchor(1, norm)
             else:
-                smooth = not (event.modifiers() & Qt.KeyboardModifier.AltModifier)
+                smooth = curve.mode_of(1) == SMOOTH and not (event.modifiers() & Qt.KeyboardModifier.AltModifier)
                 new = curve.move_handle(2 if self._dragging[1] == "1" else 4, norm, smooth)
             if leg == "U":
                 self._up_curve = new
@@ -408,10 +433,11 @@ class RampChartWidget(QWidget):
                 m = self._to_pixel(leg, pts[3])
                 if self._selected == leg:
                     painter.setPen(QPen(QColor(TEXT_MUTED), 1))
+                    independent = self._curve_of(leg).mode_of(1) == INDEPENDENT
                     for k in (2, 4):
                         hp = self._to_pixel(leg, pts[k])
                         painter.drawLine(m, hp)
-                        painter.setBrush(QColor(BG_PANEL))
+                        painter.setBrush(QColor(ACCENT_AMBER) if independent else QColor(BG_PANEL))  # filled = independent
                         painter.drawEllipse(hp, _HANDLE_RADIUS, _HANDLE_RADIUS)
                 painter.setPen(QPen(QColor(BG_MAIN), 1))
                 painter.setBrush(QColor(ACCENT_AMBER if self._selected == leg else ACCENT_GREEN))

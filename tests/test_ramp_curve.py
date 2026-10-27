@@ -58,3 +58,37 @@ def test_curve_flows_through_the_shared_segment_function():
     assert segment_value(False, 2.0, 10.0, 0, 100, curve=steep) == pytest.approx(20.0)  # linear mode ignores curves
     v = profile_value_at_time(True, 5.0, 4.0, 0.0, 4.0, 0, 100, up_curve=steep, down_curve=None)
     assert 0 <= v <= 100
+
+
+# ---- per-anchor handle type (smooth 180 degrees / independent), saved with the curve -----------------------------
+
+
+def test_independent_handles_move_alone_and_smooth_ones_turn_together():
+    from esc_hotline.ramp_curve import INDEPENDENT, SMOOTH
+
+    base = RampCurve.default()
+    smooth = base.move_handle(2, (0.3, 0.1), smooth=base.mode_of(1) == SMOOTH)
+    assert smooth.pts[4] != base.pts[4]  # the opposite handle turned with it
+    indep = base.with_mode(1, INDEPENDENT)
+    moved = indep.move_handle(2, (0.3, 0.1), smooth=indep.mode_of(1) == SMOOTH)
+    assert moved.pts[4] == base.pts[4] and moved.pts[2] != base.pts[2]  # only the dragged handle moved
+    assert moved.modes == (INDEPENDENT,)
+
+
+def test_switching_back_to_smooth_realigns_the_handles():
+    from esc_hotline.ramp_curve import INDEPENDENT, SMOOTH
+
+    c = RampCurve.default().with_mode(1, INDEPENDENT).move_handle(2, (0.3, 0.1), smooth=False)
+    c = c.with_mode(1, SMOOTH)
+    ax, ay = c.pts[3]
+    (ix, iy), (ox, oy) = c.pts[2], c.pts[4]
+    assert abs((ix - ax) * (oy - ay) - (iy - ay) * (ox - ax)) < 1e-9  # in-handle, anchor, out-handle on one line
+
+
+def test_handle_types_survive_json_and_old_v1_still_loads():
+    from esc_hotline.ramp_curve import INDEPENDENT, SMOOTH
+
+    c = RampCurve.default().with_mode(1, INDEPENDENT)
+    assert RampCurve.from_json(c.to_json()).modes == (INDEPENDENT,)
+    old = '{"v":1,"p":' + RampCurve.default().to_json().split('"p":')[1].split(',"m"')[0] + "}"
+    assert RampCurve.from_json(old).mode_of(1) == SMOOTH
