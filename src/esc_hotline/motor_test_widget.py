@@ -118,7 +118,7 @@ def _make_duration_spinbox(min_value: float) -> QDoubleSpinBox:
     duration math (and dragging a chart point) already supported
     internally all along."""
     box = _NoWheelDoubleSpinBox()
-    box.setDecimals(1)
+    box.setDecimals(2)
     box.setSingleStep(_DURATION_STEP_S)
     box.setRange(min_value, _MAX_DURATION_S)
     box.setFixedWidth(80)
@@ -570,8 +570,8 @@ class MotorTestPage(QWidget):
         # never reach the freshly-built RampChartWidget (durations were
         # already pushed by _apply_durations() above).
         self._ramp_chart.set_curve_mode(self._ramp_mode_combo.currentData())
-        min_pct = load_int(_MIN_BOUND_KEY, DEFAULT_MIN_BOUND)
-        max_pct = load_int(_MAX_BOUND_KEY, DEFAULT_MAX_BOUND)
+        min_pct = load_float(_MIN_BOUND_KEY, DEFAULT_MIN_BOUND)
+        max_pct = load_float(_MAX_BOUND_KEY, DEFAULT_MAX_BOUND)
         self._ramp_chart.set_bounds(min_pct, max_pct)
         self._set_speed_bounds_requested.emit(min_pct, max_pct)
         up_curve = RampCurve.from_json(load_str(UP_CURVE_KEY))
@@ -605,8 +605,8 @@ class MotorTestPage(QWidget):
             self._down_duration_stepper.value(),
             self._ramp_mode_combo.currentData(),
             self._test_mode_combo.currentData(),
-            float(load_int(_MIN_BOUND_KEY, DEFAULT_MIN_BOUND)),
-            float(load_int(_MAX_BOUND_KEY, DEFAULT_MAX_BOUND)),
+            load_float(_MIN_BOUND_KEY, DEFAULT_MIN_BOUND),
+            load_float(_MAX_BOUND_KEY, DEFAULT_MAX_BOUND),
         )
 
     def apply_external_ramp_settings(
@@ -724,7 +724,7 @@ class MotorTestPage(QWidget):
             (self._down_duration_stepper, down_s),
         ):
             stepper.blockSignals(True)
-            stepper.setValue(round(value, 1))
+            stepper.setValue(round(value, 2))
             stepper.blockSignals(False)
         save_float(_UP_DURATION_KEY, self._up_duration_stepper.value())
         save_float(_HOLD_DURATION_KEY, self._hold_duration_stepper.value())
@@ -742,8 +742,8 @@ class MotorTestPage(QWidget):
         # of a second, matching the steppers' own precision), and push the
         # new bounds to the manager, same as before this feature.
         self._apply_durations(up_s, hold_s, down_s)
-        save_int(_MIN_BOUND_KEY, round(min_percent))
-        save_int(_MAX_BOUND_KEY, round(max_percent))
+        save_float(_MIN_BOUND_KEY, round(min_percent, 2))
+        save_float(_MAX_BOUND_KEY, round(max_percent, 2))
         self._set_speed_bounds_requested.emit(min_percent, max_percent)
         self.ramp_settings_changed.emit(*self._current_ramp_settings_tuple())
 
@@ -865,12 +865,12 @@ class MotorTestPage(QWidget):
         top = max(values)
         pct = msp_to_percent(top)
         self._master_progress.setValue(round(pct))
-        self._master_pct_label.setText(f"{pct:.0f}%")
+        self._master_pct_label.setText(f"{pct:.1f}%")
         self._ramp_chart.set_current_value(top)
         for slider, label, v in zip(self._motor_sliders, self._motor_labels, values):
             if not slider.isSliderDown():
                 slider.setValue(v)
-            label.setText(f"{msp_to_percent(v):.0f}%")
+            label.setText(f"{msp_to_percent(v):.1f}%")
 
     def _on_log_message(self, level: str, text: str) -> None:
         self._status_label.setStyleSheet(f"color: {_STATUS_COLORS.get(level, TEXT_MUTED)};")

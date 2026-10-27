@@ -106,7 +106,7 @@ from .ramp_curve import DOWN_CURVE_KEY, TICK_KEY, UP_CURVE_KEY, RampCurve
 from .motor_test_manager import ARMED_BIT, PHASE_IDLE as MOTOR_PHASE_IDLE, RAMP_BEZIER, RAMP_LINEAR, TEST_MODE_ALL, TICK_MS, MotorTestManager
 from .msp import MspClient, MspCommand, MspError
 from .serial_transport import PortInfo, SerialTransport, list_fc_ports
-from .settings_store import load_int, load_str
+from .settings_store import load_float, load_int, load_str
 from .theme import ACCENT_AMBER, ACCENT_ERROR, ACCENT_GREEN, BG_PANEL, TEXT_MAIN, TEXT_MUTED
 
 # Reuses "Прогон мотором"'s own persisted settings (motor_test_widget.py) -
@@ -1420,8 +1420,8 @@ class FcFlashStationController(QObject):
         self._motor_set_tick_requested.emit(load_int(TICK_KEY, TICK_MS))
         self._motor_set_test_mode_requested.emit(load_str(_MOTOR_TEST_MODE_KEY, TEST_MODE_ALL))
         self._motor_set_speed_bounds_requested.emit(
-            float(load_int(_MOTOR_MIN_BOUND_KEY, DEFAULT_MOTOR_MIN_BOUND)),
-            float(load_int(_MOTOR_MAX_BOUND_KEY, DEFAULT_MOTOR_MAX_BOUND)),
+            load_float(_MOTOR_MIN_BOUND_KEY, DEFAULT_MOTOR_MIN_BOUND),
+            load_float(_MOTOR_MAX_BOUND_KEY, DEFAULT_MOTOR_MAX_BOUND),
         )
         self._set_phase("checking_motor_armed")
         self._motor_check_disarmed_requested.emit()
@@ -1472,9 +1472,9 @@ class FcFlashStationController(QObject):
         if not self._armed or self._phase != "running_motor_test":
             return
         self._motor_start_sweep_requested.emit(
-            float(load_int(_MOTOR_UP_DURATION_KEY, DEFAULT_MOTOR_UP_DURATION_S)),
-            float(load_int(_MOTOR_HOLD_DURATION_KEY, DEFAULT_MOTOR_HOLD_DURATION_S)),
-            float(load_int(_MOTOR_DOWN_DURATION_KEY, DEFAULT_MOTOR_DOWN_DURATION_S)),
+            load_float(_MOTOR_UP_DURATION_KEY, DEFAULT_MOTOR_UP_DURATION_S),
+            load_float(_MOTOR_HOLD_DURATION_KEY, DEFAULT_MOTOR_HOLD_DURATION_S),
+            load_float(_MOTOR_DOWN_DURATION_KEY, DEFAULT_MOTOR_DOWN_DURATION_S),
         )
 
     def _on_motor_phase_changed(self, phase: str) -> None:

@@ -793,8 +793,8 @@ class FcFlashPage(QWidget):
         if idx >= 0:
             self._motor_test_mode_combo.setCurrentIndex(idx)
 
-        min_pct = load_int(_MOTOR_MIN_BOUND_KEY, _DEFAULT_MOTOR_MIN_BOUND)
-        max_pct = load_int(_MOTOR_MAX_BOUND_KEY, _DEFAULT_MOTOR_MAX_BOUND)
+        min_pct = load_float(_MOTOR_MIN_BOUND_KEY, _DEFAULT_MOTOR_MIN_BOUND)
+        max_pct = load_float(_MOTOR_MAX_BOUND_KEY, _DEFAULT_MOTOR_MAX_BOUND)
         self._motor_chart.set_bounds(min_pct, max_pct)
         self._motor_chart.set_curves(
             RampCurve.from_json(load_str(UP_CURVE_KEY)), RampCurve.from_json(load_str(DOWN_CURVE_KEY))
@@ -916,8 +916,8 @@ class FcFlashPage(QWidget):
             self._motor_down_stepper.value(),
             self._motor_ramp_mode_combo.currentData(),
             self._motor_test_mode_combo.currentData(),
-            float(load_int(_MOTOR_MIN_BOUND_KEY, _DEFAULT_MOTOR_MIN_BOUND)),
-            float(load_int(_MOTOR_MAX_BOUND_KEY, _DEFAULT_MOTOR_MAX_BOUND)),
+            load_float(_MOTOR_MIN_BOUND_KEY, _DEFAULT_MOTOR_MIN_BOUND),
+            load_float(_MOTOR_MAX_BOUND_KEY, _DEFAULT_MOTOR_MAX_BOUND),
         )
 
     def _on_motor_ramp_mode_changed(self, _index: int) -> None:
@@ -951,7 +951,7 @@ class FcFlashPage(QWidget):
             (self._motor_down_stepper, down_s),
         ):
             stepper.blockSignals(True)
-            stepper.setValue(round(value, 1))
+            stepper.setValue(round(value, 2))
             stepper.blockSignals(False)
         save_float(_MOTOR_UP_DURATION_KEY, self._motor_up_stepper.value())
         save_float(_MOTOR_HOLD_DURATION_KEY, self._motor_hold_stepper.value())
@@ -973,8 +973,8 @@ class FcFlashPage(QWidget):
         self, up_s: float, hold_s: float, down_s: float, min_percent: float, max_percent: float
     ) -> None:
         self._apply_motor_durations(up_s, hold_s, down_s)
-        save_int(_MOTOR_MIN_BOUND_KEY, round(min_percent))
-        save_int(_MOTOR_MAX_BOUND_KEY, round(max_percent))
+        save_float(_MOTOR_MIN_BOUND_KEY, round(min_percent, 2))
+        save_float(_MOTOR_MAX_BOUND_KEY, round(max_percent, 2))
         self.ramp_settings_changed.emit(*self._current_motor_ramp_settings_tuple())
 
     def apply_external_ramp_settings(

@@ -371,8 +371,8 @@ class RampChartWidget(QWidget):
         painter.drawText(8, 16, _PHASE_TEXT.get(self._phase, self._phase))
         painter.setPen(QColor(TEXT_MUTED))
         summary = (
-            f"Розгін {self._up_duration_s:.1f}с · Утримання {self._hold_duration_s:.1f}с · "
-            f"Спад {self._down_duration_s:.1f}с · Межі {self._min_percent:.0f}–{self._max_percent:.0f}%"
+            f"Розгін {self._up_duration_s:.2f}с · Утримання {self._hold_duration_s:.2f}с · "
+            f"Спад {self._down_duration_s:.2f}с · Межі {self._min_percent:.1f}–{self._max_percent:.1f}%"
         )
         painter.drawText(8, 32, summary)
 
@@ -445,7 +445,7 @@ class RampChartWidget(QWidget):
 
         # draggable points A (end of up), B (end of hold), C (end of down)
         point_color = QColor(ACCENT_GREEN if self._interactive else TEXT_MUTED)
-        for which, label in (("A", f"{self._up_duration_s:.1f}с"), ("B", f"{self._up_duration_s + self._hold_duration_s:.1f}с"), ("C", f"{total:.1f}с")):
+        for which, label in (("A", f"{self._up_duration_s:.2f}с"), ("B", f"{self._up_duration_s + self._hold_duration_s:.2f}с"), ("C", f"{total:.2f}с")):
             p = self._point_pixel(which)
             painter.setPen(QColor(TEXT_MUTED))
             painter.drawText(QPointF(p.x() - 12, p.y() - 10), label)

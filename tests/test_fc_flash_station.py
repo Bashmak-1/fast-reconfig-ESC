@@ -352,3 +352,30 @@ def test_protocol_reboot_runs_even_with_esc_flash_and_motor_test_both_off(monkey
     finally:
         c._armed = False
         c.shutdown()
+
+
+def test_station_motor_test_uses_the_exact_fractional_durations_and_bounds(monkeypatch):
+    """Both tabs share one set of settings; the station used to read the seconds as integers (4.5 -> default 4)
+    and the bounds rounded to whole percent, so its test differed from the chart the operator saw."""
+    from unittest.mock import MagicMock
+
+    from PyQt6.QtWidgets import QApplication
+
+    from esc_hotline import fc_flash_station as fs
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    stored = {
+        fs._MOTOR_UP_DURATION_KEY: 4.55, fs._MOTOR_HOLD_DURATION_KEY: 0.25, fs._MOTOR_DOWN_DURATION_KEY: 3.35,
+        fs._MOTOR_MIN_BOUND_KEY: 12.35, fs._MOTOR_MAX_BOUND_KEY: 87.65,
+    }
+    monkeypatch.setattr(fs, "load_float", lambda key, default=0.0: stored[key])
+    c = fs.FcFlashStationController()
+    try:
+        c._armed = True
+        c._set_phase("running_motor_test")
+        c._motor_start_sweep_requested = MagicMock()
+        c._start_motor_sweep()
+        c._motor_start_sweep_requested.emit.assert_called_once_with(4.55, 0.25, 3.35)
+    finally:
+        c._armed = False
+        c.shutdown()
