@@ -456,6 +456,7 @@ class MotorTestManager(QObject):
         self._current = self._min_target
         self._target = self._max_target
         self._phase = PHASE_UP
+        self._solve_leg(False, self._max_target, self._min_target)  # the spin-down is solved now too, not at the switch
         self._begin_leg()
         self.phase_changed.emit(PHASE_UP)
         shape = "Безе" if self._ramp_mode == RAMP_BEZIER else "лінійний"
@@ -495,17 +496,19 @@ class MotorTestManager(QObject):
         self._phase_start_value = self._current
         self._leg_table = []
         if self._phase in (PHASE_UP, PHASE_DOWN):
-            duration_s = self._up_duration_s if self._phase == PHASE_UP else self._down_duration_s
-            curve = self._up_curve if self._phase == PHASE_UP else self._down_curve
-            use_bezier = self._ramp_mode == RAMP_BEZIER
-            tick_s = self._timer.interval() / 1000
-            key = (use_bezier, duration_s, self._current, self._target, tick_s, id(curve))
-            if key not in self._leg_cache:
-                percents = build_leg_table(
-                    use_bezier, duration_s, msp_to_percent(self._current), msp_to_percent(self._target), curve, tick_s
-                )
-                self._leg_cache[key] = [percent_to_msp(p) for p in percents]
-            self._leg_table = self._leg_cache[key]
+            self._leg_table = self._solve_leg(self._phase == PHASE_UP, self._current, self._target)
+
+    def _solve_leg(self, up: bool, start: int, target: int) -> list[int]:
+        """Raw MSP value per tick for one up/down leg; solved once, then served from the cache."""
+        duration_s = self._up_duration_s if up else self._down_duration_s
+        curve = self._up_curve if up else self._down_curve
+        use_bezier = self._ramp_mode == RAMP_BEZIER
+        tick_s = self._timer.interval() / 1000
+        key = (use_bezier, duration_s, start, target, tick_s, id(curve))
+        if key not in self._leg_cache:
+            percents = build_leg_table(use_bezier, duration_s, msp_to_percent(start), msp_to_percent(target), curve, tick_s)
+            self._leg_cache[key] = [percent_to_msp(p) for p in percents]
+        return self._leg_cache[key]
 
     def _on_tick(self) -> None:
         if self._phase == PHASE_IDLE or self._msp is None:
