@@ -177,6 +177,7 @@ class FcFlashPage(QWidget):
         self._popup_timer.setInterval(POWER_POPUP_MS)
         self._popup_timer.timeout.connect(self._show_power_popup)
         self._power_popup: Optional[QDialog] = None
+        self._esc_present: set[int] = set()  # ESCs answering right now: the power reminders are pointless once any is seen
         self.controller.phase_changed.connect(self._on_phase_changed)
         self.controller.esc_detail_changed.connect(self._on_esc_detail_changed)
         self.controller.dfu_detail_changed.connect(self._on_dfu_detail_changed)
@@ -930,25 +931,34 @@ class FcFlashPage(QWidget):
         # the 30 s / 1 min deadline away so the reminder never fired (or fired once) - only a real change restarts
         changed = phase != self._last_phase
         self._last_phase = phase
+        if changed and phase == "connecting":
+            self._esc_present.clear()
         self._motor_start_btn.setEnabled(phase == "waiting_motor_start")
         self._motor_stop_btn.setEnabled(phase in ("connecting_motor_test", "checking_motor_armed", "running_motor_test"))
-        if phase in _CUE_PHASES:
-            if changed or not self._cue_timer.isActive():
+        self._sync_power_prompts(changed)
+        self._render_banner()
+        self._update_start_stop_button()
+        self._update_countdown()
+        self._update_progress_bar(phase)
+
+    def _sync_power_prompts(self, restart: bool = False) -> None:
+        """Sound / popup / hint ask for power only while no ESC answers; polling goes on in the background and the
+        prompts vanish the moment one is found (and come back if it disappears again)."""
+        phase = self._last_phase
+        blind = phase == "watching" and not self._esc_present
+        if phase in _CUE_PHASES and (phase != "watching" or blind):
+            if restart or not self._cue_timer.isActive():
                 self._cue_timer.start()
         else:
             self._cue_timer.stop()
-        if phase == "watching":
-            if changed or not self._popup_timer.isActive():
+        if blind:
+            if restart or not self._popup_timer.isActive():
                 self._popup_timer.start()
         else:
             self._popup_timer.stop()
             if self._power_popup is not None:
                 self._power_popup.hide()
-        self._render_banner()
-        self._update_start_stop_button()
-        self._update_countdown()
-        self._lab_power_hint_label.setVisible(phase in ("watching", "esc_error"))
-        self._update_progress_bar(phase)
+        self._lab_power_hint_label.setVisible(blind or phase == "esc_error")
 
     def _update_progress_bar(self, phase: str) -> None:
         if phase == "flashing_fc":
@@ -1071,6 +1081,10 @@ class FcFlashPage(QWidget):
 
     def _on_esc_detail_changed(self, index: int, state: str, detail: str) -> None:
         self._esc_detail_by_index[index] = f"ESC {index + 1}: {detail}" if detail else f"ESC {index + 1}: -"
+        was_present = bool(self._esc_present)
+        (self._esc_present.discard if state == "idle" else self._esc_present.add)(index)
+        if was_present != bool(self._esc_present):
+            self._sync_power_prompts(True)
         lines = [self._esc_detail_by_index[i] for i in sorted(self._esc_detail_by_index)]
         self._detail_label.setText("\n".join(lines))
 
@@ -1103,6 +1117,7 @@ class FcFlashPage(QWidget):
         else:
             self._countdown_timer.stop()
             self._esc_detail_by_index = {}
+            self._esc_present.clear()
             self._detail_label.setText("")
             self._dfu_detail_label.setText("")
             self._countdown_label.setText("")
