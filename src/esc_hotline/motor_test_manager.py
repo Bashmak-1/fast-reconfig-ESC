@@ -48,6 +48,7 @@ from typing import Optional
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from .esc_telemetry import CommandSnapshot, EscTelemetryPoller, probe
 from .file_logger import get_logger, log_at
 from .motor_ramp import (
     MOTOR_PROTOCOLS,
@@ -107,6 +108,8 @@ class MotorTestManager(QObject):
     battery_voltage = pyqtSignal(float)  # volts from MSP_BATTERY_STATE right after connect, -1 = unknown
     protocol_detected = pyqtSignal(int, str)  # index, display name - -1/"" means unknown (right after connect)
     protocol_change_result = pyqtSignal(bool, str)  # success, detail - success implies the FC is rebooting
+    esc_telemetry_available = pyqtSignal(bool, str)  # custom ID2BIT firmware found on this FC?, detail
+    esc_telemetry = pyqtSignal(object, object, object)  # EscHeader, list[EscRecord], CommandSnapshot | None
 
     def __init__(self) -> None:
         super().__init__()
@@ -149,6 +152,32 @@ class MotorTestManager(QObject):
         self._manual_timer = QTimer(self)
         self._manual_timer.setInterval(MANUAL_TICK_MS)
         self._manual_timer.timeout.connect(self._on_manual_tick)
+
+        # optional ESC telemetry (custom INAV ID2BIT firmware); the poller switches itself off when the run ends
+        self._telemetry = EscTelemetryPoller(lambda: self._msp, self._command_snapshot)
+        self._telemetry.log.connect(self._log)
+        self._telemetry.telemetry.connect(self.esc_telemetry)
+
+    def set_telemetry_live(self, live: bool) -> None:
+        """Telemetry tab checkbox: poll (without recording) even when no motor run is active."""
+        self._telemetry.set_live(live)
+
+    def _command_snapshot(self) -> Optional[CommandSnapshot]:
+        """What is being commanded right now, per motor: the curve value vs. the value actually sent."""
+        if self._phase != PHASE_IDLE:
+            if self._phase == PHASE_HOLD or not self._leg_table:
+                planned = self._target
+            else:
+                tick_s = self._timer.interval() / 1000
+                elapsed_s = time.monotonic() - self._phase_start_time
+                planned = self._leg_table[min(round(elapsed_s / tick_s), len(self._leg_table) - 1)]
+            return CommandSnapshot(self._phase, self._motor_values(planned), self._motor_values(self._current))
+        if self._manual_index is not None:
+            values = [MSP_MIN] * self._motor_count
+            planned, sent = list(values), list(values)
+            planned[self._manual_index], sent[self._manual_index] = self._manual_target, self._manual_value
+            return CommandSnapshot("manual", planned, sent)
+        return None
 
     def _log(self, level: str, text: str) -> None:
         self.log_message.emit(level, text)
@@ -229,6 +258,14 @@ class MotorTestManager(QObject):
         except Exception as e:
             self._log("warning", f"Не вдалось прочитати напругу (MSP_BATTERY_STATE): {e}")
         self.battery_voltage.emit(volts)
+        has_tel, tel_detail = probe(msp)
+        self._telemetry.set_available(has_tel)
+        if has_tel:
+            self._log("success", f"Телеметрія ESC (ID2BIT, MSPv2 0x2F00): прошивка FC підтримує - {tel_detail}.")
+        else:
+            self._log("info", f"Телеметрія ESC (ID2BIT, MSPv2 0x2F00): недоступна - звичайна прошивка FC ({tel_detail}). "
+                              "Прогін працює як завжди, без запису телеметрії.")
+        self.esc_telemetry_available.emit(has_tel, tel_detail)
         self.connection_state_changed.emit(True)
         self.motor_count_detected.emit(self._motor_count)
         self.protocol_detected.emit(
@@ -255,6 +292,7 @@ class MotorTestManager(QObject):
         self._manual_target = value
         if not self._manual_timer.isActive():
             self._manual_timer.start()
+        self._telemetry.ensure_running()
 
     def _on_manual_tick(self) -> None:
         if self._msp is None or self._phase != PHASE_IDLE or self._manual_index is None:
@@ -280,6 +318,8 @@ class MotorTestManager(QObject):
             self._manual_index = None
 
     def disconnect(self) -> None:
+        self._telemetry.set_available(False)
+        self.esc_telemetry_available.emit(False, "")
         self._manual_timer.stop()
         self._manual_index = None
         self._stop_timer_and_settle()
@@ -471,6 +511,7 @@ class MotorTestManager(QObject):
             f"утримання {self._hold_duration_s:.1f}с, спад {self._down_duration_s:.1f}с.",
         )
         self._timer.start()
+        self._telemetry.ensure_running()
 
     def stop_sweep(self) -> None:
         """Used by both the Stop button and the any-key panic handler -
@@ -600,6 +641,13 @@ class MotorTestManager(QObject):
         # real - slots beyond motor_count go out as MSP_MIN (a harmless,
         # already-idle command) and are never reported to the UI.
         assert self._msp is not None
+        values = self._motor_values(value)
+        payload = b"".join(v.to_bytes(2, "little") for v in values)
+        payload += b"".join(MSP_MIN.to_bytes(2, "little") for _ in range(MOTOR_SLOTS - self._motor_count))
+        self._msp.send(MspCommand.MSP_SET_MOTOR, payload, timeout_s=0.3, retries=2)
+        self.value_changed.emit(values)
+
+    def _motor_values(self, value: int) -> list[int]:
         if self._test_mode == TEST_MODE_SEQUENTIAL and self._active_motor_index is not None:
             # Only the active motor moves - every other real slot stays at
             # a harmless stop command, so a lab power supply that can't
@@ -607,9 +655,5 @@ class MotorTestManager(QObject):
             values = [MSP_MIN] * self._motor_count
             if 0 <= self._active_motor_index < self._motor_count:
                 values[self._active_motor_index] = value
-        else:
-            values = [value] * self._motor_count
-        payload = b"".join(v.to_bytes(2, "little") for v in values)
-        payload += b"".join(MSP_MIN.to_bytes(2, "little") for _ in range(MOTOR_SLOTS - self._motor_count))
-        self._msp.send(MspCommand.MSP_SET_MOTOR, payload, timeout_s=0.3, retries=2)
-        self.value_changed.emit(values)
+            return values
+        return [value] * self._motor_count

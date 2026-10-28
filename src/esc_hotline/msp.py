@@ -37,6 +37,8 @@ class MspCommand(IntEnum):
     MSP_EEPROM_WRITE = 250  # write, empty payload - persists in-RAM config to EEPROM. FC replies with an
     # MSP error ($M!) instead of ACK if it's currently ARMED (`if (!ARMING_FLAG(ARMED)) { writeEEPROM(); ...
     # } else return MSP_RESULT_ERROR`).
+    MSP2_INAV_ESC_ID2BIT_TELEMETRY = 0x2F00  # custom INAV 7.1.1 + AM32 ID2BIT build only: read-only ESC telemetry,
+    # empty request. A stock INAV answers with an MSP error / nothing - see esc_telemetry.py.
     MSP_REBOOT = 68  # write, empty payload = normal reboot (nonzero payload byte = DFU mode, not used here).
     # FC sends its ACK first, then reboots as a post-process step - expect the serial connection to die right
     # after. Also replies $M! instead of ACK if ARMED, same guard as MSP_EEPROM_WRITE.
@@ -101,9 +103,24 @@ def encode_msp(command: int, payload: bytes = b"") -> bytes:
     return encode_msp_v1(command, payload) if command <= 254 else encode_msp_v2(command, payload)
 
 
+def _read_msp_v2_body(transport: SerialTransport, preamble: bytes, deadline: float) -> MspResponse:
+    header = transport.read_exact(5, remaining_time(deadline))  # flag, command u16 LE, size u16 LE
+    command = header[1] | (header[2] << 8)
+    length = header[3] | (header[4] << 8)
+    payload = transport.read_exact(length, remaining_time(deadline)) if length else b""
+    crc_byte = transport.read_exact(1, remaining_time(deadline))[0]
+    if crc8_dvb_s2(header + payload) != crc_byte:
+        raise MspFramingError(f"MSP v2 checksum mismatch for command {command:#x}")
+    if preamble[2] == ord("!"):
+        raise MspFramingError(f"MSP v2 error response for command {command:#x}")
+    return MspResponse(command=command, payload=payload)
+
+
 def _read_msp_response(transport: SerialTransport, timeout_s: float) -> MspResponse:
     deadline = time.monotonic() + timeout_s
     preamble = transport.read_exact(3, remaining_time(deadline))
+    if preamble[0:2] == b"$X" and preamble[2] in (ord(">"), ord("!")):
+        return _read_msp_v2_body(transport, preamble, deadline)
     if preamble[0:2] != b"$M" or preamble[2] not in (ord("<"), ord(">"), ord("!")):
         raise MspFramingError(f"bad MSP preamble: {preamble!r}")
 

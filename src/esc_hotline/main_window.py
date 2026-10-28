@@ -40,6 +40,7 @@ from .fc_flash_widget import FcFlashPage
 from .file_logger import LOG_FILE
 from .hotspot_line_widget import HotspotLinePage
 from .hotspot_widget import HotspotFlashPage
+from .esc_telemetry_widget import EscTelemetryPage
 from .motor_test_widget import MotorTestPage
 from .serial_transport import list_fc_ports
 from .settings_dialog import SettingsDialog
@@ -122,6 +123,7 @@ class MainWindow(QMainWindow):
         # Also plain-Ukrainian-literal, not retranslated - same rationale
         # as the "Прогон мотором" tab above.
         self._tabs.addTab(self._build_fc_flash_tab(), "Прошивка FC")
+        self._tabs.addTab(self._build_esc_telemetry_tab(), "Телеметрія ESC")
         root.addWidget(self._tabs, 1)
 
     def _build_main_tab(self) -> QWidget:
@@ -162,6 +164,15 @@ class MainWindow(QMainWindow):
     def _build_fc_flash_tab(self) -> QWidget:
         self.fc_flash_page = FcFlashPage()
         return self.fc_flash_page
+
+    def _build_esc_telemetry_tab(self) -> QWidget:
+        # fed by the "Прогон мотором" tab's own connection (no port of its own)
+        self.esc_telemetry_page = EscTelemetryPage()
+        mgr = self.motor_test_page.manager
+        mgr.esc_telemetry_available.connect(self.esc_telemetry_page.on_available)
+        mgr.esc_telemetry.connect(self.esc_telemetry_page.on_telemetry)
+        self.esc_telemetry_page.live_checkbox.toggled.connect(mgr.set_telemetry_live)
+        return self.esc_telemetry_page
 
     def _build_top_bar(self) -> QFrame:
         """App-wide bar, visible above every tab - branding and the settings
