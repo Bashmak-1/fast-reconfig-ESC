@@ -40,6 +40,7 @@ from .fc_flash_widget import FcFlashPage
 from .file_logger import LOG_FILE
 from .hotspot_line_widget import HotspotLinePage
 from .hotspot_widget import HotspotFlashPage
+from .esc_firmware_widget import EscFirmwarePanel
 from .esc_telemetry_widget import EscTelemetryPage
 from .motor_test_widget import MotorTestPage
 from .serial_transport import list_fc_ports
@@ -71,6 +72,7 @@ class MainWindow(QMainWindow):
     request_flash_bytes = pyqtSignal(bytes, object)  # config_bytes, target_indices (list | None)
     request_set_esc_retries = pyqtSignal(int)
     request_set_config_path = pyqtSignal(str)
+    request_flash_firmware = pyqtSignal(str, object, bool)  # hex path, ESC indices, allow other board
 
     def __init__(self) -> None:
         super().__init__()
@@ -131,6 +133,8 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         layout.addWidget(self._build_connect_row())
         layout.addWidget(self._build_config_row())
+        self.firmware_panel = EscFirmwarePanel()
+        layout.addWidget(self.firmware_panel)
 
         self._grid_container = QFrame()
         self._grid_layout = QGridLayout(self._grid_container)
@@ -310,6 +314,10 @@ class MainWindow(QMainWindow):
         self.request_flash_bytes.connect(self.esc_manager.flash_bytes)
         self.request_set_esc_retries.connect(self.esc_manager.set_esc_connect_retries)
         self.request_set_config_path.connect(self.esc_manager.set_config_path)
+        self.request_flash_firmware.connect(self.esc_manager.flash_firmware)
+        self.firmware_panel.flash_requested.connect(self.request_flash_firmware.emit)
+        self.esc_manager.firmware_progress.connect(self.firmware_panel.on_progress)
+        self.esc_manager.firmware_finished.connect(lambda *_: self.firmware_panel.set_busy(False))
 
         self.esc_manager.connection_state_changed.connect(self._on_connection_state_changed)
         self.esc_manager.esc_status_changed.connect(self._on_esc_status_changed)
@@ -498,6 +506,7 @@ class MainWindow(QMainWindow):
         self._flash_all_btn.setEnabled(connected and bool(self._config_path_edit.text()) and not self._hotspot_armed)
 
         self._rebuild_grid(expected_count if connected else 0)
+        self.firmware_panel.set_connected(connected and not self._hotspot_armed, expected_count)
         self._comparison_list.clear_all(expected_count if connected else 0)
         self._esc_read_cache.clear()
         self.config_editor.set_available_escs(self._esc_read_cache)
@@ -536,6 +545,7 @@ class MainWindow(QMainWindow):
         if widget is not None:
             widget.set_state(state, detail, esc_info)
         self._comparison_list.set_row(index, state, detail)
+        self.firmware_panel.set_esc_info(index, esc_info)
 
         if esc_info is not None and esc_info.settings is not None:
             self._esc_read_cache[index] = (detail or esc_info.mcu_family, esc_info.settings)

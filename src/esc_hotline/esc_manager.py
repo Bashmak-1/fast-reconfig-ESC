@@ -29,6 +29,7 @@ from .eeprom_layout import (
     with_identity_from,
 )
 from .eeprom_values import decode_settings
+from .esc_firmware import CHUNK, HexError, compatibility, load_firmware
 from .file_logger import get_logger, hex_dump, log_at
 from .fourway import FourWayClient
 from .i18n import tr
@@ -59,6 +60,8 @@ class EscManager(QObject):
     connection_state_changed = pyqtSignal(bool, int)  # connected, expected_esc_count
     discovery_finished = pyqtSignal(int, int)  # found, expected
     flash_finished = pyqtSignal(int, int)  # success, attempted
+    firmware_progress = pyqtSignal(int, int, int)  # esc index, bytes done, bytes total
+    firmware_finished = pyqtSignal(int, int)  # success, attempted
 
     def __init__(self) -> None:
         super().__init__()
@@ -443,6 +446,62 @@ class EscManager(QObject):
             bidirectional=settings[EEPROM_LAYOUT["BIDIRECTIONAL_MODE"].offset] not in (0, 0xFF),
             settings=settings,
         )
+
+    # ---- firmware flashing (AM32 code, not settings) -------------------
+
+    def flash_firmware(self, path: str, indices: list, allow_other_board: bool = False) -> None:
+        """Write an AM32 .hex into the given, already-probed ESCs. Per ESC: boot byte -> 0, 256-byte chunks, read-back
+        verify, boot byte -> 1. Any failure leaves the boot byte 0 (the ESC stays in its bootloader, re-flashable)."""
+        if self._fourway is None:
+            self._log("error", tr("not_connected_log"))
+            self.firmware_finished.emit(0, len(indices))
+            return
+        success = 0
+        for i in indices:
+            try:
+                self._flash_firmware_one(i, path, allow_other_board)
+                success += 1
+            except Exception as e:  # noqa: BLE001 - one bad ESC must never abort the rest
+                self._log("error", f"ESC #{i + 1}: прошивку НЕ записано: {e}")
+        self._log("success" if success == len(indices) else "warning", f"Прошивка ESC: успішно {success} з {len(indices)}.")
+        self.firmware_finished.emit(success, len(indices))
+
+    def _flash_firmware_one(self, index: int, path: str, allow_other_board: bool) -> None:
+        assert self._fourway is not None
+        dev = self._fourway.init_flash(index, retries=self._esc_connect_retries)
+        mcu = MCU_VARIANTS.get(dev.signature)
+        if mcu is None:
+            raise RuntimeError(f"невідомий MCU 0x{dev.signature:04X}")
+        try:
+            fw = load_firmware(path, mcu)
+        except HexError as e:
+            raise RuntimeError(str(e)) from None
+        probe = self._probe_results.get(index)
+        esc_name = probe.esc_info.firmware_name if probe and probe.esc_info else None
+        verdict, why = compatibility(fw, esc_name)
+        self._log("info", f"ESC #{index + 1}: перевірка прошивки - {verdict}: {why}")
+        if verdict == "block" or (verdict == "warn" and not allow_other_board):
+            raise RuntimeError(f"відмовлено ({why}). Дозвольте «іншу плату» лише якщо впевнені.")
+
+        settings = bytearray(self._fourway.read(mcu.eeprom_offset, LAYOUT_SIZE, retries=self._esc_connect_retries))
+        self._flog.info("ESC #%d: firmware flash start, %s, %d bytes from %#x", index + 1, fw.name, fw.size, mcu.firmware_start)
+        settings[0] = 0x00  # boot byte: firmware invalid while it is being rewritten
+        self._fourway.write(mcu.eeprom_offset, bytes(settings))
+        total = len(fw.image) - mcu.firmware_start
+        for off in range(mcu.firmware_start, len(fw.image), CHUNK):
+            chunk = fw.image[off:off + CHUNK]
+            if len(chunk) % 8:
+                chunk += bytes([0xFF]) * (-len(chunk) % 8)
+            self._fourway.write(off, chunk, retries=3, timeout_s=3.0)
+            self.firmware_progress.emit(index, min(off + CHUNK, len(fw.image)) - mcu.firmware_start, total)
+        for off in range(mcu.firmware_start, len(fw.image), CHUNK):
+            want = fw.image[off:off + CHUNK]
+            got = self._fourway.read(off, len(want), retries=3, timeout_s=3.0)
+            if got[:len(want)] != want:
+                raise RuntimeError(f"перевірка після запису не збіглась на {off:#x} - ESC лишено в завантажувачі, повторіть прошивку")
+        settings[0] = 0x01
+        self._fourway.write(mcu.eeprom_offset, bytes(settings))
+        self._log("success", f"ESC #{index + 1}: прошивку {fw.name or '?'} записано й перевірено ({total} байт). Перезапустіть живлення ESC.")
 
     # ---- flashing ----------------------------------------------------
 
