@@ -8,15 +8,14 @@ from __future__ import annotations
 from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QHBoxLayout, QLabel, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QAbstractItemView, QHeaderView, QCheckBox, QHBoxLayout, QLabel, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
     QWidget,
 )
 
 from .esc_telemetry import TELEMETRY_DIR, CommandSnapshot, EscHeader, EscRecord
 from .motor_ramp import msp_to_percent
 
-COLUMNS = ("ESC", "ID", "План, %", "Відправлено, %", "RPM", "eRPM", "Напруга, В", "Струм, А", "Темп., °C",
-           "Спож., мАг", "Кадри", "Вік", "dt, мс", "Стан")
+COLUMNS = ("ESC", "ID", "План %", "Відпр. %", "RPM", "eRPM", "В", "А", "°C", "мАг", "Кадри", "Вік", "dt мс", "Стан")
 
 
 class EscTelemetryPage(QWidget):
@@ -24,6 +23,7 @@ class EscTelemetryPage(QWidget):
         super().__init__(parent)
         layout = QVBoxLayout(self)
 
+        self._sources: dict[str, tuple[bool, str]] = {}
         self._status = QLabel("Підключіться на вкладці «Прогон мотором» - тут з'явиться стан телеметрії ESC.")
         self._status.setWordWrap(True)
         layout.addWidget(self._status)
@@ -43,6 +43,7 @@ class EscTelemetryPage(QWidget):
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._table.verticalHeader().setVisible(False)
+        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self._table, 1)
 
         self._counters = QLabel("")
@@ -53,7 +54,11 @@ class EscTelemetryPage(QWidget):
         hint.setStyleSheet("color: #7f8c8d;")
         layout.addWidget(hint)
 
-    def on_available(self, available: bool, detail: str) -> None:
+    def on_available(self, source: str, available: bool, detail: str) -> None:
+        """`source` is the tab whose connection reported it ("Прогон мотором" / "Прошивка FC")."""
+        self._sources[source] = (available, detail)
+        available = any(a for a, _ in self._sources.values())
+        detail = "; ".join(f"{s}: {d}" for s, (a, d) in self._sources.items() if a)
         self.live_checkbox.setEnabled(available)
         if not available:
             self.live_checkbox.setChecked(False)

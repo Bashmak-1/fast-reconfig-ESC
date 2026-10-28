@@ -111,6 +111,31 @@ def probe(msp: MspClient) -> tuple[bool, str]:
     return True, f"формат v{header.version}, ESC: {header.motor_count}, з даними: {live}"
 
 
+def estimate_lag_ms(series: list[tuple[float, float, int]], max_lag_s: float = 1.5) -> str:
+    """How far the RPM curve trails the sent throttle: the shift (ms) that makes the two curves match best."""
+    if len(series) < 30:
+        return "мало даних"
+    ts, sent, rpm = [p[0] for p in series], [p[1] for p in series], [float(p[2]) for p in series]
+    if max(sent) - min(sent) < 20 or max(rpm) < 1:
+        return "немає руху для оцінки"
+    step = (ts[-1] - ts[0]) / (len(ts) - 1)
+    if step <= 0:
+        return "мало даних"
+
+    def norm(v: list[float]) -> list[float]:
+        lo, hi = min(v), max(v)
+        return [(x - lo) / (hi - lo or 1) for x in v]
+
+    a, b = norm(sent), norm(rpm)
+    best_k, best_err = 0, float("inf")
+    for k in range(int(max_lag_s / step) + 1):
+        n = len(a) - k
+        err = sum((a[i] - b[i + k]) ** 2 for i in range(n)) / n
+        if err < best_err:
+            best_k, best_err = k, err
+    return f"~{best_k * step * 1000:.0f} мс"
+
+
 class _RunRecorder:
     """CSV of one run + running statistics for its summary line."""
 
@@ -129,6 +154,8 @@ class _RunRecorder:
         self.first_header: Optional[EscHeader] = None
         self.last_header: Optional[EscHeader] = None
         self._last_frames: dict[int, int] = {}
+        self.series: dict[int, list[tuple[float, float, int]]] = {}  # esc -> (t, sent %, rpm) for the lag estimate
+        self.rtts: list[float] = []  # seconds one 0x2F00 request took
 
     def add(self, header: EscHeader, records: list[EscRecord], snap: CommandSnapshot) -> None:
         t = time.monotonic() - self.started
@@ -145,6 +172,7 @@ class _RunRecorder:
             self.stale_rows += rec.stale
             self.max_gap_pct = max(self.max_gap_pct, abs(gap))
             self.max_rpm[i] = max(self.max_rpm.get(i, 0), rec.rpm)
+            self.series.setdefault(i, []).append((t, sent_pct, rec.rpm))
             per_pct = f"{rec.rpm / sent_pct:.1f}" if sent_pct >= 1 else ""
             self._writer.writerow((
                 f"{t:.3f}", snap.phase, i + 1, rec.id, planned, sent, f"{planned_pct:.2f}", f"{sent_pct:.2f}",
@@ -159,10 +187,13 @@ class _RunRecorder:
         h0, h1 = self.first_header, self.last_header
         crc = (h1.crc_errors - h0.crc_errors) if h0 and h1 else 0
         bad = (h1.bad_id - h0.bad_id) if h0 and h1 else 0
+        lag = ", ".join(f"ESC{i + 1} {estimate_lag_ms(s)}" for i, s in sorted(self.series.items()))
+        rtt = (f"запит телеметрії: середній {sum(self.rtts) / len(self.rtts) * 1000:.1f} мс, найдовший {max(self.rtts) * 1000:.1f} мс"
+               if self.rtts else "")
         rpms = ", ".join(f"ESC{i + 1} {v}" for i, v in sorted(self.max_rpm.items())) or "—"
         return (f"{dur:.1f} с, рядків {self.rows}, нових зразків {self.new_samples}, застарілих {self.stale_rows}, "
                 f"макс. RPM: {rpms}, макс. розбіжність план/відправлено {self.max_gap_pct:.2f}%, "
-                f"CRC-помилок за прогін {crc}, bad_id {bad}. CSV: {self.path}")
+                f"CRC-помилок за прогін {crc}, bad_id {bad}. Відставання RPM від відправленого газу: {lag}. {rtt}. CSV: {self.path}")
 
 
 class EscTelemetryPoller(QObject):
@@ -227,6 +258,7 @@ class EscTelemetryPoller(QObject):
         if msp is None or (snap is None and not self.live):
             self.stop()
             return
+        t0 = time.monotonic()
         try:
             resp = msp.send(MspCommand.MSP2_INAV_ESC_ID2BIT_TELEMETRY, timeout_s=0.1, retries=1)
             header, records = parse_telemetry(resp.payload)
@@ -237,6 +269,7 @@ class EscTelemetryPoller(QObject):
                 self.stop()
             return
         self._fails = 0
+        rtt = time.monotonic() - t0
 
         if snap is None:
             self._finish_run()
@@ -252,6 +285,7 @@ class EscTelemetryPoller(QObject):
                 self.log.emit("info", f"Телеметрія ESC: запис прогону кожні {POLL_MS} мс ({header.motor_count} ESC).")
             if self._recorder is not None:
                 self._recorder.add(header, records, snap)
+                self._recorder.rtts.append(rtt)
             self._log_compact(records, snap)
         self.telemetry.emit(header, records, snap)
 

@@ -173,9 +173,11 @@ class MainWindow(QMainWindow):
         # fed by the "Прогон мотором" tab's own connection (no port of its own)
         self.esc_telemetry_page = EscTelemetryPage()
         mgr = self.motor_test_page.manager
-        mgr.esc_telemetry_available.connect(self.esc_telemetry_page.on_available)
-        mgr.esc_telemetry.connect(self.esc_telemetry_page.on_telemetry)
-        self.esc_telemetry_page.live_checkbox.toggled.connect(mgr.set_telemetry_live)
+        fc_mgr = self.fc_flash_page.controller.motor_manager
+        for name, m in (("Прогон мотором", mgr), ("Прошивка FC", fc_mgr)):
+            m.esc_telemetry_available.connect(lambda ok, text, n=name: self.esc_telemetry_page.on_available(n, ok, text))
+            m.esc_telemetry.connect(self.esc_telemetry_page.on_telemetry)
+            self.esc_telemetry_page.live_checkbox.toggled.connect(m.set_telemetry_live)
         return self.esc_telemetry_page
 
     def _build_top_bar(self) -> QFrame:

@@ -114,3 +114,14 @@ def test_no_poll_without_firmware_or_run():
     mgr._telemetry.ensure_running()  # not available -> stays off
     assert not mgr._telemetry._timer.isActive()
     assert mgr._command_snapshot() is None
+
+
+def test_lag_estimate_finds_a_known_delay():
+    # RPM = the sent throttle delayed by 10 samples of 30 ms
+    sent = [min(100.0, i * 4.0) for i in range(60)] + [100.0 - i * 4.0 for i in range(25)]
+    sent = [max(0.0, v) for v in sent] + [0.0] * 30
+    rpm = [0] * 10 + [int(v * 100) for v in sent[:-10]]
+    series = [(i * 0.03, sent[i], rpm[i]) for i in range(len(sent))]
+    assert et.estimate_lag_ms(series) == "~300 мс"
+    assert et.estimate_lag_ms([(i * 0.03, 50.0, 0) for i in range(60)]) == "немає руху для оцінки"
+    assert et.estimate_lag_ms(series[:5]) == "мало даних"

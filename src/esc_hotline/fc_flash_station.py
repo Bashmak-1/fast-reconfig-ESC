@@ -853,6 +853,11 @@ class FcFlashStationController(QObject):
         if disarm:
             self.stop()
 
+    @property
+    def motor_manager(self):
+        """The station's MotorTestManager (lives in its own thread) - for read-only consumers like the telemetry tab."""
+        return self._motor_test_worker_thread.manager
+
     def stop_motor_test(self) -> None:
         """The motor-test Стоп button (the station stays armed)."""
         if not self._armed:
