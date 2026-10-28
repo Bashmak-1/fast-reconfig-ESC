@@ -26,6 +26,7 @@ from .msp import MspClient, MspCommand, MspError
 
 POLL_TIMEOUT_S = 0.3  # a slow USB-serial driver must not turn every poll into a timeout
 GLITCH_RPM = 300_000
+GLITCH_DT_US = 100_000  # ESCs send every ~30.6 ms; a "fresh" frame claiming a 150 ms+ gap is a mis-parsed one
 POLL_MS = 30  # the ESCs send a KISS frame every ~30.6 ms per ESC, so faster polling only repeats samples
 HEADER_FMT = "<BBIIII"
 ESC_FMT = "<BBBBHHHHIIIH"
@@ -77,7 +78,7 @@ class EscRecord:
     @property
     def glitch(self) -> bool:
         """A frame that slipped past the CRC with nonsense (seen: rpm 4294532096, 0 V, dt 764 ms) - kept in the CSV, kept out of the stats."""
-        return self.rpm > GLITCH_RPM
+        return self.rpm > GLITCH_RPM or (self.age == 0 and self.dt_us > GLITCH_DT_US)
 
 
 @dataclass
@@ -129,8 +130,8 @@ def probe(msp: MspClient) -> tuple[bool, str]:
     return True, detail + " | " + describe_sample(resp.payload, header, records)
 
 
-def estimate_lag_ms(series: list[tuple[float, float, int]], max_lag_s: float = 1.5) -> str:
-    """How far the RPM curve trails the sent throttle: the shift (ms) that makes the two curves match best."""
+def _best_lag(series: list[tuple[float, float, int]], max_lag_s: float = 1.5) -> tuple[float, float] | str:
+    """(lag ms, mismatch) of the best shift, or the reason there is no estimate."""
     if len(series) < 30:
         return "мало даних"
     ts, sent, rpm = [p[0] for p in series], [p[1] for p in series], [float(p[2]) for p in series]
@@ -151,7 +152,24 @@ def estimate_lag_ms(series: list[tuple[float, float, int]], max_lag_s: float = 1
         err = sum((a[i] - b[i + k]) ** 2 for i in range(n)) / n
         if err < best_err:
             best_k, best_err = k, err
-    return f"~{best_k * step * 1000:.0f} мс"
+    return best_k * step * 1000, best_err
+
+
+def estimate_lag_ms(series: list[tuple[float, float, int]], max_lag_s: float = 1.5) -> str:
+    """How far the RPM curve trails the sent throttle: the shift (ms) that makes the two curves match best."""
+    r = _best_lag(series, max_lag_s)
+    return r if isinstance(r, str) else f"~{r[0]:.0f} мс"
+
+
+def lag_by_motor(series: list[tuple[float, list[float], int]]) -> str:
+    """Telemetry id and motor output need not be the same number (seen on the bench: the ESC on output 2 reports
+    id 0), so each telemetry record is matched with the motor whose throttle its RPM follows best."""
+    results = [(j, _best_lag([(t, sent[j], rpm) for t, sent, rpm in series])) for j in range(len(series[0][1]))]
+    found = [(j, r) for j, r in results if not isinstance(r, str)]
+    if not found:
+        return results[0][1] if results else "мало даних"
+    j, (ms, _) = min(found, key=lambda x: x[1][1])
+    return f"~{ms:.0f} мс (за газом мотора {j + 1})"
 
 
 class _RunRecorder:
@@ -172,7 +190,7 @@ class _RunRecorder:
         self.first_header: Optional[EscHeader] = None
         self.last_header: Optional[EscHeader] = None
         self._last_frames: dict[int, int] = {}
-        self.series: dict[int, list[tuple[float, float, int]]] = {}  # esc -> (t, sent %, rpm) for the lag estimate
+        self.series: dict[int, list[tuple[float, list[float], int]]] = {}  # record -> (t, sent % of every motor, rpm)
         self.rtts: list[float] = []  # seconds one 0x2F00 request took
 
     def add(self, header: EscHeader, records: list[EscRecord], snap: CommandSnapshot) -> None:
@@ -191,7 +209,7 @@ class _RunRecorder:
             self.max_gap_pct = max(self.max_gap_pct, abs(gap))
             rpm = 0 if rec.glitch else rec.rpm
             self.max_rpm[i] = max(self.max_rpm.get(i, 0), rpm)
-            self.series.setdefault(i, []).append((t, sent_pct, rpm))
+            self.series.setdefault(i, []).append((t, [msp_to_percent(v) for v in snap.sent], rpm))
             per_pct = f"{rec.rpm / sent_pct:.1f}" if sent_pct >= 1 else ""
             self._writer.writerow((
                 f"{t:.3f}", snap.phase, i + 1, rec.id, planned, sent, f"{planned_pct:.2f}", f"{sent_pct:.2f}",
@@ -206,7 +224,7 @@ class _RunRecorder:
         h0, h1 = self.first_header, self.last_header
         crc = (h1.crc_errors - h0.crc_errors) if h0 and h1 else 0
         bad = (h1.bad_id - h0.bad_id) if h0 and h1 else 0
-        lag = ", ".join(f"ESC{i + 1} {estimate_lag_ms(s)}" for i, s in sorted(self.series.items()))
+        lag = ", ".join(f"ESC{i + 1} {lag_by_motor(s)}" for i, s in sorted(self.series.items()))
         rtt = (f"запит телеметрії: середній {sum(self.rtts) / len(self.rtts) * 1000:.1f} мс, найдовший {max(self.rtts) * 1000:.1f} мс"
                if self.rtts else "")
         rpms = ", ".join(f"ESC{i + 1} {v}" for i, v in sorted(self.max_rpm.items())) or "—"

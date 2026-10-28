@@ -165,6 +165,16 @@ def test_read_exact_never_reconfigures_the_port(monkeypatch):
 def test_glitch_frame_flagged():
     from esc_hotline.esc_telemetry import EscRecord
     base = dict(id=0, active=True, age=0, temp_c=0, voltage_v=0.0, current_a=0.0, consumption_mah=0, erpm=35072,
-                frames=1, dt_us=764519, raw_current=0)
-    assert EscRecord(rpm=4294532096, **base).glitch
-    assert not EscRecord(rpm=10514, **base).glitch
+                frames=1, raw_current=0)
+    assert EscRecord(rpm=4294532096, dt_us=30600, **base).glitch
+    assert EscRecord(rpm=91557, dt_us=152607, **base).glitch  # seen on the bench: rpm plausible, dt isn't
+    assert not EscRecord(rpm=10514, dt_us=30600, **base).glitch
+
+
+def test_lag_matched_to_the_motor_it_follows():
+    # record 0 follows motor 2's throttle (seen on the bench), 300 ms behind
+    step, lag = 0.03, 10
+    sent2 = [0.0] * 40 + [100.0] * 60 + [0.0] * 40
+    rpm = [0] * lag + [int(v * 100) for v in sent2[:-lag]]
+    series = [(i * step, [0.0, sent2[i]], rpm[i]) for i in range(len(rpm))]
+    assert et.lag_by_motor(series) == "~300 мс (за газом мотора 2)"
