@@ -26,6 +26,16 @@ jobs:
 
       - run: pytest tests/
 
+      # Test branches must not call themselves stable (and must not be offered the dev updates): stamp a dev
+      # version whose number (100000+run) is higher than any real dev build, so the app shows the DEV badge and
+      # the in-app updater finds nothing newer.
+      - name: Stamp test version (feature branches only)
+        if: startsWith(github.ref_name, 'feature/')
+        shell: bash
+        run: |
+          base=$(python -c "import re;print(re.search(r'\d+\.\d+\.\d+', open('src/esc_hotline/_version.py').read())[0])")
+          python scripts/stamp_version.py v${base}-dev.$((100000 + ${{ github.run_number }}))
+
       - run: python scripts/build_exe.py
 
       - uses: actions/upload-artifact@v4
