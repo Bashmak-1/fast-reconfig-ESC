@@ -2,7 +2,8 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    branches: [main, "feature/**"]  # feature branches build an artifact only (no release, no update channel)
+  workflow_dispatch:
   pull_request:
     branches: [main]
 
