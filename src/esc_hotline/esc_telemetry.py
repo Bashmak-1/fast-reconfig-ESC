@@ -18,12 +18,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, QThread, QTimer, pyqtSignal
 
 from .file_logger import LOG_DIR
 from .motor_ramp import msp_to_percent
 from .msp import MspClient, MspCommand, MspError
 
+POLL_TIMEOUT_S = 0.3  # a slow USB-serial driver must not turn every poll into a timeout
 POLL_MS = 30  # the ESCs send a KISS frame every ~30.6 ms per ESC, so faster polling only repeats samples
 HEADER_FMT = "<BBIIII"
 ESC_FMT = "<BBBBHHHHIIIH"
@@ -100,6 +101,16 @@ def parse_telemetry(payload: bytes) -> tuple[EscHeader, list[EscRecord]]:
     return EscHeader(version, count, valid, crc, resync, bad_id), records
 
 
+def describe_sample(payload: bytes, header: EscHeader, records: list[EscRecord]) -> str:
+    """One line for the technical log: raw bytes and every decoded field, to check what the FC really sent."""
+    esc = "; ".join(
+        f"ESC{i + 1}: id={r.id} active={int(r.active)} age={r.age} rpm={r.rpm} erpm={r.erpm} {r.voltage_v:.2f}V "
+        f"{r.current_a:.2f}A {r.temp_c}C frames={r.frames} dt={r.dt_us}us" for i, r in enumerate(records)
+    )
+    return (f"{len(payload)} байт, valid={header.valid} crc_err={header.crc_errors} resync={header.resync} "
+            f"bad_id={header.bad_id}; {esc}; raw={payload[:HEADER_SIZE + ESC_SIZE * 2].hex(' ')}")
+
+
 def probe(msp: MspClient) -> tuple[bool, str]:
     """True + description if the connected FC runs the ID2BIT build; never raises."""
     try:
@@ -108,7 +119,8 @@ def probe(msp: MspClient) -> tuple[bool, str]:
     except (MspError, ValueError, OSError, TimeoutError) as e:
         return False, str(e)
     live = sum(1 for r in records if not r.stale)
-    return True, f"формат v{header.version}, ESC: {header.motor_count}, з даними: {live}"
+    detail = f"формат v{header.version}, ESC: {header.motor_count}, з даними: {live}"
+    return True, detail + " | " + describe_sample(resp.payload, header, records)
 
 
 def estimate_lag_ms(series: list[tuple[float, float, int]], max_lag_s: float = 1.5) -> str:
@@ -203,8 +215,10 @@ class EscTelemetryPoller(QObject):
     log = pyqtSignal(str, str)  # level, text
 
     def __init__(self, msp_getter: Callable[[], Optional[MspClient]],
-                 snapshot_getter: Callable[[], Optional[CommandSnapshot]]) -> None:
-        super().__init__()
+                 snapshot_getter: Callable[[], Optional[CommandSnapshot]], parent: Optional[QObject] = None) -> None:
+        # `parent` matters: without it the poller (and its timer) stays in the creating thread when the manager
+        # is moved to its worker thread, and QTimer.start() from another thread silently does nothing.
+        super().__init__(parent)
         self._msp_getter = msp_getter
         self._snapshot_getter = snapshot_getter
         self.available = False
@@ -223,9 +237,12 @@ class EscTelemetryPoller(QObject):
             self.stop()
 
     def ensure_running(self) -> None:
-        if self.available and not self._timer.isActive():
+        if not self.available:
+            self.log.emit("info", "Телеметрія ESC: опитування не запущено - прошивка FC без ID2BIT (див. перевірку при підключенні).")
+        elif not self._timer.isActive():
             self._fails = 0
             self._timer.start()
+            self.log.emit("info", f"Телеметрія ESC: опитування запущено (таймер {POLL_MS} мс, потік {QThread.currentThread().objectName() or 'головний'}).")
 
     def set_live(self, live: bool) -> None:
         self.live = live
@@ -260,10 +277,12 @@ class EscTelemetryPoller(QObject):
             return
         t0 = time.monotonic()
         try:
-            resp = msp.send(MspCommand.MSP2_INAV_ESC_ID2BIT_TELEMETRY, timeout_s=0.1, retries=1)
+            resp = msp.send(MspCommand.MSP2_INAV_ESC_ID2BIT_TELEMETRY, timeout_s=POLL_TIMEOUT_S, retries=1)
             header, records = parse_telemetry(resp.payload)
         except (MspError, ValueError, OSError, TimeoutError) as e:
             self._fails += 1
+            if self._fails == 1:
+                self.log.emit("warning", f"Телеметрія ESC: збій опитування ({type(e).__name__}: {e}).")
             if self._fails >= MAX_FAILS_IN_ROW:
                 self.log.emit("warning", f"Телеметрія ESC: {self._fails} збоїв поспіль ({e}) - опитування вимкнено до наступного прогону.")
                 self.stop()

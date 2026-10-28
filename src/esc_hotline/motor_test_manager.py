@@ -154,7 +154,7 @@ class MotorTestManager(QObject):
         self._manual_timer.timeout.connect(self._on_manual_tick)
 
         # optional ESC telemetry (custom INAV ID2BIT firmware); the poller switches itself off when the run ends
-        self._telemetry = EscTelemetryPoller(lambda: self._msp, self._command_snapshot)
+        self._telemetry = EscTelemetryPoller(lambda: self._msp, self._command_snapshot, self)
         self._telemetry.log.connect(self._log)
         self._telemetry.telemetry.connect(self.esc_telemetry)
 
@@ -496,6 +496,7 @@ class MotorTestManager(QObject):
         self._down_duration_s = clamp_duration_s(down_duration_s)
         self._manual_stop_requested = False
         self._send_stats = []
+        self._run_started = time.monotonic()
         self._active_motor_index = 0 if self._test_mode == TEST_MODE_SEQUENTIAL else None
         self._current = self._min_target
         self._target = self._max_target
@@ -631,7 +632,9 @@ class MotorTestManager(QObject):
         if self._send_stats:
             avg = sum(self._send_stats) / len(self._send_stats) * 1000
             self._log("info", f"Діагностика: {len(self._send_stats)} команд, середня відповідь FC {avg:.0f} мс, "
-                              f"найдовша {max(self._send_stats) * 1000:.0f} мс.")
+                              f"найдовша {max(self._send_stats) * 1000:.0f} мс, реальна частота команд "
+                              f"{len(self._send_stats) / max(time.monotonic() - self._run_started, 1e-6):.1f} Гц (задано "
+                              f"{1000 / self._timer.interval():.0f} Гц).")
         if completed:
             self.sweep_completed.emit()
 

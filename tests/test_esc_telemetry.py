@@ -125,3 +125,38 @@ def test_lag_estimate_finds_a_known_delay():
     assert et.estimate_lag_ms(series) == "~300 мс"
     assert et.estimate_lag_ms([(i * 0.03, 50.0, 0) for i in range(60)]) == "немає руху для оцінки"
     assert et.estimate_lag_ms(series[:5]) == "мало даних"
+
+
+def test_poller_moves_with_the_manager_to_its_worker_thread():
+    # regression: the poller used to have no parent, stayed in the GUI thread and its timer never ran
+    from PyQt6.QtCore import QThread
+    thread = QThread()
+    mgr = MotorTestManager()
+    mgr.moveToThread(thread)
+    assert mgr._telemetry.thread() is thread and mgr._telemetry._timer.thread() is thread
+
+
+def test_read_exact_never_reconfigures_the_port(monkeypatch):
+    from esc_hotline import serial_transport as st
+
+    class FakeSerial:
+        def __init__(self):
+            self.timeout_sets = 0
+            self.chunks = [b"ab", b"", b"cd"]
+
+        def read(self, n):
+            import time
+            time.sleep(0.005)  # a blocking read slice with no data
+            return self.chunks.pop(0)[:n] if self.chunks else b""
+
+        def __setattr__(self, k, v):
+            if k == "timeout" and "chunks" in self.__dict__:
+                self.__dict__["timeout_sets"] += 1
+            object.__setattr__(self, k, v)
+
+    t = st.SerialTransport.__new__(st.SerialTransport)
+    t._serial = FakeSerial()
+    assert t.read_exact(4, 1.0) == b"abcd" and t._serial.timeout_sets == 0
+    t._serial.chunks = [b""] * 1000
+    with pytest.raises(TimeoutError):
+        t.read_exact(2, 0.05)

@@ -65,6 +65,9 @@ def list_fc_ports() -> list[PortInfo]:
     return ports
 
 
+READ_SLICE_S = 0.02  # one blocking read waits at most this long, so the deadline is honoured within ~20 ms
+
+
 class SerialTransport:
     """Thin pyserial wrapper exposing deadline-based exact-length reads.
 
@@ -77,7 +80,7 @@ class SerialTransport:
         self._serial = serial.Serial()
         self._serial.port = port
         self._serial.baudrate = baudrate
-        self._serial.timeout = 0.05
+        self._serial.timeout = READ_SLICE_S
         self._serial.write_timeout = 1.0
         self._serial.open()
 
@@ -105,8 +108,14 @@ class SerialTransport:
         """Read exactly n bytes, or raise TimeoutError if timeout_s elapses first."""
         if n == 0:
             return b""
-        self._serial.timeout = max(timeout_s, 0.0)
-        data = self._serial.read(n)
-        if len(data) < n:
-            raise TimeoutError(f"timed out reading {n} bytes (got {len(data)})")
-        return data
+        # The port timeout is fixed (set once in __init__) and the deadline is enforced here: assigning
+        # `serial.timeout` makes pyserial re-run SetCommState, which usbser.sys turns into a USB control
+        # transfer (~25 ms) - four reads per MSP response were the whole 105 ms round trip seen in real logs.
+        deadline = time.monotonic() + max(timeout_s, 0.0)
+        data = b""
+        while True:
+            data += self._serial.read(n - len(data))
+            if len(data) >= n:
+                return data
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out reading {n} bytes (got {len(data)})")
