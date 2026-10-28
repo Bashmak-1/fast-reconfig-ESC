@@ -160,3 +160,11 @@ def test_read_exact_never_reconfigures_the_port(monkeypatch):
     t._serial.chunks = [b""] * 1000
     with pytest.raises(TimeoutError):
         t.read_exact(2, 0.05)
+
+
+def test_glitch_frame_flagged():
+    from esc_hotline.esc_telemetry import EscRecord
+    base = dict(id=0, active=True, age=0, temp_c=0, voltage_v=0.0, current_a=0.0, consumption_mah=0, erpm=35072,
+                frames=1, dt_us=764519, raw_current=0)
+    assert EscRecord(rpm=4294532096, **base).glitch
+    assert not EscRecord(rpm=10514, **base).glitch

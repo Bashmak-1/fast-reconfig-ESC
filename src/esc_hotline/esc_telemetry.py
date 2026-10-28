@@ -25,6 +25,7 @@ from .motor_ramp import msp_to_percent
 from .msp import MspClient, MspCommand, MspError
 
 POLL_TIMEOUT_S = 0.3  # a slow USB-serial driver must not turn every poll into a timeout
+GLITCH_RPM = 300_000
 POLL_MS = 30  # the ESCs send a KISS frame every ~30.6 ms per ESC, so faster polling only repeats samples
 HEADER_FMT = "<BBIIII"
 ESC_FMT = "<BBBBHHHHIIIH"
@@ -72,6 +73,11 @@ class EscRecord:
     @property
     def stale(self) -> bool:
         return (not self.active) or self.age == AGE_INVALID
+
+    @property
+    def glitch(self) -> bool:
+        """A frame that slipped past the CRC with nonsense (seen: rpm 4294532096, 0 V, dt 764 ms) - kept in the CSV, kept out of the stats."""
+        return self.rpm > GLITCH_RPM
 
 
 @dataclass
@@ -183,8 +189,9 @@ class _RunRecorder:
             self.new_samples += is_new
             self.stale_rows += rec.stale
             self.max_gap_pct = max(self.max_gap_pct, abs(gap))
-            self.max_rpm[i] = max(self.max_rpm.get(i, 0), rec.rpm)
-            self.series.setdefault(i, []).append((t, sent_pct, rec.rpm))
+            rpm = 0 if rec.glitch else rec.rpm
+            self.max_rpm[i] = max(self.max_rpm.get(i, 0), rpm)
+            self.series.setdefault(i, []).append((t, sent_pct, rpm))
             per_pct = f"{rec.rpm / sent_pct:.1f}" if sent_pct >= 1 else ""
             self._writer.writerow((
                 f"{t:.3f}", snap.phase, i + 1, rec.id, planned, sent, f"{planned_pct:.2f}", f"{sent_pct:.2f}",
