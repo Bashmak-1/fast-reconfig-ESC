@@ -36,3 +36,11 @@ def test_pasted_junk_and_bom_do_not_break_login(tmp_path):
     assert users == {g.name_hash("Ivan")}
     assert g.check_password("Iv​an1029", users, "2026-10-29") == "ok"
     assert g.name_hash("Ivan​ ") == g.name_hash("ivan")
+
+
+def test_whitelist_latin_and_digits_only():
+    assert g.is_valid_name("Ivan7") and not g.is_valid_name("Іван") and not g.is_valid_name("iv an")
+    assert not g.is_valid_name("iv-an") and not g.is_valid_name("")
+    assert g.check_password("іван1029", USERS, "2026-10-29") == "bad_chars"
+    assert g.check_password("iv an1029", USERS, "2026-10-29") == "bad_chars"
+    assert g.check_password("ivan1029", USERS, "2026-10-29") == "ok"

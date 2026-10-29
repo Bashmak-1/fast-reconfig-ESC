@@ -17,6 +17,7 @@ import ctypes
 import hashlib
 import hmac
 import os
+import re
 import sys
 import unicodedata
 from datetime import date
@@ -27,6 +28,7 @@ ENV_TOKEN = "ESC_HOTLINE_TOKEN"
 ENV_PID = "ESC_HOTLINE_LAUNCHER_PID"
 _SECRET = "esc-hotline-gate-v1"
 MESSAGES = {
+    "bad_chars": "Лише латиниця й цифри, без спецсимволів",
     "unknown_user": "Такого користувача немає в списку",
     "bad_password": "Невірна дата: пароль = ім'я + місяць і день (MMDD)",
 }
@@ -41,6 +43,11 @@ def _norm(text: str) -> str:
     """Casefolded, NFC, without zero-width/BOM characters and with NBSP as a plain space (pasted names carry those)."""
     text = unicodedata.normalize("NFC", text).replace(" ", " ")
     return "".join(c for c in text if unicodedata.category(c) != "Cf").strip().casefold()
+
+
+def is_valid_name(name: str) -> bool:
+    """Whitelist: Latin letters and digits only (no spaces, no Cyrillic, no symbols)."""
+    return re.fullmatch(r"[a-z0-9]+", _norm(name), re.ASCII) is not None
 
 
 def name_hash(name: str) -> str:
@@ -59,10 +66,12 @@ def password_for(name: str, today: Optional[str] = None) -> str:
 
 
 def check_password(password: str, users: set[str], today: Optional[str] = None) -> str:
-    """'ok' | 'unknown_user' | 'bad_password'. The name is the password minus its trailing MMDD,
+    """'ok' | 'bad_chars' | 'unknown_user' | 'bad_password'. The name is the password minus its trailing MMDD,
     so the login needs the password only and the user list stays hashes."""
     pw = _norm(password)
     name = pw[:-4]
+    if not is_valid_name(pw):
+        return "bad_chars"
     if len(pw) <= 4 or name_hash(name) not in users:
         return "unknown_user"
     return "ok" if hmac.compare_digest(pw, password_for(name, today)) else "bad_password"

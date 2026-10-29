@@ -32,7 +32,9 @@ def read_names(text: str) -> list[str]:
 
 
 def passwords(names: list[str]) -> str:
-    return "\n".join(f"{n} -> {gate.password_for(n)}" for n in names)
+    return "\n".join(
+        f"{n} -> {gate.password_for(n)}" if gate.is_valid_name(n) else f"{n} -> ! лише латиниця й цифри" for n in names
+    )
 
 
 def main() -> None:
@@ -56,6 +58,10 @@ def main() -> None:
 
     def save() -> None:
         names = read_names(box.get("1.0", "end"))
+        bad = [n for n in names if not gate.is_valid_name(n)]
+        if bad:
+            messagebox.showwarning("Не збережено", "Лише латиниця й цифри, без пробілів і спецсимволів:\n" + "\n".join(bad))
+            return
         NAMES.write_text("\n".join(names) + "\n", encoding="utf-8")
         HASHES.write_text("\n".join(gate.name_hash(n) for n in names) + "\n", encoding="utf-8")
         messagebox.showinfo("Збережено", f"{len(names)} користувачів.\n{HASHES}")
