@@ -73,6 +73,10 @@ def main(argv: list[str] | None = None) -> int:
             _cli_write(f"EscHotline {__version__}\n")
             return 0
 
+    from .session_gate import require_session
+    if not require_session():
+        return 1
+
     from PyQt6.QtWidgets import QApplication
 
     from .main_window import MainWindow

@@ -14,7 +14,7 @@ from typing import Optional
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QMessageBox, QWidget
 
-from . import i18n
+from . import i18n, session_gate
 from . import updater_core as core
 from ._version import __version__
 from .file_logger import get_logger
@@ -52,6 +52,9 @@ class UpdateController(QObject):
 
     def check(self, manual: bool) -> None:
         if self._busy:
+            return
+        if session_gate.in_session():  # launcher copy lives in temp and is replaced by the launcher, not the updater
+            self.check_finished.emit()
             return
         self._busy = True
         threading.Thread(target=self._worker, args=(manual,), daemon=True).start()
