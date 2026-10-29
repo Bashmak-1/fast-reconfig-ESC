@@ -114,6 +114,8 @@ _WRITE_PROTOCOL_KEY = "fc_flash_write_protocol"
 _COUNT_BY_PORT_KEY = "fc_flash_count_by_port"
 _SOUND_KEY = "fc_flash_sound_cue"
 CUE_REPEAT_MS = 30_000
+BLINK_AFTER_MS = 15_000  # operator still hasn't reacted (power on / next board) -> the banner starts flashing
+BLINK_MS = 500
 POWER_POPUP_MS = 60_000  # no power for this long -> a loud always-on-top window (sound alone gets lost in a noisy room)
 _CUE_PHASES = ("watching", "all_done")
 _DEFAULT_ESC_INDICES = (0, 1)  # ESC 1 + ESC 2 - the common case is a 2-in-1 ESC board on one FC
@@ -134,6 +136,9 @@ _BUSY_PHASES_NO_PERCENT = frozenset({
 
 
 class FcFlashPage(QWidget):
+    _blinking = False  # class defaults: _build_ui renders the banner before __init__ reaches the timers
+    _blink_on = False
+
     # Mirrors motor_test_widget.MotorTestPage's own identical signal -
     # MainWindow wires each tab's ramp_settings_changed to the other's
     # apply_external_ramp_settings() so both stay live-synced.
@@ -177,6 +182,13 @@ class FcFlashPage(QWidget):
         self._popup_timer.setInterval(POWER_POPUP_MS)
         self._popup_timer.timeout.connect(self._show_power_popup)
         self._power_popup: Optional[QDialog] = None
+        self._attn_timer = QTimer(self)
+        self._attn_timer.setSingleShot(True)
+        self._attn_timer.setInterval(BLINK_AFTER_MS)
+        self._attn_timer.timeout.connect(self._start_blink)
+        self._blink_timer = QTimer(self)
+        self._blink_timer.setInterval(BLINK_MS)
+        self._blink_timer.timeout.connect(self._toggle_blink)
         self._esc_present: set[int] = set()  # ESCs answering right now: the power reminders are pointless once any is seen
         self.controller.phase_changed.connect(self._on_phase_changed)
         self.controller.esc_detail_changed.connect(self._on_esc_detail_changed)
@@ -959,6 +971,30 @@ class FcFlashPage(QWidget):
             if self._power_popup is not None:
                 self._power_popup.hide()
         self._lab_power_hint_label.setVisible(blind or phase == "esc_error")
+        # the banner flashes while the operator is needed (power on / all done, take the board): from 15 s of no reaction until the phase moves on
+        if blind or phase == "all_done":
+            if restart or not (self._attn_timer.isActive() or self._blinking):
+                self._stop_blink()
+                self._attn_timer.start()
+        else:
+            self._stop_blink()
+
+    def _start_blink(self) -> None:
+        self._blinking = True
+        self._blink_on = True
+        self._blink_timer.start()
+        self._render_banner()
+
+    def _toggle_blink(self) -> None:
+        self._blink_on = not self._blink_on
+        self._render_banner()
+
+    def _stop_blink(self) -> None:
+        self._attn_timer.stop()
+        self._blink_timer.stop()
+        if self._blinking:
+            self._blinking = False
+            self._render_banner()
 
     def _update_progress_bar(self, phase: str) -> None:
         if phase == "flashing_fc":
@@ -1141,6 +1177,10 @@ class FcFlashPage(QWidget):
 
     def _render_banner(self) -> None:
         bg, fg = PHASE_STYLE[self.controller.phase]
+        if self._blinking and self._blink_on:
+            bg, fg = (ACCENT_AMBER, "white") if bg != ACCENT_AMBER else (ACCENT_ERROR, "white")
+            if self.controller.phase == "all_done":
+                bg, fg = "#ffffff", ACCENT_GREEN
         self._banner.setStyleSheet(
             f"background-color: {bg}; color: {fg}; font-size: 22px; font-weight: 700;"
             "padding: 24px; border-radius: 8px;"
