@@ -135,7 +135,7 @@ def _best_lag(series: list[tuple[float, float, int]], max_lag_s: float = 1.5) ->
     if len(series) < 30:
         return "мало даних"
     ts, sent, rpm = [p[0] for p in series], [p[1] for p in series], [float(p[2]) for p in series]
-    if max(sent) - min(sent) < 20 or max(rpm) < 1:
+    if max(sent) - min(sent) < 20 or sum(r > 0 for r in rpm) < 10:
         return "немає руху для оцінки"
     step = (ts[-1] - ts[0]) / (len(ts) - 1)
     if step <= 0:
@@ -207,7 +207,7 @@ class _RunRecorder:
             self.new_samples += is_new
             self.stale_rows += rec.stale
             self.max_gap_pct = max(self.max_gap_pct, abs(gap))
-            rpm = 0 if rec.glitch else rec.rpm
+            rpm = 0 if rec.glitch or rec.stale else rec.rpm
             self.max_rpm[i] = max(self.max_rpm.get(i, 0), rpm)
             self.series.setdefault(i, []).append((t, [msp_to_percent(v) for v in snap.sent], rpm))
             per_pct = f"{rec.rpm / sent_pct:.1f}" if sent_pct >= 1 else ""
