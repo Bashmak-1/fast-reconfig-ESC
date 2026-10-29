@@ -28,3 +28,11 @@ def test_find_users_and_non_frozen_updater_passes(tmp_path):
     assert g.find_users(tmp_path / "nope", tmp_path) == {"ab12"}
     assert g.find_users(tmp_path / "nope") == set()
     assert g.require_login(tmp_path)  # source run: no gate
+
+
+def test_pasted_junk_and_bom_do_not_break_login(tmp_path):
+    (tmp_path / "users.sha256").write_bytes(b"\xef\xbb\xbf" + g.name_hash("Ivan").encode() + b"\r\n")
+    users = g.find_users(tmp_path)
+    assert users == {g.name_hash("Ivan")}
+    assert g.check_password("Iv​an1029", users, "2026-10-29") == "ok"
+    assert g.name_hash("Ivan​ ") == g.name_hash("ivan")

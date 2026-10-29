@@ -50,7 +50,7 @@ def load_users() -> set[str]:
 
 def login(users: set[str]) -> Optional[str]:
     def on_attempt(status: str, password: str) -> None:
-        log.info("login %s user=%s", status, gate.name_hash(password.strip().casefold()[:-4])[:8])
+        log.info("login %s user=%s", status, gate.name_hash(password.strip()[:-4])[:8])
 
     return gate.login_dialog(users, on_attempt)
 

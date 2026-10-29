@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import os
 import sys
+import unicodedata
 from datetime import date
 from pathlib import Path
 from typing import Callable, Mapping, Optional
@@ -25,6 +26,10 @@ from typing import Callable, Mapping, Optional
 ENV_TOKEN = "ESC_HOTLINE_TOKEN"
 ENV_PID = "ESC_HOTLINE_LAUNCHER_PID"
 _SECRET = "esc-hotline-gate-v1"
+MESSAGES = {
+    "unknown_user": "Такого користувача немає в списку",
+    "bad_password": "Невірна дата: пароль = ім'я + місяць і день (MMDD)",
+}
 INTRO = "EscHotline — прошивка та налаштування FC і ESC.\nДля роботи необхідно авторизуватись."
 
 
@@ -32,25 +37,31 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _norm(text: str) -> str:
+    """Casefolded, NFC, without zero-width/BOM characters and with NBSP as a plain space (pasted names carry those)."""
+    text = unicodedata.normalize("NFC", text).replace(" ", " ")
+    return "".join(c for c in text if unicodedata.category(c) != "Cf").strip().casefold()
+
+
 def name_hash(name: str) -> str:
-    return _sha(name.strip().casefold())
+    return _sha(_norm(name))
 
 
 def load_users(text: str) -> set[str]:
     """One sha256 per line; blank lines and '#' comments are ignored."""
-    return {ln.strip().lower() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")}
+    return {ln.strip().lower() for ln in text.lstrip("﻿").splitlines() if ln.strip() and not ln.lstrip().startswith("#")}
 
 
 def password_for(name: str, today: Optional[str] = None) -> str:
     """Today's password for a user: the name followed by MMDD."""
     iso = today or date.today().isoformat()
-    return name.strip().casefold() + iso[5:7] + iso[8:10]
+    return _norm(name) + iso[5:7] + iso[8:10]
 
 
 def check_password(password: str, users: set[str], today: Optional[str] = None) -> str:
     """'ok' | 'unknown_user' | 'bad_password'. The name is the password minus its trailing MMDD,
     so the login needs the password only and the user list stays hashes."""
-    pw = password.strip().casefold()
+    pw = _norm(password)
     name = pw[:-4]
     if len(pw) <= 4 or name_hash(name) not in users:
         return "unknown_user"
@@ -89,7 +100,7 @@ def find_users(*dirs: Path) -> set[str]:
     for d in dirs:
         f = Path(d) / "users.sha256"
         if f.is_file():
-            return load_users(f.read_text(encoding="utf-8"))
+            return load_users(f.read_text(encoding="utf-8-sig"))
     return set()
 
 
@@ -113,7 +124,7 @@ def login_dialog(users: set[str], on_attempt: Optional[Callable[[str, str], None
             result.append(today)
             root.destroy()
         else:
-            error.set("Невірний пароль")
+            error.set(MESSAGES[status])
 
     tk.Label(root, text=INTRO, justify="left", padx=16, pady=12).grid(row=0, column=0, columnspan=2)
     tk.Label(root, text="Пароль").grid(row=1, column=0, sticky="e", padx=8, pady=4)
@@ -123,6 +134,8 @@ def login_dialog(users: set[str], on_attempt: Optional[Callable[[str, str], None
     tk.Button(root, text="Увійти", width=14, command=submit).grid(row=3, column=0, columnspan=2, pady=12)
     root.bind("<Return>", submit)
     entry.focus_set()
+    if not users:
+        error.set("Не знайдено users.sha256 (або він порожній)")
     root.mainloop()
     return result[0] if result else None
 
