@@ -19,11 +19,13 @@ import hmac
 import os
 import sys
 from datetime import date
-from typing import Mapping, Optional
+from pathlib import Path
+from typing import Callable, Mapping, Optional
 
 ENV_TOKEN = "ESC_HOTLINE_TOKEN"
 ENV_PID = "ESC_HOTLINE_LAUNCHER_PID"
 _SECRET = "esc-hotline-gate-v1"
+INTRO = "EscHotline — прошивка та налаштування FC і ESC.\nДля роботи необхідно авторизуватись."
 
 
 def _sha(text: str) -> str:
@@ -80,3 +82,53 @@ def require_session() -> bool:
         0, "Запустіть програму через EscHotlineLauncher.exe і авторизуйтесь.", "EscHotline", 0x10
     )
     return False
+
+
+def find_users(*dirs: Path) -> set[str]:
+    """The user list from the first folder that has a users.sha256 (empty set = nobody gets in)."""
+    for d in dirs:
+        f = Path(d) / "users.sha256"
+        if f.is_file():
+            return load_users(f.read_text(encoding="utf-8"))
+    return set()
+
+
+def login_dialog(users: set[str], on_attempt: Optional[Callable[[str, str], None]] = None) -> Optional[str]:
+    """Password window. Returns the day it was accepted on, or None if it was closed.
+    on_attempt(status, password) is called after every try (the launcher logs it)."""
+    import tkinter as tk  # lazy: the app itself never needs Tk
+
+    root = tk.Tk()
+    root.title("EscHotline — вхід")
+    root.resizable(False, False)
+    result: list[str] = []
+    password, error = tk.StringVar(), tk.StringVar()
+
+    def submit(_event=None) -> None:
+        today = date.today().isoformat()  # taken at the moment of the click, not at window creation
+        status = check_password(password.get(), users, today)
+        if on_attempt:
+            on_attempt(status, password.get())
+        if status == "ok":
+            result.append(today)
+            root.destroy()
+        else:
+            error.set("Невірний пароль")
+
+    tk.Label(root, text=INTRO, justify="left", padx=16, pady=12).grid(row=0, column=0, columnspan=2)
+    tk.Label(root, text="Пароль").grid(row=1, column=0, sticky="e", padx=8, pady=4)
+    entry = tk.Entry(root, textvariable=password, show="*", width=28)
+    entry.grid(row=1, column=1, padx=(0, 16))
+    tk.Label(root, textvariable=error, fg="#c00000").grid(row=2, column=0, columnspan=2)
+    tk.Button(root, text="Увійти", width=14, command=submit).grid(row=3, column=0, columnspan=2, pady=12)
+    root.bind("<Return>", submit)
+    entry.focus_set()
+    root.mainloop()
+    return result[0] if result else None
+
+
+def require_login(*users_dirs: Path) -> bool:
+    """For the standalone updater: inside a launcher session the token is inherited; otherwise ask for the password first."""
+    if not getattr(sys, "frozen", False) or token_ok():
+        return True
+    return login_dialog(find_users(*users_dirs)) is not None

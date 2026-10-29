@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from . import session_gate
 from . import updater_core as core
 from ._version import __version__
 
@@ -64,6 +65,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.version:
         print(f"EscHotlineUpdater {__version__}")
         return 0
+    if not session_gate.require_login(Path(sys.executable).parent, core.ROOT_DIR):
+        return 1
     code = _run(args)
     if args.wait_pid is not None and not _launched_new and args.target and args.target.exists():
         # The app closed itself for us; if nothing new got installed (error, nothing to do) bring it back.

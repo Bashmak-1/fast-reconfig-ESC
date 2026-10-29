@@ -21,3 +21,10 @@ def test_token_is_bound_to_day_and_pid():
     assert not g.token_ok({**env, g.ENV_PID: "124"})
     assert not g.token_ok({})
     assert g.make_token(123, "2026-10-29") != g.make_token(123, "2026-10-30")
+
+
+def test_find_users_and_non_frozen_updater_passes(tmp_path):
+    (tmp_path / "users.sha256").write_text("AB12\n", encoding="utf-8")
+    assert g.find_users(tmp_path / "nope", tmp_path) == {"ab12"}
+    assert g.find_users(tmp_path / "nope") == set()
+    assert g.require_login(tmp_path)  # source run: no gate
