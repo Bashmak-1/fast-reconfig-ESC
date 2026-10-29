@@ -1,7 +1,7 @@
 """EscHotlineLauncher: login window -> unpack the real exe to temp -> run one session.
 
 Usage: EscHotlineLauncher.exe            (or: python scripts/launcher.py)
-       python scripts/launcher.py --hash "Name"   prints the line for private/users.sha256
+       python scripts/launcher.py --hash "Name"   prints one line for users.sha256 (EscHotlineAdmin does it for you)
 
 See src/esc_hotline/session_gate.py for what this is (and is not). The session
 ends when the app window is closed or when the date changes; then the temp
@@ -45,7 +45,9 @@ def setup_log() -> None:
 
 
 def load_users() -> set[str]:
-    for path in (BUNDLE / "users.sha256", HERE.parent / "private" / "users.sha256"):
+    # a users.sha256 next to the exe (written by EscHotlineAdmin) wins over the one baked in at build time
+    exe_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else HERE.parent / "private"
+    for path in (exe_dir / "users.sha256", BUNDLE / "users.sha256", HERE.parent / "private" / "users.sha256"):
         if path.is_file():
             return gate.load_users(path.read_text(encoding="utf-8"))
     return set()
@@ -57,26 +59,24 @@ def login(users: set[str]) -> Optional[str]:
     root.title("EscHotline — вхід")
     root.resizable(False, False)
     result: list[str] = []
-    name, password, error = tk.StringVar(), tk.StringVar(), tk.StringVar()
+    password, error = tk.StringVar(), tk.StringVar()
 
     def submit(_event=None) -> None:
         today = date.today().isoformat()  # taken at the moment of the click, not at window creation
-        status = gate.check_login(name.get(), password.get(), users, today)
-        log.info("login %s user=%s", status, gate.name_hash(name.get())[:8])
+        status = gate.check_password(password.get(), users, today)
+        log.info("login %s user=%s", status, gate.name_hash(password.get().strip().casefold()[:-4])[:8])
         if status == "ok":
             result.append(today)
             root.destroy()
         else:
-            error.set("Невірне ім'я або пароль")
+            error.set("Невірний пароль")
 
     tk.Label(root, text=INTRO, justify="left", padx=16, pady=12).grid(row=0, column=0, columnspan=2)
-    tk.Label(root, text="Ім'я").grid(row=1, column=0, sticky="e", padx=8, pady=4)
-    entry = tk.Entry(root, textvariable=name, width=28)
+    tk.Label(root, text="Пароль").grid(row=1, column=0, sticky="e", padx=8, pady=4)
+    entry = tk.Entry(root, textvariable=password, show="*", width=28)
     entry.grid(row=1, column=1, padx=(0, 16))
-    tk.Label(root, text="Пароль").grid(row=2, column=0, sticky="e", padx=8, pady=4)
-    tk.Entry(root, textvariable=password, show="*", width=28).grid(row=2, column=1, padx=(0, 16))
-    tk.Label(root, textvariable=error, fg="#c00000").grid(row=3, column=0, columnspan=2)
-    tk.Button(root, text="Увійти", width=14, command=submit).grid(row=4, column=0, columnspan=2, pady=12)
+    tk.Label(root, textvariable=error, fg="#c00000").grid(row=2, column=0, columnspan=2)
+    tk.Button(root, text="Увійти", width=14, command=submit).grid(row=3, column=0, columnspan=2, pady=12)
     root.bind("<Return>", submit)
     entry.focus_set()
     root.mainloop()

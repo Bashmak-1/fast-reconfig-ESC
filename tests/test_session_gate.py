@@ -3,10 +3,12 @@ from esc_hotline import session_gate as g
 USERS = {g.name_hash("Ivan")}
 
 
-def test_login_results():
-    assert g.check_login(" ivan ", "ivan1029", USERS, "2026-10-29") == "ok"
-    assert g.check_login("Ivan", "ivan1028", USERS, "2026-10-29") == "bad_password"
-    assert g.check_login("Petro", "petro1029", USERS, "2026-10-29") == "unknown_user"
+def test_password_only_login():
+    assert g.check_password(" Ivan1029 ", USERS, "2026-10-29") == "ok"
+    assert g.check_password("ivan1028", USERS, "2026-10-29") == "bad_password"
+    assert g.check_password("petro1029", USERS, "2026-10-29") == "unknown_user"
+    assert g.check_password("1029", USERS, "2026-10-29") == "unknown_user"
+    assert g.password_for("Ivan", "2026-10-29") == "ivan1029"
 
 
 def test_users_file_parsing():

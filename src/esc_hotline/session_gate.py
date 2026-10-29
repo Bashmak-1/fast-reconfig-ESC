@@ -39,13 +39,20 @@ def load_users(text: str) -> set[str]:
     return {ln.strip().lower() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")}
 
 
-def check_login(name: str, password: str, users: set[str], today: Optional[str] = None) -> str:
-    """'ok' | 'unknown_user' | 'bad_password'. The password is the name followed by today's MMDD."""
-    if name_hash(name) not in users:
-        return "unknown_user"
+def password_for(name: str, today: Optional[str] = None) -> str:
+    """Today's password for a user: the name followed by MMDD."""
     iso = today or date.today().isoformat()
-    expected = name.strip().casefold() + iso[5:7] + iso[8:10]
-    return "ok" if hmac.compare_digest(password.strip().casefold(), expected) else "bad_password"
+    return name.strip().casefold() + iso[5:7] + iso[8:10]
+
+
+def check_password(password: str, users: set[str], today: Optional[str] = None) -> str:
+    """'ok' | 'unknown_user' | 'bad_password'. The name is the password minus its trailing MMDD,
+    so the login needs the password only and the user list stays hashes."""
+    pw = password.strip().casefold()
+    name = pw[:-4]
+    if len(pw) <= 4 or name_hash(name) not in users:
+        return "unknown_user"
+    return "ok" if hmac.compare_digest(pw, password_for(name, today)) else "bad_password"
 
 
 def make_token(pid: int, today: Optional[str] = None) -> str:
