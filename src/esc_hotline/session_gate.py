@@ -27,11 +27,8 @@ from typing import Callable, Mapping, Optional
 ENV_TOKEN = "ESC_HOTLINE_TOKEN"
 ENV_PID = "ESC_HOTLINE_LAUNCHER_PID"
 _SECRET = "esc-hotline-gate-v1"
-MESSAGES = {
-    "bad_chars": "Лише латиниця й цифри, без спецсимволів",
-    "unknown_user": "Такого користувача немає в списку",
-    "bad_password": "Невірна дата: пароль = ім'я + місяць і день (MMDD)",
-}
+# deliberately one message for every failure: do not tell what is wrong or how a password is built
+DENIED = "Невірний пароль"
 INTRO = "EscHotline — прошивка та налаштування FC і ESC.\nДля роботи необхідно авторизуватись."
 
 
@@ -133,7 +130,7 @@ def login_dialog(users: set[str], on_attempt: Optional[Callable[[str, str], None
             result.append(today)
             root.destroy()
         else:
-            error.set(MESSAGES[status])
+            error.set(DENIED)
 
     tk.Label(root, text=INTRO, justify="left", padx=16, pady=12).grid(row=0, column=0, columnspan=2)
     tk.Label(root, text="Пароль").grid(row=1, column=0, sticky="e", padx=8, pady=4)
@@ -145,8 +142,6 @@ def login_dialog(users: set[str], on_attempt: Optional[Callable[[str, str], None
     tk.Button(root, text="Увійти", width=14, command=submit).grid(row=3, column=0, columnspan=2, pady=12)
     root.bind("<Return>", submit)
     entry.focus_set()
-    if not users:
-        error.set("Не знайдено users.sha256 (або він порожній)")
     root.mainloop()
     return result[0] if result else None
 
