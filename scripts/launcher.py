@@ -50,7 +50,7 @@ def load_users() -> set[str]:
 
 def login(users: set[str]) -> Optional[str]:
     def on_attempt(status: str, password: str) -> None:
-        log.info("login %s user=%s", status, gate.name_hash(password.strip()[:-4])[:8])
+        log.info("login %s", "ok" if status == "ok" else "denied")
 
     return gate.login_dialog(users, on_attempt)
 
@@ -61,7 +61,7 @@ def clean_stale() -> None:
 
 
 def run_session(day: str) -> str:
-    """Runs the app until it exits or the date changes. Returns 'closed' | 'date_changed' | 'error'."""
+    """Runs the app until it exits or the date changes. Returns 'closed' | 'expired' | 'error'."""
     payload = BUNDLE / APP_EXE
     if not payload.is_file():
         log.error("payload %s missing", payload)
@@ -72,10 +72,10 @@ def run_session(day: str) -> str:
         exe = tmp / APP_EXE
         shutil.copyfile(payload, exe)
         proc = subprocess.Popen([str(exe)], cwd=tmp, env={**os.environ, **gate.session_env(os.getpid())})
-        log.info("session start day=%s", day)
+        log.info("session start")
         while proc.poll() is None:
             if date.today().isoformat() != day:
-                reason = "date_changed"
+                reason = "expired"
                 # taskkill /T: a onefile exe is a bootloader plus a child process
                 subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
                 break
@@ -103,7 +103,7 @@ def main(argv: list[str]) -> int:
     clean_stale()
     while True:
         day = login(users)
-        if day is None or run_session(day) != "date_changed":
+        if day is None or run_session(day) != "expired":
             return 0
 
 
