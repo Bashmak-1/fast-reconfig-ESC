@@ -137,7 +137,9 @@ def login_dialog(users: set[str], on_attempt: Optional[Callable[[str, str], None
 
     tk.Label(root, text=INTRO, justify="left", padx=16, pady=12).grid(row=0, column=0, columnspan=2)
     tk.Label(root, text="Пароль").grid(row=1, column=0, sticky="e", padx=8, pady=4)
-    entry = tk.Entry(root, textvariable=password, show="*", width=28)
+    # whitelist while typing/pasting: anything outside A-Z a-z 0-9 is simply not accepted
+    only_ascii = root.register(lambda proposed: re.fullmatch(r"[A-Za-z0-9]*", proposed) is not None)
+    entry = tk.Entry(root, textvariable=password, show="*", width=28, validate="key", validatecommand=(only_ascii, "%P"))
     entry.grid(row=1, column=1, padx=(0, 16))
     tk.Label(root, textvariable=error, fg="#c00000").grid(row=2, column=0, columnspan=2)
     tk.Button(root, text="Увійти", width=14, command=submit).grid(row=3, column=0, columnspan=2, pady=12)

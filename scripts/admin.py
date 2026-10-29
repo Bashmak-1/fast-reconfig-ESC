@@ -51,6 +51,13 @@ def main() -> None:
         box.insert("1.0", NAMES.read_text(encoding="utf-8"))
 
     def refresh(_event=None) -> None:
+        text = box.get("1.0", "end-1c")
+        clean = "".join(c for c in text if c == "\n" or (c.isascii() and c.isalnum()))  # whitelist: A-Z a-z 0-9
+        if clean != text:
+            cursor = len(box.get("1.0", "insert")) - sum(1 for c in box.get("1.0", "insert") if c not in clean)
+            box.delete("1.0", "end")
+            box.insert("1.0", clean)
+            box.mark_set("insert", f"1.0+{max(cursor, 0)}c")
         shown.config(state="normal")
         shown.delete("1.0", "end")
         shown.insert("1.0", passwords(read_names(box.get("1.0", "end"))))
