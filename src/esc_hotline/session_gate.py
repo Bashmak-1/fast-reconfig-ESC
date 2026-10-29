@@ -40,10 +40,11 @@ def load_users(text: str) -> set[str]:
 
 
 def check_login(name: str, password: str, users: set[str], today: Optional[str] = None) -> str:
-    """'ok' | 'unknown_user' | 'bad_password'. The password is the name followed by today's ISO date."""
+    """'ok' | 'unknown_user' | 'bad_password'. The password is the name followed by today's MMDD."""
     if name_hash(name) not in users:
         return "unknown_user"
-    expected = name.strip().casefold() + (today or date.today().isoformat())
+    iso = today or date.today().isoformat()
+    expected = name.strip().casefold() + iso[5:7] + iso[8:10]
     return "ok" if hmac.compare_digest(password.strip().casefold(), expected) else "bad_password"
 
 
