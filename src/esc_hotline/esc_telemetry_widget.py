@@ -15,6 +15,12 @@ from PyQt6.QtWidgets import (
 from .esc_telemetry import TELEMETRY_DIR, CommandSnapshot, EscHeader, EscRecord
 from .motor_ramp import msp_to_percent
 
+ID_HINT = (
+    "ID ESC (шина ID2BIT): мотор 1 → ID0, мотор 2 → ID1, мотор 3 → ID2, мотор 4 → ID3 (DShot-команди 15…18). "
+    "ID живуть лише в RAM ESC і призначаються один раз приблизно через 8 с після старту FC: якщо ESC увімкнули пізніше "
+    "за FC (лабораторник) або перезапустили окремо, ID губляться - у CLI INAV виконайте «esctel assign» і перевірте «esctel». "
+    "Ознаки неприсвоєних ID: багато bad_id при валідних кадрах, ESC мовчить або відповідає не тим ID."
+)
 COLUMNS = ("ESC", "ID", "План %", "Відпр. %", "RPM", "eRPM", "В", "А", "°C", "мАг", "Кадри", "Вік", "dt мс", "Стан")
 
 
@@ -48,6 +54,14 @@ class EscTelemetryPage(QWidget):
 
         self._counters = QLabel("")
         layout.addWidget(self._counters)
+        self._map = QLabel("")
+        self._map.setWordWrap(True)
+        layout.addWidget(self._map)
+        self._votes: dict[int, dict[int, int]] = {}  # record -> motor -> samples where that record spun while the motor had throttle
+        ids = QLabel(ID_HINT)
+        ids.setWordWrap(True)
+        ids.setStyleSheet("color: #7f8c8d;")
+        layout.addWidget(ids)
         hint = QLabel("Під час прогону моторів кожні ~30 мс пишеться CSV: план за кривою, реально відправлене значення, "
                       "RPM та електрика кожного ESC. Підсумок прогону - у технічному журналі.")
         hint.setWordWrap(True)
@@ -64,6 +78,8 @@ class EscTelemetryPage(QWidget):
             self.live_checkbox.setChecked(False)
             self._table.setRowCount(0)
             self._counters.setText("")
+            self._map.setText("")
+            self._votes.clear()
         self._status.setText(
             f"✅ Прошивка FC з телеметрією ESC (ID2BIT): {detail}." if available
             else "ℹ Телеметрія ESC недоступна: не підключено або звичайна прошивка FC (без ID2BIT). Прогін моторів працює як завжди."
@@ -83,8 +99,31 @@ class EscTelemetryPage(QWidget):
                     item = QTableWidgetItem()
                     self._table.setItem(i, col, item)
                 item.setText(str(value))
+        self._update_map(records, snap)
         self._counters.setText(f"Валідних кадрів: {header.valid} | CRC-помилок: {header.crc_errors} | "
                                f"ресинхронізацій: {header.resync} | bad_id: {header.bad_id}")
+
+    def _update_map(self, records: list[EscRecord], snap: CommandSnapshot | None) -> None:
+        """Which motor each telemetry ID really follows (learned while the motors run) vs. the expected ID = motor - 1."""
+        if snap is None:
+            return
+        for i, r in enumerate(records):
+            if r.stale or r.rpm <= 0 or r.glitch:
+                continue
+            for m, v in enumerate(snap.sent):
+                if msp_to_percent(v) >= 5:
+                    votes = self._votes.setdefault(i, {})
+                    votes[m] = votes.get(m, 0) + 1
+        lines = []
+        for i, r in enumerate(records):
+            votes = self._votes.get(i)
+            if not votes:
+                lines.append(f"ID{r.id}: {'мовчить' if r.stale else 'ще не крутився'}")
+                continue
+            motor = max(votes, key=votes.get)
+            ok = r.id == motor
+            lines.append(f"ID{r.id} ← мотор {motor + 1}" + ("" if ok else f" ⚠ очікувано мотор {r.id + 1}: ID не збігається, esctel assign"))
+        self._map.setText("Відповідність (за обертами): " + "; ".join(lines))
 
     @staticmethod
     def _open_folder() -> None:
