@@ -47,8 +47,10 @@ def schedule_cleanup(path: Path) -> None:
     if not cleanup_allowed(path):
         return
     try:
+        # cwd must not be the folder being deleted; two tries because this exe may stay locked a moment
+        cmd = f'ping -n 4 127.0.0.1 >nul & rmdir /s /q "{path}" 2>nul & ping -n 6 127.0.0.1 >nul & rmdir /s /q "{path}" 2>nul'
         subprocess.Popen(  # DETACHED_PROCESS | CREATE_NO_WINDOW
-            ["cmd", "/c", f'ping -n 4 127.0.0.1 >nul & rmdir /s /q "{path}"'], creationflags=0x00000008 | 0x08000000, close_fds=True
+            ["cmd", "/c", cmd], cwd=tempfile.gettempdir(), creationflags=0x00000008 | 0x08000000, close_fds=True
         )
     except OSError:
         pass
