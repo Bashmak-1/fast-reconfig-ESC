@@ -35,16 +35,21 @@ jobs:
       # the launcher embeds the exe just built; the user list is NOT baked in (users.sha256 sits next to it)
       - run: python scripts/build_exe.py --launcher
 
+      # Only the launcher is published, under the name EscHotline.exe: that is the file name the
+      # already-installed updaters download, and the bare app is never released.
+      - name: Publish the launcher as EscHotline.exe
+        shell: bash
+        run: mv -f dist/EscHotlineLauncher.exe dist/EscHotline.exe
+
       - name: Checksums for the in-app updater
         shell: bash
-        run: cd dist && sha256sum EscHotline.exe EscHotlineUpdater.exe EscHotlineLauncher.exe > SHA256SUMS.txt
+        run: cd dist && sha256sum EscHotline.exe EscHotlineUpdater.exe > SHA256SUMS.txt
 
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/EscHotline.exe
             dist/EscHotlineUpdater.exe
-            dist/EscHotlineLauncher.exe
             dist/SHA256SUMS.txt
           prerelease: false
           generate_release_notes: true

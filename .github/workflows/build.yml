@@ -26,6 +26,10 @@ jobs:
       - run: pytest tests/
 
       - run: python scripts/build_exe.py
+      - run: python scripts/build_exe.py --launcher
+      # only the launcher is shipped, under the app's old file name (the bare app is never published)
+      - run: mv -f dist/EscHotlineLauncher.exe dist/EscHotline.exe
+        shell: bash
 
       - uses: actions/upload-artifact@v4
         with:
