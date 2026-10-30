@@ -44,3 +44,16 @@ def test_whitelist_latin_and_digits_only():
     assert g.check_password("іван1029", USERS, "2026-10-29") == "bad_chars"
     assert g.check_password("iv an1029", USERS, "2026-10-29") == "bad_chars"
     assert g.check_password("ivan1029", USERS, "2026-10-29") == "ok"
+
+
+def test_update_cleanup_only_touches_our_temp_folder(tmp_path):
+    import tempfile
+    from pathlib import Path
+
+    from esc_hotline import updater_cli as u
+
+    tmp = Path(tempfile.gettempdir())
+    assert u.cleanup_allowed(tmp / "esc_hotline_update_abc")
+    assert not u.cleanup_allowed(tmp / "something_else")
+    assert not u.cleanup_allowed(tmp_path / "esc_hotline_update_abc")  # wrong parent
+    assert not u.cleanup_allowed(Path("C:/Users"))

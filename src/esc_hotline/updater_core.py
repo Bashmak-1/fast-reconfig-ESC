@@ -18,6 +18,8 @@ API_LATEST = os.environ.get("ESC_HOTLINE_API_URL", f"https://api.github.com/repo
 API_LIST = os.environ.get("ESC_HOTLINE_API_LIST_URL", f"https://api.github.com/repos/{REPO}/releases?per_page=30")
 MAIN_EXE = "EscHotline.exe"
 UPDATER_EXE = "EscHotlineUpdater.exe"
+LAUNCHER_EXE = "EscHotlineLauncher.exe"
+UPDATE_PREFIX = "esc_hotline_update_"  # temp folder that holds the updater while it replaces the launcher
 SUMS_FILE = "SHA256SUMS.txt"
 # Fixed home of everything. Each channel lives in its own subfolder (own exes, settings, logs)
 # so a dev build can never overwrite or corrupt the stable one; only ROOT_DIR/shared.ini is common.

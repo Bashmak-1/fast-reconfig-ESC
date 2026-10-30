@@ -26,6 +26,8 @@ BUNDLE = Path(getattr(sys, "_MEIPASS", HERE.parent))  # PyInstaller unpack dir, 
 sys.path.insert(0, str(HERE.parent / "src"))
 
 from esc_hotline import session_gate as gate  # noqa: E402
+from esc_hotline import updater_core as core  # noqa: E402
+from esc_hotline._version import __version__  # noqa: E402
 
 PREFIX = "esc_hotline_session_"
 APP_EXE = "EscHotline.exe"
@@ -56,8 +58,47 @@ def login(users: set[str]) -> Optional[str]:
 
 
 def clean_stale() -> None:
-    for old in glob.glob(os.path.join(tempfile.gettempdir(), PREFIX + "*")):
-        shutil.rmtree(old, ignore_errors=True)
+    for prefix in (PREFIX, core.UPDATE_PREFIX):
+        for old in glob.glob(os.path.join(tempfile.gettempdir(), prefix + "*")):
+            shutil.rmtree(old, ignore_errors=True)
+
+
+def offer_update() -> bool:
+    """Look for a newer launcher on GitHub (same channel as this build). If the user agrees, fetch the
+    updater into a temp folder and start it; it waits for us to exit, swaps this exe, starts the new one
+    and deletes the temp folder. Returns True when the updater took over and we must exit."""
+    if not getattr(sys, "frozen", False):
+        return False
+    channel = core.channel_of(__version__)
+    try:
+        release = core.fetch_latest(channel=channel)
+        if not core.is_newer(release.version, __version__) or core.LAUNCHER_EXE not in release.assets:
+            return False
+    except Exception as e:  # offline, rate limit, no releases: never block the login
+        log.info("update check failed: %s", type(e).__name__)
+        return False
+    import tkinter as tk
+    from tkinter import messagebox
+
+    root = tk.Tk()
+    root.withdraw()
+    ask = messagebox.askyesno("EscHotline", f"Доступна нова версія {release.version} (зараз {__version__})."+chr(10)+"Оновити?", parent=root)
+    root.destroy()
+    if not ask:
+        return False
+    tmp = Path(tempfile.mkdtemp(prefix=core.UPDATE_PREFIX))
+    try:
+        core.fetch_verified(release, core.UPDATER_EXE, tmp / core.UPDATER_EXE)
+        cmd = [str(tmp / core.UPDATER_EXE), "--launcher", "--yes", "--channel", channel, "--current", __version__,
+               "--wait-pid", str(os.getpid()), "--target", sys.executable, "--cleanup", str(tmp)]
+        # the updater inherits a valid session token, so it does not ask for the password again
+        subprocess.Popen(cmd, cwd=tmp, env={**os.environ, **gate.session_env(os.getpid())}, creationflags=0x00000010)  # new console
+    except Exception as e:
+        log.info("update start failed: %s", type(e).__name__)
+        shutil.rmtree(tmp, ignore_errors=True)
+        return False
+    log.info("update to %s started", release.version)
+    return True
 
 
 def run_session(day: str) -> str:
@@ -95,6 +136,9 @@ def run_session(day: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["--version"]:
+        print(f"EscHotlineLauncher {__version__}")
+        return 0
     if argv[:1] == ["--hash"] and len(argv) == 2:
         print(gate.name_hash(argv[1]))
         return 0
@@ -103,6 +147,8 @@ def main(argv: list[str]) -> int:
     clean_stale()
     while True:
         day = login(users)
+        if day is not None and offer_update():
+            return 0
         if day is None or run_session(day) != "expired":
             return 0
 

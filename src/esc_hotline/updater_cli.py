@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,26 @@ def create_desktop_shortcut(target: Path, name: str = "EscHotline") -> bool:
         return False
 
 
+def cleanup_allowed(path: Path) -> bool:
+    """Only ever delete our own update folder inside the system temp dir."""
+    try:
+        return path.name.startswith(core.UPDATE_PREFIX) and path.resolve().parent == Path(tempfile.gettempdir()).resolve()
+    except OSError:
+        return False
+
+
+def schedule_cleanup(path: Path) -> None:
+    """Remove the temp folder holding this very exe once this process has exited."""
+    if not cleanup_allowed(path):
+        return
+    try:
+        subprocess.Popen(  # DETACHED_PROCESS | CREATE_NO_WINDOW
+            ["cmd", "/c", f'ping -n 4 127.0.0.1 >nul & rmdir /s /q "{path}"'], creationflags=0x00000008 | 0x08000000, close_fds=True
+        )
+    except OSError:
+        pass
+
+
 _last_percent = -1
 _launched_new = False  # set once the freshly installed app has been started
 
@@ -53,6 +74,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--channel", choices=core.CHANNELS, help="stable (за замовчуванням) або dev")
     p.add_argument("--tag", help="поставити саме цю версію (напр. v1.1.0), навіть старішу")
     p.add_argument("--target", type=Path, help=f"куди ставити {core.MAIN_EXE} (за замовчуванням - {core.ROOT_DIR}/<канал>)")
+    p.add_argument("--launcher", action="store_true", help=f"оновити {core.LAUNCHER_EXE} (потрібен --target), а не {core.MAIN_EXE}")
+    p.add_argument("--current", help="версія, що зараз встановлена (щоб не запускати --target ради цього)")
+    p.add_argument("--force", action="store_true", help="поставити заново, навіть якщо версія актуальна")
+    p.add_argument("--cleanup", type=Path, help="після завершення видалити цю тимчасову папку (лише esc_hotline_update_* у temp)")
     p.add_argument("--shortcut", action="store_true", help="створити ярлик на робочому столі, навіть якщо оновлення не потрібне")
     return p
 
@@ -68,6 +93,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not session_gate.require_login(Path(sys.executable).parent, core.ROOT_DIR):
         return 1
     code = _run(args)
+    if args.cleanup:
+        schedule_cleanup(args.cleanup)
     if args.wait_pid is not None and not _launched_new and args.target and args.target.exists():
         # The app closed itself for us; if nothing new got installed (error, nothing to do) bring it back.
         subprocess.Popen([str(args.target)], cwd=str(args.target.parent))
@@ -98,9 +125,13 @@ def _find_release(args: argparse.Namespace, channel: str) -> core.Release:
 
 def _run(args: argparse.Namespace) -> int:
     channel = args.channel or (core.channel_of(args.tag) if args.tag else _own_channel() or "stable")
+    asset = core.LAUNCHER_EXE if args.launcher else core.MAIN_EXE
+    if args.launcher and not args.target:
+        print("Для --launcher потрібен --target (шлях до EscHotlineLauncher.exe).")
+        return 1
     target = args.target or core.channel_dir(channel) / core.MAIN_EXE
     legacy_dir: Optional[Path] = None
-    if target.parent.resolve() == core.ROOT_DIR.resolve():
+    if not args.launcher and target.parent.resolve() == core.ROOT_DIR.resolve():
         # Old flat layout (exes directly in ~/.esc_hotline): move into the channel folder.
         legacy_dir, target = target.parent, core.channel_dir(channel) / core.MAIN_EXE
     shortcut_name = "EscHotline" if channel == "stable" else "EscHotline Dev"
@@ -111,9 +142,9 @@ def _run(args: argparse.Namespace) -> int:
         print(f"Не вдалось отримати реліз з GitHub: {e}")
         return 1
 
-    current = core.exe_version(target) if target.exists() else None
+    current = args.current or (core.exe_version(target) if target.exists() else None)
     up_to_date = current == release.version if args.tag else bool(current) and not core.is_newer(release.version, current)
-    if up_to_date and legacy_dir is None:
+    if up_to_date and legacy_dir is None and not args.force:
         print(f"Встановлена версія {current} актуальна (на GitHub {release.version}).")
         if args.shortcut:
             create_desktop_shortcut(target, shortcut_name)
@@ -131,10 +162,10 @@ def _run(args: argparse.Namespace) -> int:
     updater_new = updater_dest.with_name(updater_dest.name + ".new")
     # The updater copy in the install dir is what the app itself keeps fresh later; skip it when
     # this very process is that copy (a running exe can't overwrite itself).
-    install_updater = Path(sys.executable).resolve() != updater_dest.resolve()
+    install_updater = not args.launcher and Path(sys.executable).resolve() != updater_dest.resolve()
     try:
-        print(f"[2/5] Завантаження {core.MAIN_EXE} + перевірка SHA256...")
-        core.fetch_verified(release, core.MAIN_EXE, new_path, _progress)
+        print(f"[2/5] Завантаження {asset} + перевірка SHA256...")
+        core.fetch_verified(release, asset, new_path, _progress)
         print()
         if install_updater:
             print(f"[3/5] Завантаження {core.UPDATER_EXE}...")
@@ -158,11 +189,12 @@ def _run(args: argparse.Namespace) -> int:
         updater_new.unlink(missing_ok=True)
         return 1
 
-    print("[5/5] Ярлик на робочому столі...")
-    print("  готово" if create_desktop_shortcut(target, shortcut_name) else "  не вдалось створити ярлик (не критично)")
+    if not args.launcher:
+        print("[5/5] Ярлик на робочому столі...")
+        print("  готово" if create_desktop_shortcut(target, shortcut_name) else "  не вдалось створити ярлик (не критично)")
     if legacy_dir is not None:  # the calling app has exited; the flat updater (this process?) is cleaned up by the new app later
         core.remove_legacy_flat()
-    print(f"Готово: {core.MAIN_EXE} {release.version}. Запускаю...")
+    print(f"Готово: {asset} {release.version}. Запускаю...")
     subprocess.Popen([str(target)], cwd=str(target.parent))
     global _launched_new
     _launched_new = True

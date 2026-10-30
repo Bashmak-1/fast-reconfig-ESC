@@ -41,9 +41,12 @@ jobs:
 
       - run: python scripts/build_exe.py
 
+      # the launcher embeds the exe just built; the user list is NOT baked in (users.sha256 sits next to it)
+      - run: python scripts/build_exe.py --launcher
+
       - name: Checksums for the in-app updater
         shell: bash
-        run: cd dist && sha256sum EscHotline.exe EscHotlineUpdater.exe > SHA256SUMS.txt
+        run: cd dist && sha256sum EscHotline.exe EscHotlineUpdater.exe EscHotlineLauncher.exe > SHA256SUMS.txt
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -55,6 +58,7 @@ jobs:
           files: |
             dist/EscHotline.exe
             dist/EscHotlineUpdater.exe
+            dist/EscHotlineLauncher.exe
             dist/SHA256SUMS.txt
 
       - name: Keep only the 10 newest dev pre-releases
