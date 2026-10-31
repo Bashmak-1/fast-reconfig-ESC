@@ -9,13 +9,13 @@ second cannot flood the motor thread's queue.
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QSlider, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSlider, QVBoxLayout, QWidget
 
 from .motor_ramp import MSP_MAX, MSP_MIN, msp_to_percent
 from .theme import TEXT_MUTED
 
 FADER_FLUSH_MS = 30
-_FADER_HEIGHT = 90
+_FADER_HEIGHT = 70
 _FADER_WIDTH = 22
 
 
@@ -34,28 +34,13 @@ class MotorFaders(QWidget):
         self._timer.setInterval(FADER_FLUSH_MS)
         self._timer.timeout.connect(self._flush)
 
+        self._master: QSlider | None = None  # the "all motors" fader is the last column of the row (built in set_count)
+        self._master_label: QLabel | None = None
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         self._row = QHBoxLayout()
         self._row.setSpacing(10)
         outer.addLayout(self._row)
-
-        master_row = QHBoxLayout()
-        title = QLabel("Всі мотори:")
-        title.setStyleSheet("font-weight: 700;")
-        master_row.addWidget(title)
-        self._master = QSlider(Qt.Orientation.Horizontal)
-        self._master.setRange(MSP_MIN, MSP_MAX)
-        self._master.setValue(MSP_MIN)
-        self._master.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._master.setToolTip("Рухає всі повзунки разом. Мотори тримаються, де залишили; вниз - плавно по спадній кривій.")
-        self._master.valueChanged.connect(self._on_master_changed)
-        master_row.addWidget(self._master, 1)
-        self._master_label = QLabel("0%")
-        self._master_label.setFixedWidth(50)
-        self._master_label.setStyleSheet("font-weight: 700;")
-        master_row.addWidget(self._master_label)
-        outer.addLayout(master_row)
 
         self.set_count(0)
 
@@ -75,6 +60,7 @@ class MotorFaders(QWidget):
         self._sliders.clear()
         self._labels.clear()
         self._pending.clear()
+        self._master = self._master_label = None
         if count == 0:
             placeholder = QLabel("Немає даних — підключіться, щоб побачити мотори FC.")
             placeholder.setStyleSheet(f"color: {TEXT_MUTED};")
@@ -83,6 +69,11 @@ class MotorFaders(QWidget):
         else:
             for i in range(count):
                 self._row.addWidget(self._build_column(i))
+            separator = QFrame()
+            separator.setFrameShape(QFrame.Shape.VLine)
+            separator.setFrameShadow(QFrame.Shadow.Sunken)
+            self._row.addWidget(separator)
+            self._row.addWidget(self._build_master_column())
             self._row.addStretch(1)
         self._set_master(MSP_MIN)
         self._apply_enabled()
@@ -142,12 +133,40 @@ class MotorFaders(QWidget):
         self._labels.append(label)
         return column
 
+    def _build_master_column(self) -> QWidget:
+        column = QWidget()
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        name = QLabel("Всі")
+        name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name.setStyleSheet("font-weight: 700;")
+        layout.addWidget(name)
+        master = QSlider(Qt.Orientation.Vertical)
+        master.setObjectName("motorFader")
+        master.setRange(MSP_MIN, MSP_MAX)
+        master.setValue(MSP_MIN)
+        master.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        master.setFixedSize(_FADER_WIDTH, _FADER_HEIGHT)
+        master.setToolTip("Рухає всі повзунки разом. Мотори тримаються, де залишили; вниз - плавно по спадній кривій.")
+        master.valueChanged.connect(self._on_master_changed)
+        layout.addWidget(master, alignment=Qt.AlignmentFlag.AlignHCenter)
+        label = QLabel("0%")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet("font-weight: 700;")
+        layout.addWidget(label)
+        self._master, self._master_label = master, label
+        return column
+
     def _apply_enabled(self) -> None:
         for slider in self._sliders:
             slider.setEnabled(self._active)
-        self._master.setEnabled(self._active and bool(self._sliders))
+        if self._master is not None:
+            self._master.setEnabled(self._active)
 
     def _set_master(self, value: int) -> None:
+        if self._master is None or self._master_label is None:
+            return
         was, self._syncing = self._syncing, True
         try:
             self._master.setValue(value)
@@ -166,7 +185,8 @@ class MotorFaders(QWidget):
     def _on_master_changed(self, value: int) -> None:
         if self._syncing:
             return
-        self._master_label.setText(f"{msp_to_percent(value):.0f}%")
+        if self._master_label is not None:
+            self._master_label.setText(f"{msp_to_percent(value):.0f}%")
         for slider in self._sliders:
             slider.setValue(value)  # each handle reports itself through _on_fader_changed
 
