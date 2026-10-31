@@ -51,6 +51,7 @@ from .fc_flash_station import (
     MOTOR_INIT_WAIT_MIN_MS,
     MOTOR_INIT_WAIT_STEP_MS,
     MIN_POLL_INTERVAL_MS,
+    MOTOR_RESTART_PHASES,
     POLL_INTERVAL_STEP_MS,
     PHASE_STYLE,
     RETRY_PHASES,
@@ -945,7 +946,7 @@ class FcFlashPage(QWidget):
         self._last_phase = phase
         if changed and phase == "connecting":
             self._esc_present.clear()
-        self._motor_start_btn.setEnabled(phase == "waiting_motor_start")
+        self._motor_start_btn.setEnabled(phase in MOTOR_RESTART_PHASES)
         self._motor_stop_btn.setEnabled(phase in ("connecting_motor_test", "checking_motor_armed", "running_motor_test"))
         self._sync_power_prompts(changed)
         self._render_banner()

@@ -524,3 +524,39 @@ def test_fc_tab_layout_does_not_jump_when_hints_appear_and_disappear():
             assert ys() == base, phase
     finally:
         page.shutdown()
+
+
+def test_motor_test_can_be_started_again_after_all_done_or_an_error(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from PyQt6.QtWidgets import QApplication
+
+    from esc_hotline import fc_flash_station as fs
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    c = fs.FcFlashStationController()
+    try:
+        c._armed, c._port_device = True, "COM9"
+        c._motor_connect_requested = MagicMock()
+        monkeypatch.setattr(fs, "list_fc_ports", lambda: [fs.PortInfo("COM9", "FC", 0x0483, True)])
+
+        c._set_phase("all_done")  # finished (or the stage was off) and the FC is still plugged in: run again
+        c.start_motor_test()
+        assert c.phase == "connecting_motor_test"
+        c._motor_connect_requested.emit.assert_called_once_with("COM9", fs.DEFAULT_BAUD)
+
+        c._set_phase("motor_test_error")
+        c.start_motor_test()
+        assert c.phase == "connecting_motor_test"
+
+        c._set_phase("flashing")  # never in the middle of something else
+        c.start_motor_test()
+        assert c.phase == "flashing"
+
+        c._set_phase("all_done")  # FC gone: nothing to spin
+        monkeypatch.setattr(fs, "list_fc_ports", lambda: [])
+        c.start_motor_test()
+        assert c.phase == "all_done"
+    finally:
+        c._armed = False
+        c.shutdown()

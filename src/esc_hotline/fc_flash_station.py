@@ -188,6 +188,7 @@ WATCH_PHASES = {"watching", "esc_ready", "esc_error"}
 RETRY_PHASES = {"error_connect", "fc_flash_error", "protocol_error", "motor_test_error"}
 # Phases where a motor-test worker call (or its reply) is in flight - used by
 # stop()/shutdown() to know when _motor_disconnect_requested is also needed.
+MOTOR_RESTART_PHASES = ("waiting_motor_start", "all_done", "motor_test_error")
 MOTOR_TEST_PHASES = {"waiting_fc_for_motor_test", "waiting_motor_init", "waiting_motor_start", "connecting_motor_test", "checking_motor_armed", "running_motor_test", "motor_test_error", "all_done"}
 
 PHASE_STYLE = {
@@ -766,9 +767,21 @@ class FcFlashStationController(QObject):
         self._motor_test_manual = manual
 
     def start_motor_test(self) -> None:
-        if self._armed and self._phase == "waiting_motor_start":
-            self._set_phase("connecting_motor_test")
-            self._begin_motor_connect()
+        """Spin the motors now: from the manual-start wait, and again after a finished or failed test while
+        the FC is still connected (a repeat run is sometimes needed and used to be impossible)."""
+        if not self._armed or self._phase not in MOTOR_RESTART_PHASES:
+            return
+        if self._phase == "all_done" and not self._fc_port_present():
+            self.dfu_detail_changed.emit("FC не підключена - мотори запускати нема на чому.")
+            return
+        self._motor_stop_pending = self._motor_stop_disarm = False
+        self._fc_gone_since = None  # all_done's "wait for the board to go away" starts over after the run
+        self._flog.info("FC flash station: motor test started by the operator from phase %s", self._phase)
+        self._set_phase("connecting_motor_test")
+        self._begin_motor_connect()
+
+    def _fc_port_present(self) -> bool:
+        return bool(self._port_device) and self._port_device in {info.device for info in list_fc_ports()}
 
     def _after_motor_init(self) -> None:
         """The FC has been rebooted with the protocol (or needed no reboot) and the motors have initialised."""
