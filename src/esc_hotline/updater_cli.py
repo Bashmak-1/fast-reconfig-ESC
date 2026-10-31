@@ -92,7 +92,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.version:
         print(f"EscHotlineUpdater {__version__}")
         return 0
-    if not session_gate.require_login(Path(sys.executable).parent, core.ROOT_DIR):
+    if not session_gate.require_login(core.ROOT_DIR, Path(sys.executable).parent):
         return 1
     code = _run(args)
     if args.cleanup:

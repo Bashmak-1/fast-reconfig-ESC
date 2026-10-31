@@ -45,12 +45,12 @@ def setup_log() -> None:
 
 
 def load_users() -> set[str]:
-    # a users.sha256 next to the exe (written by EscHotlineAdmin) wins over the one baked in at build time
+    # ~/.esc_hotline/users.sha256 is THE list (shared by every channel and by the updater); the older places are fallbacks
     exe_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else HERE.parent / "private"
-    return gate.find_users(exe_dir, BUNDLE, HERE.parent / "private")
+    return gate.find_users(core.ROOT_DIR, exe_dir, BUNDLE, HERE.parent / "private")
 
 
-def login(users: set[str]) -> Optional[str]:
+def login(users) -> Optional[str]:
     def on_attempt(status: str, password: str) -> None:
         log.info("login %s", "ok" if status == "ok" else "denied")
 
@@ -143,10 +143,9 @@ def main(argv: list[str]) -> int:
         print(gate.name_hash(argv[1]))
         return 0
     setup_log()
-    users = load_users()
     clean_stale()
     while True:
-        day = login(users)
+        day = login(load_users)  # the list is re-read on every "Увійти"
         if day is not None and offer_update():
             return 0
         if day is None or run_session(day) != "expired":

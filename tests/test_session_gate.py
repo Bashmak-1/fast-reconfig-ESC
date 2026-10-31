@@ -85,3 +85,28 @@ def test_in_app_update_inside_a_launcher_session_hands_over_to_a_fresh_updater(m
     import shutil
 
     shutil.rmtree(cmd[cmd.index("--cleanup") + 1], ignore_errors=True)  # the real updater would do this
+
+
+def test_login_dialog_rereads_the_user_list_on_every_try(monkeypatch, tmp_path):
+    import tkinter as tk
+
+    from PyQt6.QtWidgets import QApplication  # noqa: F401  (keeps the Qt/Tk mix identical to the other tests)
+
+    users_file = tmp_path / "users.sha256"
+    users_file.write_text(g.name_hash("Ivan") + "\n", encoding="utf-8")
+    orig = tk.Tk.mainloop
+    seen: list[str] = []
+
+    def drive(self, n=0):
+        entry = [w for w in self.winfo_children() if isinstance(w, tk.Entry)][0]
+        button = [w for w in self.winfo_children() if isinstance(w, tk.Button)][0]
+        entry.insert(0, "petro" + g.password_for("x")[-4:])
+        button.invoke(); self.update()  # Petro is not in the file yet
+        seen.append(entry.get())
+        users_file.write_text(g.name_hash("Ivan") + "\n" + g.name_hash("Petro") + "\n", encoding="utf-8")  # list replaced while the window is open
+        button.invoke(); self.update()
+
+    monkeypatch.setattr(tk.Tk, "mainloop", drive)
+    assert g.login_dialog(lambda: g.find_users(tmp_path)) is not None
+    monkeypatch.setattr(tk.Tk, "mainloop", orig)
+    assert seen  # the first try stayed in the window

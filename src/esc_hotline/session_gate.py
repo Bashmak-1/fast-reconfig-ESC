@@ -111,7 +111,9 @@ def find_users(*dirs: Path) -> set[str]:
     return set()
 
 
-def login_dialog(users: set[str], on_attempt: Optional[Callable[[str, str], None]] = None) -> Optional[str]:
+def login_dialog(
+    users: "set[str] | Callable[[], set[str]]", on_attempt: Optional[Callable[[str, str], None]] = None
+) -> Optional[str]:
     """Password window. Returns the day it was accepted on, or None if it was closed.
     on_attempt(status, password) is called after every try (the launcher logs it)."""
     import tkinter as tk  # lazy: the app itself never needs Tk
@@ -124,7 +126,8 @@ def login_dialog(users: set[str], on_attempt: Optional[Callable[[str, str], None
 
     def submit(_event=None) -> None:
         today = date.today().isoformat()  # taken at the moment of the click, not at window creation
-        status = check_password(password.get(), users, today)
+        current = users() if callable(users) else users  # re-read the list on every try: it may have been replaced meanwhile
+        status = check_password(password.get(), current, today)
         if on_attempt:
             on_attempt(status, password.get())
         if status == "ok":
@@ -151,4 +154,4 @@ def require_login(*users_dirs: Path) -> bool:
     """For the standalone updater: inside a launcher session the token is inherited; otherwise ask for the password first."""
     if not getattr(sys, "frozen", False) or token_ok():
         return True
-    return login_dialog(find_users(*users_dirs)) is not None
+    return login_dialog(lambda: find_users(*users_dirs)) is not None
