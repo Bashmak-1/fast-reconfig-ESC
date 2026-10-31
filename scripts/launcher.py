@@ -112,7 +112,7 @@ def run_session(day: str) -> str:
     try:
         exe = tmp / APP_EXE
         shutil.copyfile(payload, exe)
-        proc = subprocess.Popen([str(exe)], cwd=tmp, env={**os.environ, **gate.session_env(os.getpid())})
+        proc = subprocess.Popen([str(exe)], cwd=tmp, env={**os.environ, **gate.session_env(os.getpid()), gate.ENV_LAUNCHER_EXE: sys.executable})
         log.info("session start")
         while proc.poll() is None:
             if date.today().isoformat() != day:

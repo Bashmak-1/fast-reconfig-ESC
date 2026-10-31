@@ -57,3 +57,31 @@ def test_update_cleanup_only_touches_our_temp_folder(tmp_path):
     assert not u.cleanup_allowed(tmp / "something_else")
     assert not u.cleanup_allowed(tmp_path / "esc_hotline_update_abc")  # wrong parent
     assert not u.cleanup_allowed(Path("C:/Users"))
+
+
+def test_in_app_update_inside_a_launcher_session_hands_over_to_a_fresh_updater(monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+
+    from PyQt6.QtWidgets import QApplication, QWidget
+
+    from esc_hotline import update_controller as uc
+    from esc_hotline import updater_core as core
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    for k, v in {**g.session_env(4242), g.ENV_LAUNCHER_EXE: str(tmp_path / "EscHotline.exe")}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(uc, "CREATE_NEW_CONSOLE", 0)
+    release = core.Release(version="9.9.9", assets={}, tag="v9.9.9")
+    monkeypatch.setattr(core, "fetch_latest", lambda **kw: release)
+    monkeypatch.setattr(core, "fetch_verified", lambda rel, name, dest, *a: dest.write_bytes(b"x"))
+    popen, quit_ = MagicMock(), MagicMock()
+    monkeypatch.setattr(uc.subprocess, "Popen", popen)
+    monkeypatch.setattr(uc.QApplication, "quit", quit_)
+    uc.UpdateController(QWidget())._launch_updater()
+    cmd = popen.call_args[0][0]
+    assert cmd[0].endswith("EscHotlineUpdater.exe") and "--launcher" in cmd
+    assert cmd[cmd.index("--wait-pid") + 1] == "4242" and cmd[cmd.index("--target") + 1].endswith("EscHotline.exe")
+    quit_.assert_called_once()
+    import shutil
+
+    shutil.rmtree(cmd[cmd.index("--cleanup") + 1], ignore_errors=True)  # the real updater would do this

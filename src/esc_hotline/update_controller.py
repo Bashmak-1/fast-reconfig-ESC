@@ -5,13 +5,15 @@ itself on Windows, so the updater does the swap after this app exits)."""
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from . import i18n, session_gate
@@ -53,7 +55,7 @@ class UpdateController(QObject):
     def check(self, manual: bool) -> None:
         if self._busy:
             return
-        if session_gate.in_session():  # launcher copy lives in temp and is replaced by the launcher, not the updater
+        if session_gate.in_session() and not manual:  # the launcher has just done its own check after the login
             self.check_finished.emit()
             return
         self._busy = True
@@ -67,7 +69,7 @@ class UpdateController(QObject):
         error = ""
         try:
             release = core.fetch_latest(channel=CHANNEL)
-            if is_frozen():
+            if is_frozen() and not session_gate.in_session():  # in a launcher session the updater is fetched fresh per update
                 self._sync_updater(release)
                 if CHANNEL == "stable" and install_dir() == core.channel_dir("stable"):
                     core.remove_legacy_flat()  # leftovers of the old flat layout, e.g. the updater that migrated us
@@ -147,7 +149,39 @@ class UpdateController(QObject):
         if answer == QMessageBox.StandardButton.Yes:
             self._launch_updater(tag)
 
+    def _launch_session_updater(self, tag: Optional[str]) -> None:
+        """Launcher session: the real app lives in a temp folder, so the thing to replace is the launcher. Fetch
+        the release's own updater into a temp folder (so it is always the right version), hand it the session
+        token (no second password) and quit; it waits for the launcher to exit, swaps it and starts it again."""
+        launcher = os.environ.get(session_gate.ENV_LAUNCHER_EXE, "")
+        pid = os.environ.get(session_gate.ENV_PID, "")
+        if not launcher or not pid.isdigit():
+            QMessageBox.information(self._parent, i18n.tr("update_title"), i18n.tr("update_dev_build"))
+            return
+        tmp = Path(tempfile.mkdtemp(prefix=core.UPDATE_PREFIX))
+        try:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            release = next((r for ch in core.CHANNELS for r in core.list_releases(ch) if r.tag == tag), None) if tag else core.fetch_latest(channel=CHANNEL)
+            if release is None:
+                raise ValueError(f"релізу {tag} не знайдено")
+            core.fetch_verified(release, core.UPDATER_EXE, tmp / core.UPDATER_EXE)
+        except Exception as e:
+            shutil.rmtree(tmp, ignore_errors=True)
+            QMessageBox.warning(self._parent, i18n.tr("update_title"), i18n.tr("update_check_failed", error=str(e)))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        cmd = [str(tmp / core.UPDATER_EXE), "--launcher", "--yes", "--channel", CHANNEL, "--current", __version__,
+               "--wait-pid", pid, "--target", launcher, "--cleanup", str(tmp)]
+        if tag:
+            cmd += ["--tag", tag]
+        subprocess.Popen(cmd, cwd=str(tmp), creationflags=CREATE_NEW_CONSOLE)  # env (with the token) is inherited
+        QApplication.quit()
+
     def _launch_updater(self, tag: Optional[str] = None) -> None:
+        if session_gate.in_session():
+            self._launch_session_updater(tag)
+            return
         updater = install_dir() / core.UPDATER_EXE
         if not is_frozen() or not updater.exists():
             QMessageBox.information(self._parent, i18n.tr("update_title"), i18n.tr("update_dev_build"))

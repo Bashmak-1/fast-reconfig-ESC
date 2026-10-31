@@ -26,6 +26,7 @@ from typing import Callable, Mapping, Optional
 
 ENV_TOKEN = "ESC_HOTLINE_TOKEN"
 ENV_PID = "ESC_HOTLINE_LAUNCHER_PID"
+ENV_LAUNCHER_EXE = "ESC_HOTLINE_LAUNCHER_EXE"  # path of the launcher exe that started this session
 _SECRET = "esc-hotline-gate-v1"
 # deliberately one message for every failure: do not tell what is wrong or how a password is built
 DENIED = "Невірний пароль"
