@@ -45,9 +45,9 @@ def setup_log() -> None:
 
 
 def load_users() -> set[str]:
-    # ~/.esc_hotline/users.sha256 is THE list (shared by every channel and by the updater); the older places are fallbacks
-    exe_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else HERE.parent / "private"
-    return gate.find_users(core.ROOT_DIR, exe_dir, BUNDLE, HERE.parent / "private")
+    # ~/.esc_hotline/users.sha256 is THE list (shared by every channel and by the updater); a file next to the exe is the fallback
+    beside_exe = (Path(sys.executable).parent,) if getattr(sys, "frozen", False) else ()
+    return gate.find_users(core.ROOT_DIR, *beside_exe)
 
 
 def login(users) -> Optional[str]:

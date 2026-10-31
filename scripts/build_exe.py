@@ -3,7 +3,7 @@
 Usage: .venv/Scripts/python.exe scripts/build_exe.py
 Output: dist/EscHotline.exe (GUI, no console window) and
         dist/EscHotlineUpdater.exe (console updater, Qt-free)
-Add --launcher (after the normal build, with private/users.sha256 in place)
+Add --launcher (after the normal build)
 for the private login launcher dist/EscHotlineLauncher.exe, --admin for dist/EscHotlineAdmin.exe
 (user list editor). Neither is built in CI or published.
 """
@@ -44,15 +44,13 @@ def build(name: str, entry: str, windowed: bool, extra: tuple[str, ...] = ()) ->
 
 
 def build_launcher() -> int:
-    """Private login launcher: embeds dist/EscHotline.exe; the user list is users.sha256 next to the exe
-    (made by EscHotlineAdmin), or private/users.sha256 baked in when it exists. Not built in CI."""
+    """Private login launcher: embeds dist/EscHotline.exe. The user list is NOT baked in: it is read from
+    ~/.esc_hotline/users.sha256 (made by EscHotlineAdmin). Not built in CI as a separate artifact."""
     app = ROOT / "dist" / "EscHotline.exe"
-    users = ROOT / "private" / "users.sha256"
     if not app.is_file():
         print(f"Need {app} first")
         return 1
-    data = ["--add-data", f"{app};."] + (["--add-data", f"{users};."] if users.is_file() else [])
-    return build("EscHotlineLauncher", "launcher.py", windowed=True, extra=tuple(data))
+    return build("EscHotlineLauncher", "launcher.py", windowed=True, extra=("--add-data", f"{app};."))
 
 
 def main() -> int:
