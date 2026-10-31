@@ -58,6 +58,7 @@ from .fc_flash_station import (
     FcFlashStationController,
 )
 from .manual_counter_widget import ManualCounterWidget
+from .motor_faders import MotorFaders
 from .motor_ramp import MOTOR_PROTOCOLS
 from .motor_test_manager import (
     PHASE_IDLE as MOTOR_PHASE_IDLE,
@@ -200,6 +201,7 @@ class FcFlashPage(QWidget):
         self.controller.port_changed.connect(self._on_port_auto_changed)
         self.controller.motor_test_phase_changed.connect(self._on_motor_test_phase_changed)
         self.controller.motor_test_value_changed.connect(self._on_motor_test_value_changed)
+        self.controller.motor_test_value_changed.connect(lambda values: self._faders.show_values(values, mirror=False))
         self.controller.dfu_flash_progress_changed.connect(self._on_dfu_flash_progress)
         self._counted_ports: dict[str, str] = {}  # counter name -> COM port it last counted (count-by-port mode)
         self.controller.fc_flash_succeeded.connect(lambda: self._count("fc", self._fc_counter))
@@ -491,9 +493,27 @@ class FcFlashPage(QWidget):
         self._motor_stop_btn.setMinimumSize(160, 52)
         self._motor_stop_btn.setStyleSheet("QPushButton { font-size: 17px; font-weight: 700; background-color: " + ACCENT_ERROR + "; color: white; } " + _BTN_DISABLED)
         self._motor_stop_btn.setToolTip("Плавно зупиняє мотори. Друге натискання - негайна зупинка.")
-        self._motor_stop_btn.clicked.connect(lambda _checked=False: self.controller.stop_motor_test())
+        self._motor_stop_btn.clicked.connect(lambda _checked=False: self._on_motor_stop_clicked())
         motor_header_row.addWidget(self._motor_stop_btn)
+        self._manual_btn = QPushButton("Ручні мотори")
+        self._manual_btn.setEnabled(False)
+        self._manual_btn.setMinimumSize(170, 52)
+        self._manual_btn.setStyleSheet("QPushButton { font-size: 15px; font-weight: 700; } " + _BTN_DISABLED)
+        self._manual_btn.setToolTip(
+            "Вертикальні повзунки для кожного мотора й один спільний. Мотор тримається, де залишили повзунок; "
+            "вниз - плавно по спадній кривій. Доступно, коли FC підключена (після прошивки або помилки тесту)."
+        )
+        self._manual_btn.clicked.connect(lambda _checked=False: self._on_manual_clicked())
+        motor_header_row.addWidget(self._manual_btn)
         root.addLayout(motor_header_row)
+
+        # per-motor + "all motors" faders: shown only while the manual mode is on (phase manual_motors)
+        self._faders = MotorFaders()
+        self._faders.setVisible(False)
+        self._faders.set_active(False)
+        self._faders.target_requested.connect(self.controller.manual_motor_target)
+        self.controller.motor_count_changed.connect(self._faders.set_count)
+        root.addWidget(self._faders)
 
         # Ramp config for the final automatic motor-test step this tab runs
         # on its own (see fc_flash_station.py) - SAME shared settings as
@@ -937,6 +957,17 @@ class FcFlashPage(QWidget):
         self._power_popup.raise_()
         self._power_popup.activateWindow()
 
+    def _on_manual_clicked(self) -> None:
+        if self.controller.phase == "manual_motors":
+            self.controller.leave_manual_motors()
+        else:
+            self.controller.start_manual_motors()
+
+    def _on_motor_stop_clicked(self) -> None:
+        if self.controller.phase == "manual_motors":
+            self._faders.zero()  # the manager spins the motors down; the handles follow to 0 at once
+        self.controller.stop_motor_test()
+
     def _on_phase_changed(self, phase: str) -> None:
         if phase == "watching" and self._last_phase == "connecting":
             self._play_power_cue()  # FC is ready, ESCs are waiting for power
@@ -947,7 +978,14 @@ class FcFlashPage(QWidget):
         if changed and phase == "connecting":
             self._esc_present.clear()
         self._motor_start_btn.setEnabled(phase in MOTOR_RESTART_PHASES)
-        self._motor_stop_btn.setEnabled(phase in ("connecting_motor_test", "checking_motor_armed", "running_motor_test"))
+        manual = phase == "manual_motors"
+        self._motor_stop_btn.setEnabled(phase in ("connecting_motor_test", "checking_motor_armed", "running_motor_test") or manual)
+        self._manual_btn.setEnabled(phase in MOTOR_RESTART_PHASES or manual)
+        self._manual_btn.setText("Вийти з ручних моторів" if manual else "Ручні мотори")
+        if self._faders.isVisible() and not manual:
+            self._faders.zero()  # left the manual mode: the handles go back to 0
+        self._faders.setVisible(manual)
+        self._faders.set_active(manual)
         self._sync_power_prompts(changed)
         self._render_banner()
         self._update_start_stop_button()

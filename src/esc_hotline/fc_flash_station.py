@@ -189,7 +189,7 @@ RETRY_PHASES = {"error_connect", "fc_flash_error", "protocol_error", "motor_test
 # Phases where a motor-test worker call (or its reply) is in flight - used by
 # stop()/shutdown() to know when _motor_disconnect_requested is also needed.
 MOTOR_RESTART_PHASES = ("waiting_motor_start", "all_done", "motor_test_error")
-MOTOR_TEST_PHASES = {"waiting_fc_for_motor_test", "waiting_motor_init", "waiting_motor_start", "connecting_motor_test", "checking_motor_armed", "running_motor_test", "motor_test_error", "all_done"}
+MOTOR_TEST_PHASES = {"waiting_fc_for_motor_test", "waiting_motor_init", "waiting_motor_start", "connecting_motor_test", "checking_motor_armed", "running_motor_test", "motor_test_error", "all_done", "manual_motors"}
 
 PHASE_STYLE = {
     "idle": (BG_PANEL, TEXT_MUTED),
@@ -213,6 +213,7 @@ PHASE_STYLE = {
     "checking_motor_armed": (ACCENT_AMBER, "white"),
     "running_motor_test": (ACCENT_AMBER, "white"),
     "all_done": (ACCENT_GREEN, "white"),
+    "manual_motors": (ACCENT_GREEN, "white"),
     "motor_test_error": (ACCENT_ERROR, "white"),
     "protocol_error": (ACCENT_ERROR, "white"),
 }
@@ -238,6 +239,7 @@ PHASE_LABEL = {
     "checking_motor_armed": "Перевірка стану FC (має бути disarmed)...",
     "running_motor_test": "Тест моторів...",
     "all_done": "Готово! FC і ESC прошиті, протокол встановлено.",
+    "manual_motors": "Ручне керування моторами: мотори тримаються, де залишили повзунок; вниз - плавно по спадній кривій.",
     "motor_test_error": "Помилка тесту моторів",
     "protocol_error": "Помилка запису протоколу",
 }
@@ -553,6 +555,7 @@ class FcFlashStationController(QObject):
     # read-only RampChartWidget on this tab's own widget - mirrors exactly
     # what motor_test_widget.py's own chart is fed.
     motor_test_phase_changed = pyqtSignal(str)  # PHASE_IDLE/PHASE_UP/PHASE_HOLD/PHASE_DOWN
+    motor_count_changed = pyqtSignal(int)  # real motors the FC reported, right after the motor connection
     motor_test_value_changed = pyqtSignal(list)  # raw MSP values, one per real motor slot
 
     # Internal-only: reach the private EscManager, which lives on another
@@ -577,6 +580,7 @@ class FcFlashStationController(QObject):
     _motor_stop_requested = pyqtSignal()  # smooth spin-down of a running test (MotorTestManager.stop_sweep)
     _motor_check_disarmed_requested = pyqtSignal()
     _motor_start_sweep_requested = pyqtSignal(float, float, float)
+    _motor_manual_target_requested = pyqtSignal(int, int)
     _motor_set_ramp_mode_requested = pyqtSignal(str)
     _motor_set_curves_requested = pyqtSignal(object, object)
     _motor_set_tick_requested = pyqtSignal(int)
@@ -618,6 +622,8 @@ class FcFlashStationController(QObject):
         self.dfu_detail_changed.connect(lambda text: self._flog.info("FC-tab message: %s", text))  # whatever the operator sees, the log keeps
         self._motor_disconnect_requested.connect(motor_mgr.disconnect)
         self._motor_stop_requested.connect(motor_mgr.stop_sweep)
+        self._motor_manual_target_requested.connect(motor_mgr.manual_set_target)
+        motor_mgr.manual_idle.connect(self._on_manual_idle)
         self._motor_check_disarmed_requested.connect(motor_mgr.check_disarmed)
         self._motor_start_sweep_requested.connect(motor_mgr.start_sweep)
         self._motor_set_ramp_mode_requested.connect(motor_mgr.set_ramp_mode)
@@ -644,6 +650,8 @@ class FcFlashStationController(QObject):
         self._motor_test_enabled = True
         self._motor_test_manual = False  # test only on the operator's button (phase waiting_motor_start)
         self._motor_stop_pending = False  # a smooth spin-down was requested and has not finished yet
+        self._manual_motors = False  # the next motor connection is for the faders, not for the automatic test
+        self._manual_exit: Optional[str] = None  # "leave" | "disarm" while the faders spin down before disconnecting
         self._motor_stop_disarm = False  # ... by the global Стоп: disarm the station when it finishes
         self._esc_indices: list[int] = [0]
         self._protocol_index: int = MOTOR_PROTOCOLS.index("DSHOT300")
@@ -780,6 +788,41 @@ class FcFlashStationController(QObject):
         self._set_phase("connecting_motor_test")
         self._begin_motor_connect()
 
+    def start_manual_motors(self) -> None:
+        """Connect for the faders (no armed check here - the manager checks "disarmed" when the first motor leaves idle)."""
+        if not self._armed or self._phase not in MOTOR_RESTART_PHASES:
+            return
+        if self._phase == "all_done" and not self._fc_port_present():
+            self.dfu_detail_changed.emit("FC не підключена - мотори крутити нема на чому.")
+            return
+        self._manual_motors, self._manual_exit = True, None
+        self._motor_stop_pending = self._motor_stop_disarm = False
+        self._fc_gone_since = None
+        self._flog.info("FC flash station: manual motor control requested from phase %s", self._phase)
+        self._set_phase("connecting_motor_test")
+        self._begin_motor_connect()
+
+    def manual_motor_target(self, index: int, value: int) -> None:
+        if self._armed and self._phase == "manual_motors":
+            self._motor_manual_target_requested.emit(index, value)
+
+    def leave_manual_motors(self, disarm: bool = False) -> None:
+        """Spin every fader-driven motor down along the curve, then disconnect (never an abrupt drop)."""
+        if self._phase != "manual_motors":
+            return
+        self._manual_exit = "disarm" if disarm else "leave"
+        self.dfu_detail_changed.emit("Зупинка моторів: плавний спад...")
+        self._motor_stop_requested.emit()
+
+    def _on_manual_idle(self) -> None:
+        if self._phase != "manual_motors" or self._manual_exit is None:
+            return
+        action, self._manual_exit, self._manual_motors = self._manual_exit, None, False
+        self._motor_disconnect_requested.emit()
+        self._set_phase("all_done")
+        if action == "disarm":
+            self.stop()
+
     def _fc_port_present(self) -> bool:
         return bool(self._port_device) and self._port_device in {info.device for info in list_fc_ports()}
 
@@ -877,11 +920,18 @@ class FcFlashStationController(QObject):
             else:
                 self._request_smooth_motor_stop(False)
         elif self._phase in ("connecting_motor_test", "checking_motor_armed"):
+            self._manual_motors = False
             self._after_motor_stop()
+        elif self._phase == "manual_motors":
+            self._motor_stop_requested.emit()  # all fader-driven motors spin down; the connection stays
 
     def stop(self) -> None:
         if not self._armed:
             return
+        if self._phase == "manual_motors" and self._manual_exit is None:
+            self.leave_manual_motors(disarm=True)  # the global Стоп also spins the faders' motors down first
+            return
+        self._manual_motors, self._manual_exit = False, None
         if self._phase == "running_motor_test" and not self._motor_stop_pending:
             self._request_smooth_motor_stop(True)  # the global Стоп also spins down first, then disarms
             return
@@ -1119,6 +1169,13 @@ class FcFlashStationController(QObject):
                 self.dfu_detail_changed.emit(f"Очікую завершення ініціалізації моторів: ще {left:.0f} с...")
                 return
             self._after_motor_init()
+            return
+
+        if self._phase == "manual_motors":
+            if not self._fc_port_present():  # unplugged while the faders were active: on to the next board
+                self._manual_motors, self._manual_exit = False, None
+                self._motor_disconnect_requested.emit()
+                self._set_phase("all_done")
             return
 
         if self._phase == "waiting_motor_start":
@@ -1487,6 +1544,7 @@ class FcFlashStationController(QObject):
                 QTimer.singleShot(1500, self._retry_motor_connect)
                 return
             self.dfu_detail_changed.emit("Не вдалось підключитись для тесту моторів.")
+            self._manual_motors = False
             self._set_phase("motor_test_error")
             return
         self._motor_set_ramp_mode_requested.emit(load_str(_MOTOR_RAMP_MODE_KEY, RAMP_BEZIER))
@@ -1499,6 +1557,9 @@ class FcFlashStationController(QObject):
             load_float(_MOTOR_MIN_BOUND_KEY, DEFAULT_MOTOR_MIN_BOUND),
             load_float(_MOTOR_MAX_BOUND_KEY, DEFAULT_MOTOR_MAX_BOUND),
         )
+        if self._manual_motors:
+            self._set_phase("manual_motors")
+            return
         self._set_phase("checking_motor_armed")
         self._motor_check_disarmed_requested.emit()
 
@@ -1510,6 +1571,7 @@ class FcFlashStationController(QObject):
 
     def _on_motor_count_detected(self, count: int) -> None:
         self._motor_count_for_test = count
+        self.motor_count_changed.emit(count)
 
     def _on_motor_armed_check_result(self, disarmed: bool, detail: str) -> None:
         if not self._armed or self._phase != "checking_motor_armed":

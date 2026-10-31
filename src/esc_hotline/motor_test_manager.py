@@ -104,6 +104,7 @@ class MotorTestManager(QObject):
     value_changed = pyqtSignal(list)  # `motor_count` raw MSP values (1000-2000), one per real motor slot
     phase_changed = pyqtSignal(str)  # PHASE_IDLE / PHASE_UP / PHASE_HOLD / PHASE_DOWN
     leg_progress = pyqtSignal(str, float)  # (phase, seconds into that phase) - emitted right before value_changed
+    manual_idle = pyqtSignal()  # every fader-driven motor is back at idle (or none was running)
     sweep_completed = pyqtSignal()  # a run ran to its end (not stopped by hand) - one more FC+ESC checked
     battery_voltage = pyqtSignal(float)  # volts from MSP_BATTERY_STATE right after connect, -1 = unknown
     protocol_detected = pyqtSignal(int, str)  # index, display name - -1/"" means unknown (right after connect)
@@ -306,6 +307,7 @@ class MotorTestManager(QObject):
             self._man_leg.pop(i, None)
         if not self._man_value:
             self._manual_timer.stop()
+            self.manual_idle.emit()
 
     def disconnect(self) -> None:
         self._manual_finish()
@@ -512,6 +514,8 @@ class MotorTestManager(QObject):
         if self._phase == PHASE_IDLE:
             for i in self._man_target:  # panic key / Стоп also spins the fader-driven motors down (down curve)
                 self._man_target[i] = MSP_MIN
+            if not self._man_value:
+                self.manual_idle.emit()
             return
         self._manual_stop_requested = True
         self._target = self._min_target

@@ -560,3 +560,49 @@ def test_motor_test_can_be_started_again_after_all_done_or_an_error(monkeypatch)
     finally:
         c._armed = False
         c.shutdown()
+
+
+def test_manual_motor_mode_connects_holds_and_leaves_only_after_the_spin_down(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from PyQt6.QtWidgets import QApplication
+
+    from esc_hotline import fc_flash_station as fs
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    c = fs.FcFlashStationController()
+    try:
+        c._armed, c._port_device = True, "COM9"
+        for name in ("_motor_connect_requested", "_motor_stop_requested", "_motor_disconnect_requested", "_motor_manual_target_requested"):
+            setattr(c, name, MagicMock())
+        monkeypatch.setattr(fs, "list_fc_ports", lambda: [fs.PortInfo("COM9", "FC", 0x0483, True)])
+
+        c._set_phase("all_done")
+        c.manual_motor_target(0, 1500)  # not in the manual mode yet: ignored
+        c._motor_manual_target_requested.emit.assert_not_called()
+
+        c.start_manual_motors()
+        assert c.phase == "connecting_motor_test"
+        c._on_motor_connection_state_changed(True)
+        assert c.phase == "manual_motors"  # no armed check / no automatic sweep here
+
+        c.manual_motor_target(1, 1500)
+        c._motor_manual_target_requested.emit.assert_called_once_with(1, 1500)
+
+        c.leave_manual_motors()  # spins down first ...
+        c._motor_stop_requested.emit.assert_called_once()
+        assert c.phase == "manual_motors"
+        c._motor_disconnect_requested.emit.assert_not_called()
+        c._on_manual_idle()  # ... and only then disconnects
+        assert c.phase == "all_done"
+        c._motor_disconnect_requested.emit.assert_called_once()
+
+        c.start_manual_motors()  # the global Стоп in manual mode also spins down before disarming
+        c._on_motor_connection_state_changed(True)
+        c.stop()
+        assert c._armed and c.phase == "manual_motors"
+        c._on_manual_idle()
+        assert not c._armed and c.phase == "idle"
+    finally:
+        c._armed = False
+        c.shutdown()
