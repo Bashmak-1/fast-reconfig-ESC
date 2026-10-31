@@ -18,12 +18,12 @@ Point B = end of hold (time=up_duration_s+hold_duration_s, value=max_percent)
 Point C = end of ramp-down (time=total_duration_s, value=min_percent) -
   drag changes down_duration_s (X) and min_percent (Y, the floor).
 
-In "Безе" mode each of the two curved legs also has a middle anchor (square)
-with two tangent handles (hollow circles, shown for the selected anchor), as in
-a vector editor's pen tool: drag the anchor to bend the curve, drag a handle to
-change the slope through it (Alt = move one handle independently). Double-click
-an anchor/handle resets that leg's curve; reset_all() restores curves, durations
-and bounds. Curve shapes live in ramp_curve.RampCurve (normalized, shared with
+In "Безе" mode each curved leg has any number of interior anchors (squares; the default is one) with two
+tangent handles each (circles, shown for the selected anchor): drag an anchor to bend the curve, a handle to change
+the slope through it (Alt = move one handle independently). Right click on an anchor: handle type (180° smooth /
+independent) or delete it; right click on an empty spot of a leg: add a point there. Points A/B/C are fixed parts
+of the profile, so the minimum is Start-A-C (3 points) or Start-A-B-C (4, with a hold). Double-click an anchor
+resets that leg's curve; reset_all() restores curves, durations and bounds. Curve shapes live in ramp_curve.RampCurve (normalized, shared with
 the real motor control); the main curve is drawn with exact cubicTo() segments
 (affine mapping keeps Bezier curves exact), the progress fill is sampled.
 
@@ -54,7 +54,7 @@ from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPaintEvent
 from PyQt6.QtWidgets import QMenu, QWidget
 
 from .motor_ramp import msp_to_percent, percent_to_msp
-from .ramp_curve import INDEPENDENT, SMOOTH, RampCurve
+from .ramp_curve import INDEPENDENT, MAX_ANCHORS, SMOOTH, RampCurve
 from .motor_test_manager import MAX_SLEW_PER_S, PHASE_DOWN, PHASE_HOLD, PHASE_IDLE, PHASE_UP, RAMP_BEZIER
 from .ramp_chart_math import (
     DEFAULT_DOWN_DURATION_S,
@@ -110,10 +110,10 @@ class RampChartWidget(QWidget):
         self._elapsed_s = 0.0
         self._cycle_start_time: Optional[float] = None
         self._progress_fed = False  # True once the manager reports its own phase clock (see set_progress)
-        self._dragging: Optional[str] = None  # "A"/"B"/"C", "U"/"D" (mid anchors), "U1".."D2" (handles), None
+        self._dragging: Optional[tuple] = None  # ("A",)/("B",)/("C",), ("a", leg, i) anchor, ("h", leg, k) handle, None
         self._up_curve = RampCurve.default()
         self._down_curve = RampCurve.default()
-        self._selected: Optional[str] = None  # "U" / "D": whose handles are shown
+        self._selected: Optional[tuple[str, int]] = None  # (leg "U"/"D", anchor index): whose handles are shown
         self._tick_ms = 50
         self._show_points = False  # draw the motor's per-tick table values on the curve
         self._points_cache: tuple = ()
@@ -290,93 +290,163 @@ class RampChartWidget(QWidget):
     def _curve_handles_visible(self) -> bool:
         return self._use_bezier and self._interactive
 
-    def _hit_targets(self) -> list[tuple[str, QPointF]]:
+    # Targets are tuples: ("A",) / ("B",) / ("C",) the three profile points, ("a", leg, i) interior anchor i of
+    # leg "U"/"D", ("h", leg, k) control point k (a handle) of that leg's curve.
+    def _anchor_of_handle(self, k: int) -> int:
+        return (k + 1) // 3 if k % 3 == 2 else (k - 1) // 3
+
+    def _hit_targets(self) -> list[tuple[tuple, QPointF]]:
         """Draggable things in hit-test priority order (handles of the selected anchor first)."""
-        targets: list[tuple[str, QPointF]] = []
+        targets: list[tuple[tuple, QPointF]] = []
         if self._curve_handles_visible():
-            if self._selected in ("U", "D"):
-                pts = self._curve_of(self._selected).pts
-                targets.append((self._selected + "1", self._to_pixel(self._selected, pts[2])))  # in-handle
-                targets.append((self._selected + "2", self._to_pixel(self._selected, pts[4])))  # out-handle
+            if self._selected is not None:
+                leg, i = self._selected
+                curve = self._curve_of(leg)
+                if 0 < i < curve.segments:
+                    for k in (3 * i - 1, 3 * i + 1):
+                        targets.append((("h", leg, k), self._to_pixel(leg, curve.pts[k])))
             for leg in ("U", "D"):
-                targets.append((leg, self._to_pixel(leg, self._curve_of(leg).pts[3])))
+                curve = self._curve_of(leg)
+                for i in range(1, curve.segments):
+                    targets.append((("a", leg, i), self._to_pixel(leg, curve.pts[3 * i])))
         for which in ("A", "B", "C"):
-            targets.append((which, self._point_pixel(which)))
+            targets.append(((which,), self._point_pixel(which)))
         return targets
 
-    def _hit_test(self, pos: QPointF) -> Optional[str]:
+    def _hit_test(self, pos: QPointF) -> Optional[tuple]:
         for name, p in self._hit_targets():
             if ((pos.x() - p.x()) ** 2 + (pos.y() - p.y()) ** 2) ** 0.5 <= _HANDLE_HIT_TOLERANCE_PX:
                 return name
         return None
 
+    def _set_curve(self, leg: str, curve: RampCurve) -> None:
+        if leg == "U":
+            self._up_curve = curve
+        else:
+            self._down_curve = curve
+
+    def _leg_at(self, pos: QPointF) -> Optional[str]:
+        """Which curved leg a click belongs to: before point A = розгін, after point B = спад, between = the plateau."""
+        if pos.x() < self._point_pixel("A").x() - 1:
+            return "U"
+        if pos.x() > self._point_pixel("B").x() + 1:
+            return "D"
+        return None
+
+    def add_anchor_at(self, pos: QPointF) -> bool:
+        """Right click on an empty spot: a new smooth point on that leg's curve, at the click."""
+        leg = self._leg_at(pos)
+        if leg is None or not self._curve_handles_visible():
+            return False
+        curve = self._curve_of(leg)
+        new = curve.insert_anchor(self._to_norm(leg, pos))
+        if new == curve:
+            return False
+        self._set_curve(leg, new)
+        # select the new point (the anchor whose x is the one we just inserted)
+        norm_x = self._to_norm(leg, pos)[0]
+        self._selected = (leg, next(i for i in range(1, new.segments) if abs(new.pts[3 * i][0] - max(0.0, min(1.0, norm_x))) < 1e-9))
+        self.update()
+        self.curves_changed.emit(self._up_curve, self._down_curve)
+        return True
+
+    def remove_anchor(self, leg: str, index: int) -> bool:
+        curve = self._curve_of(leg)
+        new = curve.remove_anchor(index)
+        if new == curve:
+            return False
+        self._set_curve(leg, new)
+        self._selected = None
+        self.update()
+        self.curves_changed.emit(self._up_curve, self._down_curve)
+        return True
+
+    def set_anchor_mode(self, leg: str, index: int, mode: int) -> None:
+        self._set_curve(leg, self._curve_of(leg).with_mode(index, mode))
+        self.update()
+        self.curves_changed.emit(self._up_curve, self._down_curve)
+
     # ---- mouse: drag points A/B/C and the curve anchors/handles, idle-only ------------------------
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        if not self._interactive:
+        if not self._interactive or event.button() != Qt.MouseButton.LeftButton:
             return
         hit = self._hit_test(event.position())
         self._dragging = hit
-        if hit in ("U", "D"):
-            self._selected = hit
-        elif hit is None or hit in ("A", "B", "C"):
+        if hit is not None and hit[0] == "a":
+            self._selected = (hit[1], hit[2])
+        elif hit is not None and hit[0] == "h":
+            pass  # keep the owner anchor selected
+        else:
             self._selected = None
         self.update()
 
     def contextMenuEvent(self, event) -> None:
-        """Right click on a curve anchor: choose its handle type (saved with the curve)."""
-        if not self._interactive or not self._curve_handles_visible():
+        """Right click. On an interior point: its handle type (180° / independent) and delete. On an empty spot of a
+        curved leg: add a point there. (Points A/B/C are fixed parts of the profile and cannot be deleted.)"""
+        if not self._interactive:
             return
-        hit = self._hit_test(QPointF(event.pos()))
-        if hit not in ("U", "D"):
-            return
-        self._selected = hit
-        curve = self._curve_of(hit)
+        pos = QPointF(event.pos())
         menu = QMenu(self)
-        smooth = menu.addAction("Гладка точка: ручки по прямій (180°)")
-        independent = menu.addAction("Окремі ручки: кожна гнеться сама (Alt - тимчасово)")
-        for act, mode in ((smooth, SMOOTH), (independent, INDEPENDENT)):
-            act.setCheckable(True)
-            act.setChecked(curve.mode_of(1) == mode)
-        chosen = menu.exec(event.globalPos())
-        if chosen in (smooth, independent):
-            new = curve.with_mode(1, SMOOTH if chosen is smooth else INDEPENDENT)
-            if hit == "U":
-                self._up_curve = new
-            else:
-                self._down_curve = new
+        if not self._use_bezier:
+            note = menu.addAction("Точки кривої доступні в режимі «Безе»")
+            note.setEnabled(False)
+            menu.exec(event.globalPos())
+            return
+        hit = self._hit_test(pos)
+        if hit is not None and hit[0] in ("a", "h"):
+            leg = hit[1]
+            index = hit[2] if hit[0] == "a" else self._anchor_of_handle(hit[2])
+            self._selected = (leg, index)
             self.update()
-            self.curves_changed.emit(self._up_curve, self._down_curve)
+            curve = self._curve_of(leg)
+            smooth = menu.addAction("Гладка точка: ручки по прямій (180°)")
+            independent = menu.addAction("Окремі ручки: кожна гнеться сама (Alt - тимчасово)")
+            for act, mode in ((smooth, SMOOTH), (independent, INDEPENDENT)):
+                act.setCheckable(True)
+                act.setChecked(curve.mode_of(index) == mode)
+            menu.addSeparator()
+            delete = menu.addAction("Видалити точку")
+            chosen = menu.exec(event.globalPos())
+            if chosen is delete:
+                self.remove_anchor(leg, index)
+            elif chosen in (smooth, independent):
+                self.set_anchor_mode(leg, index, SMOOTH if chosen is smooth else INDEPENDENT)
+            return
+        if hit is not None:  # A / B / C: nothing to choose
+            return
+        leg = self._leg_at(pos)
+        add = menu.addAction("Додати точку")
+        add.setEnabled(leg is not None and self._curve_of(leg).segments - 1 < MAX_ANCHORS)
+        if menu.exec(event.globalPos()) is add:
+            self.add_anchor_at(pos)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         if not self._interactive:
             return
         hit = self._hit_test(event.position())
-        if hit is not None and hit[0] in ("U", "D"):
-            if hit[0] == "U":
-                self._up_curve = RampCurve.default()
-            else:
-                self._down_curve = RampCurve.default()
+        if hit is not None and hit[0] in ("a", "h"):
+            self._set_curve(hit[1], RampCurve.default())
             self._dragging = None
+            self._selected = None
             self.update()
             self.curves_changed.emit(self._up_curve, self._down_curve)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if self._dragging is None:
             return
-        if self._dragging[0] in ("U", "D"):
-            leg = self._dragging[0]
+        kind = self._dragging[0]
+        if kind in ("a", "h"):
+            leg = self._dragging[1]
             norm = self._to_norm(leg, event.position())
             curve = self._curve_of(leg)
-            if len(self._dragging) == 1:
-                new = curve.move_anchor(1, norm)
+            if kind == "a":
+                new = curve.move_anchor(self._dragging[2], norm)
             else:
-                smooth = curve.mode_of(1) == SMOOTH and not (event.modifiers() & Qt.KeyboardModifier.AltModifier)
-                new = curve.move_handle(2 if self._dragging[1] == "1" else 4, norm, smooth)
-            if leg == "U":
-                self._up_curve = new
-            else:
-                self._down_curve = new
+                k = self._dragging[2]
+                smooth = curve.mode_of(self._anchor_of_handle(k)) == SMOOTH and not (event.modifiers() & Qt.KeyboardModifier.AltModifier)
+                new = curve.move_handle(k, norm, smooth)
+            self._set_curve(leg, new)
             self.update()
             return
         left, _right, width = self._plot_rect()
@@ -384,10 +454,10 @@ class RampChartWidget(QWidget):
         t = pixel_x_to_time(event.position().x(), total, left, width)
         pct = pixel_y_to_percent(event.position().y(), self.height(), _TOP_MARGIN, _BOTTOM_MARGIN)
 
-        if self._dragging == "A":
+        if kind == "A":
             self._up_duration_s = clamp_duration_s(t)
             self._min_percent, self._max_percent = clamp_bound_pair(self._min_percent, pct, dragging="max")
-        elif self._dragging == "B":
+        elif kind == "B":
             self._hold_duration_s = max(0.0, min(MAX_PHASE_DURATION_S, t - self._up_duration_s))
         else:  # "C"
             self._down_duration_s = clamp_duration_s(t - self._up_duration_s - self._hold_duration_s)
@@ -398,7 +468,7 @@ class RampChartWidget(QWidget):
         if self._dragging is None:
             return
         dragged, self._dragging = self._dragging, None
-        if dragged[0] in ("U", "D"):
+        if dragged[0] in ("a", "h"):
             self.curves_changed.emit(self._up_curve, self._down_curve)
             return
         self.profile_changed.emit(
@@ -487,22 +557,24 @@ class RampChartWidget(QWidget):
                     painter.drawEllipse(QPointF(time_to_pixel_x(t, total, left, plot_width),
                                                 percent_to_pixel_y(pct, h, _TOP_MARGIN, _BOTTOM_MARGIN)), 2, 2)
 
-        # curve anchors (squares) + the selected anchor's tangent handles (hollow circles)
+        # curve anchors (squares) + the selected anchor's tangent handles (circles; filled = independent)
         if self._curve_handles_visible():
             for leg in ("U", "D"):
-                pts = self._curve_of(leg).pts
-                m = self._to_pixel(leg, pts[3])
-                if self._selected == leg:
-                    painter.setPen(QPen(QColor(TEXT_MUTED), 1))
-                    independent = self._curve_of(leg).mode_of(1) == INDEPENDENT
-                    for k in (2, 4):
-                        hp = self._to_pixel(leg, pts[k])
-                        painter.drawLine(m, hp)
-                        painter.setBrush(QColor(ACCENT_AMBER) if independent else QColor(BG_PANEL))  # filled = independent
-                        painter.drawEllipse(hp, _HANDLE_RADIUS, _HANDLE_RADIUS)
-                painter.setPen(QPen(QColor(BG_MAIN), 1))
-                painter.setBrush(QColor(ACCENT_AMBER if self._selected == leg else ACCENT_GREEN))
-                painter.drawRect(QRectF(m.x() - _ANCHOR_HALF, m.y() - _ANCHOR_HALF, 2 * _ANCHOR_HALF, 2 * _ANCHOR_HALF))
+                curve = self._curve_of(leg)
+                for i in range(1, curve.segments):
+                    m = self._to_pixel(leg, curve.pts[3 * i])
+                    chosen = self._selected == (leg, i)
+                    if chosen:
+                        painter.setPen(QPen(QColor(TEXT_MUTED), 1))
+                        independent = curve.mode_of(i) == INDEPENDENT
+                        for k in (3 * i - 1, 3 * i + 1):
+                            hp = self._to_pixel(leg, curve.pts[k])
+                            painter.drawLine(m, hp)
+                            painter.setBrush(QColor(ACCENT_AMBER) if independent else QColor(BG_PANEL))
+                            painter.drawEllipse(hp, _HANDLE_RADIUS, _HANDLE_RADIUS)
+                    painter.setPen(QPen(QColor(BG_MAIN), 1))
+                    painter.setBrush(QColor(ACCENT_AMBER if chosen else ACCENT_GREEN))
+                    painter.drawRect(QRectF(m.x() - _ANCHOR_HALF, m.y() - _ANCHOR_HALF, 2 * _ANCHOR_HALF, 2 * _ANCHOR_HALF))
 
         # draggable points A (end of up), B (end of hold), C (end of down)
         point_color = QColor(ACCENT_GREEN if self._interactive else TEXT_MUTED)

@@ -38,6 +38,7 @@ TICK_KEY = "motor_test_tick_ms"
 SHOW_POINTS_KEY = "motor_test_show_points"
 
 MIN_ANCHOR_GAP = 0.05  # keep anchors this far (in x) from each other / the ends
+MAX_ANCHORS = 8  # interior anchors per leg that the operator can add
 _SOLVE_ITERATIONS = 50
 SMOOTH, INDEPENDENT = 0, 1  # per-anchor handle type
 
@@ -195,3 +196,45 @@ class RampCurve:
                 olen = ((pts[other][0] - ax) ** 2 + (pts[other][1] - ay) ** 2) ** 0.5
                 pts[other] = self._fit_handle(other, (ax - vx / n * olen, ay - vy / n * olen), anchor_xs)
         return RampCurve(tuple(pts), self.modes)
+
+    # ---- adding / removing anchors ---------------------------------------------
+
+    def insert_anchor(self, pos: Point) -> "RampCurve":
+        """Put a new smooth anchor at `pos` (normalized): the curve is bent through it. Its handles follow the
+        slope between the neighbouring anchors, so the point starts out smooth and tame. Refused (self returned)
+        when it would sit closer than MIN_ANCHOR_GAP to a neighbour or the curve already has MAX_ANCHORS."""
+        if self.segments - 1 >= MAX_ANCHORS:
+            return self
+        x, y = _clamp(pos[0], 0.0, 1.0), _clamp(pos[1], 0.0, 1.0)
+        anchors = list(self.pts[0::3])
+        seg = next((s for s in range(self.segments) if anchors[s][0] < x < anchors[s + 1][0]), None)
+        if seg is None or x - anchors[seg][0] < MIN_ANCHOR_GAP or anchors[seg + 1][0] - x < MIN_ANCHOR_GAP:
+            return self
+        prev, nxt = anchors[seg], anchors[seg + 1]
+        slope = (nxt[1] - prev[1]) / (nxt[0] - prev[0])
+        left, right = (x - prev[0]) / 3, (nxt[0] - x) / 3
+        new_anchor = (x, y)
+        h_in = (x - left, _clamp(y - slope * left, 0.0, 1.0))
+        h_out = (x + right, _clamp(y + slope * right, 0.0, 1.0))
+        pts = list(self.pts)
+        pts[3 * seg + 1: 3 * seg + 3] = [pts[3 * seg + 1], h_in, new_anchor, h_out, pts[3 * seg + 2]]
+        xs = [p[0] for p in pts[0::3]]
+        for k in range(len(pts)):  # the old long segment's handles now belong to shorter ones
+            if k % 3:
+                pts[k] = self._fit_handle(k, pts[k], xs)
+        modes = list(self.modes) + [SMOOTH] * (self.segments - 1 - len(self.modes))
+        modes.insert(seg, SMOOTH)
+        out = RampCurve(tuple(pts), tuple(modes))
+        return out if _valid(out.pts) else self
+
+    def remove_anchor(self, anchor: int) -> "RampCurve":
+        """Delete interior anchor `anchor` with its two handles; the neighbours' own handles shape the merged segment.
+        With no interior anchors left the leg is a single Bezier segment (the minimum)."""
+        if not 0 < anchor < self.segments:
+            return self
+        pts = list(self.pts)
+        del pts[3 * anchor - 1: 3 * anchor + 2]
+        modes = list(self.modes) + [SMOOTH] * (self.segments - 1 - len(self.modes))
+        del modes[anchor - 1]
+        out = RampCurve(tuple(pts), tuple(modes))
+        return out if _valid(out.pts) else self

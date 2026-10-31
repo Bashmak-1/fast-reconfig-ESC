@@ -107,3 +107,44 @@ def test_chart_recalculate_reports_a_good_profile_and_warns_about_a_too_steep_on
     chart.set_durations(0.1, 0.0, 0.1)  # the whole range in two ticks: the slew guard would slow it down
     short, full = chart.recalculate(50)
     assert short.startswith("⚠") and "Увага" in full
+
+
+def test_insert_anchor_bends_the_curve_through_the_point_and_stays_valid():
+    from esc_hotline.ramp_curve import SMOOTH
+
+    c = RampCurve.default().insert_anchor((0.25, 0.9))
+    assert c.segments == 3 and c.pts[3 * 1][0] == pytest.approx(0.25) and c.pts[3 * 1][1] == pytest.approx(0.9)
+    assert c.ease(0.25) == pytest.approx(0.9, abs=1e-6)  # the curve really passes through the new point
+    assert c.mode_of(1) == SMOOTH and RampCurve.from_points(c.pts, c.modes) == c
+    xs = [c.ease(i / 100) for i in range(101)]
+    assert min(xs) >= 0.0 and max(xs) <= 1.0
+
+
+def test_insert_is_refused_too_close_to_a_neighbour_or_when_full():
+    c = RampCurve.default()
+    assert c.insert_anchor((0.5 + MIN_ANCHOR_GAP / 2, 0.5)) == c  # on top of the middle anchor
+    assert c.insert_anchor((0.02, 0.1)) == c  # too close to the start
+    full = c
+    for i in range(1, 20):
+        full = full.insert_anchor((i * 0.05 + 0.025, 0.5))
+    assert full.segments - 1 <= 8
+
+
+def test_remove_anchor_down_to_a_single_segment():
+    c = RampCurve.default().insert_anchor((0.25, 0.4)).insert_anchor((0.75, 0.6))
+    assert c.segments == 4
+    for _ in range(3):
+        c = c.remove_anchor(1)
+    assert c.segments == 1 and len(c.pts) == 4 and RampCurve.from_points(c.pts, c.modes) == c
+    assert c.remove_anchor(1) == c  # nothing interior left to remove
+    assert c.ease(0.0) == pytest.approx(0.0) and c.ease(1.0) == pytest.approx(1.0)
+
+
+def test_modes_follow_inserted_and_removed_anchors():
+    from esc_hotline.ramp_curve import INDEPENDENT, SMOOTH
+
+    c = RampCurve.default().with_mode(1, INDEPENDENT)  # the middle anchor is independent
+    c = c.insert_anchor((0.2, 0.2))  # a new anchor BEFORE it: the independent one is now number 2
+    assert c.mode_of(1) == SMOOTH and c.mode_of(2) == INDEPENDENT
+    c = c.remove_anchor(1)
+    assert c.mode_of(1) == INDEPENDENT
