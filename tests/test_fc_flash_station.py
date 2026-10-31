@@ -372,6 +372,7 @@ def test_station_motor_test_uses_the_exact_fractional_durations_and_bounds(monke
     c = fs.FcFlashStationController()
     try:
         c._armed = True
+        c._sweep_started = True  # a sweep that has really started
         c._set_phase("running_motor_test")
         c._motor_start_sweep_requested = MagicMock()
         c._start_motor_sweep()
@@ -430,6 +431,7 @@ def test_stop_during_the_motor_test_spins_down_first_and_a_second_press_stops_at
         c._armed = True
         c._motor_stop_requested = MagicMock()
         c._motor_disconnect_requested = MagicMock()
+        c._sweep_started = True  # a sweep that has really started
         c._set_phase("running_motor_test")
         c.stop()  # global Стоп: smooth spin-down requested, station still armed
         c._motor_stop_requested.emit.assert_called_once()
@@ -441,6 +443,7 @@ def test_stop_during_the_motor_test_spins_down_first_and_a_second_press_stops_at
         c._armed = True
         c._motor_test_manual = True
         c._motor_stop_requested.reset_mock()
+        c._sweep_started = True  # a sweep that has really started
         c._set_phase("running_motor_test")
         c.stop_motor_test()  # the motor-test button: back to waiting for the next press, station stays armed
         c._motor_stop_requested.emit.assert_called_once()
@@ -603,6 +606,41 @@ def test_manual_motor_mode_connects_holds_and_leaves_only_after_the_spin_down(mo
         assert c._armed and c.phase == "manual_motors"
         c._on_manual_idle()
         assert not c._armed and c.phase == "idle"
+    finally:
+        c._armed = False
+        c.shutdown()
+
+
+def test_stop_in_the_idle_lead_in_cancels_the_sweep_instead_of_being_ignored(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from PyQt6.QtWidgets import QApplication
+
+    from esc_hotline import fc_flash_station as fs
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    c = fs.FcFlashStationController()
+    try:
+        c._armed, c._port_device = True, "COM9"
+        for name in ("_motor_stop_requested", "_motor_disconnect_requested", "_motor_start_sweep_requested"):
+            setattr(c, name, MagicMock())
+        monkeypatch.setattr(fs, "list_fc_ports", lambda: [fs.PortInfo("COM9", "FC", 0x0483, True)])
+
+        c._sweep_started = False  # phase is already "running" but the 1 s idle lead-in has not ended
+        c._set_phase("running_motor_test")
+        c.stop_motor_test()
+        assert c.phase == "all_done" and not c._motor_stop_pending
+        c._start_motor_sweep()  # the lead-in timer fires later: it must not start the sweep any more
+        c._motor_start_sweep_requested.emit.assert_not_called()
+
+        c._sweep_started = True  # a sweep that really runs still gets the smooth spin-down
+        c._sweep_started = True  # a sweep that has really started
+        c._set_phase("running_motor_test")
+        c.stop_motor_test()
+        c._motor_stop_requested.emit.assert_called_once()
+        assert c.phase == "running_motor_test" and c._motor_stop_pending
+        c.stop_motor_test()  # second press: at once
+        assert c.phase == "all_done"
     finally:
         c._armed = False
         c.shutdown()

@@ -651,6 +651,7 @@ class FcFlashStationController(QObject):
         self._motor_test_manual = False  # test only on the operator's button (phase waiting_motor_start)
         self._motor_stop_pending = False  # a smooth spin-down was requested and has not finished yet
         self._manual_motors = False  # the next motor connection is for the faders, not for the automatic test
+        self._sweep_started = False  # the automatic sweep has really been started (after the idle lead-in)
         self._manual_exit: Optional[str] = None  # "leave" | "disarm" while the faders spin down before disconnecting
         self._motor_stop_disarm = False  # ... by the global Стоп: disarm the station when it finishes
         self._esc_indices: list[int] = [0]
@@ -893,6 +894,12 @@ class FcFlashStationController(QObject):
         """Стоп during the motor test: spin down along the down curve (an abrupt drop burned FC controllers before).
         A second press stops at once; a watchdog forces it if the spin-down never reports back."""
         self._motor_stop_pending, self._motor_stop_disarm = True, disarm
+        if not self._sweep_started:
+            # still in the idle lead-in: nothing is spinning and the manager has no sweep to stop - without this the
+            # Стоп did nothing and the sweep started a moment later anyway
+            self._flog.info("FC flash station: Стоп before the sweep started - cancelling it")
+            self._after_motor_stop()
+            return
         self.dfu_detail_changed.emit("Зупинка моторів: плавний спад... Натисніть Стоп ще раз для негайної зупинки.")
         self._motor_stop_requested.emit()
         QTimer.singleShot(75_000, self._force_motor_stop)
@@ -1601,14 +1608,16 @@ class FcFlashStationController(QObject):
                 "мотори можуть не обертатись."
             )
         self._flog.info("FC flash station: starting final motor test (%d motor(s))", self._motor_count_for_test)
+        self._sweep_started = False
         self._set_phase("running_motor_test")
         # the ramp used to start 10 ms after the FC answered; the Motors tab (works fine) always has seconds
         # of idle frames first, so give the ESCs time to arm on the idle signal before throttle rises
         QTimer.singleShot(int(MOTOR_ARM_LEAD_S * 1000), self._start_motor_sweep)
 
     def _start_motor_sweep(self) -> None:
-        if not self._armed or self._phase != "running_motor_test":
+        if not self._armed or self._phase != "running_motor_test" or self._motor_stop_pending:
             return
+        self._sweep_started = True
         self._motor_start_sweep_requested.emit(
             load_float(_MOTOR_UP_DURATION_KEY, DEFAULT_MOTOR_UP_DURATION_S),
             load_float(_MOTOR_HOLD_DURATION_KEY, DEFAULT_MOTOR_HOLD_DURATION_S),
