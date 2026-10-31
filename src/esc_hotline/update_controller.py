@@ -149,19 +149,23 @@ class UpdateController(QObject):
         if answer == QMessageBox.StandardButton.Yes:
             self._launch_updater(tag)
 
-    def _launch_session_updater(self, tag: Optional[str]) -> None:
-        """Launcher session: the real app lives in a temp folder, so the thing to replace is the launcher. Fetch
-        the release's own updater into a temp folder (so it is always the right version), hand it the session
-        token (no second password) and quit; it waits for the launcher to exit, swaps it and starts it again."""
+    def _launch_session_updater(self, tag: Optional[str] = None, channel: Optional[str] = None) -> None:
+        """Launcher session: the real app lives in a temp folder, so what gets replaced is the launcher exe. The
+        release's own updater is fetched into a temp folder (so it always matches the release), gets the session
+        token (no second password) and the launcher's path. Same channel: it waits for this launcher to exit, swaps
+        it and starts it again, so this app quits. Other channel (or a tag from it): it installs that channel's
+        launcher into ~/.esc_hotline/<channel>/ and this app keeps running."""
         launcher = os.environ.get(session_gate.ENV_LAUNCHER_EXE, "")
         pid = os.environ.get(session_gate.ENV_PID, "")
         if not launcher or not pid.isdigit():
             QMessageBox.information(self._parent, i18n.tr("update_title"), i18n.tr("update_dev_build"))
             return
+        want = channel or (core.channel_of(tag) if tag else CHANNEL)
+        same = want == CHANNEL
         tmp = Path(tempfile.mkdtemp(prefix=core.UPDATE_PREFIX))
         try:
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            release = next((r for ch in core.CHANNELS for r in core.list_releases(ch) if r.tag == tag), None) if tag else core.fetch_latest(channel=CHANNEL)
+            release = next((r for ch in core.CHANNELS for r in core.list_releases(ch) if r.tag == tag), None) if tag else core.fetch_latest(channel=want)
             if release is None:
                 raise ValueError(f"релізу {tag} не знайдено")
             core.fetch_verified(release, core.UPDATER_EXE, tmp / core.UPDATER_EXE)
@@ -171,12 +175,15 @@ class UpdateController(QObject):
             return
         finally:
             QApplication.restoreOverrideCursor()
-        cmd = [str(tmp / core.UPDATER_EXE), "--launcher", "--yes", "--channel", CHANNEL, "--current", __version__,
-               "--wait-pid", pid, "--target", launcher, "--cleanup", str(tmp)]
+        target = launcher if same else str(core.channel_dir(want) / core.MAIN_EXE)
+        cmd = [str(tmp / core.UPDATER_EXE), "--launcher", "--yes", "--channel", want, "--target", target, "--cleanup", str(tmp)]
+        if same:
+            cmd += ["--current", __version__, "--wait-pid", pid]
         if tag:
             cmd += ["--tag", tag]
         subprocess.Popen(cmd, cwd=str(tmp), creationflags=CREATE_NEW_CONSOLE)  # env (with the token) is inherited
-        QApplication.quit()
+        if same:
+            QApplication.quit()
 
     def _launch_updater(self, tag: Optional[str] = None) -> None:
         if session_gate.in_session():
@@ -200,6 +207,9 @@ class UpdateController(QObject):
     def install_other(self) -> None:
         """Download/update the other channel's build. This app keeps running: it is a separate
         folder and exe, so nothing here can touch the build the user is currently in."""
+        if session_gate.in_session():
+            self._launch_session_updater(channel=OTHER_CHANNEL)
+            return
         updater = install_dir() / core.UPDATER_EXE
         if not is_frozen() or not updater.exists():
             QMessageBox.information(self._parent, i18n.tr("update_title"), i18n.tr("update_dev_build"))

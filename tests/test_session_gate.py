@@ -110,3 +110,32 @@ def test_login_dialog_rereads_the_user_list_on_every_try(monkeypatch, tmp_path):
     assert g.login_dialog(lambda: g.find_users(tmp_path)) is not None
     monkeypatch.setattr(tk.Tk, "mainloop", orig)
     assert seen  # the first try stayed in the window
+
+
+def test_install_the_other_channel_inside_a_session_keeps_this_app_running(monkeypatch, tmp_path):
+    import shutil
+    from unittest.mock import MagicMock
+
+    from PyQt6.QtWidgets import QApplication, QWidget
+
+    from esc_hotline import update_controller as uc
+    from esc_hotline import updater_core as core
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    for k, v in {**g.session_env(4242), g.ENV_LAUNCHER_EXE: str(tmp_path / "EscHotline.exe")}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(uc, "CREATE_NEW_CONSOLE", 0)
+    asked = []
+    monkeypatch.setattr(core, "fetch_latest", lambda **kw: asked.append(kw["channel"]) or core.Release("9.9.9", {}, "v9.9.9"))
+    monkeypatch.setattr(core, "fetch_verified", lambda rel, name, dest, *a: dest.write_bytes(b"x"))
+    popen, quit_ = MagicMock(), MagicMock()
+    monkeypatch.setattr(uc.subprocess, "Popen", popen)
+    monkeypatch.setattr(uc.QApplication, "quit", quit_)
+    uc.UpdateController(QWidget()).install_other()
+    cmd = popen.call_args[0][0]
+    other = uc.OTHER_CHANNEL
+    assert asked == [other] and cmd[cmd.index("--channel") + 1] == other
+    assert cmd[cmd.index("--target") + 1] == str(core.channel_dir(other) / core.MAIN_EXE)  # its own folder, not this launcher
+    assert "--wait-pid" not in cmd  # nothing to wait for: this app stays open
+    quit_.assert_not_called()
+    shutil.rmtree(cmd[cmd.index("--cleanup") + 1], ignore_errors=True)
