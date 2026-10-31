@@ -232,34 +232,72 @@ def test_all_mode_moves_every_motor_together():
     assert len(set(sent[-1])) == 1  # every motor got the same value
 
 
-def test_manual_drive_slews_one_motor_and_spins_down():
+def _manual_manager(motor_count=2):
     from PyQt6.QtWidgets import QApplication
 
     from esc_hotline import motor_test_manager as mtm
 
-    app = QApplication.instance() or QApplication([])  # noqa: F841
+    QApplication.instance() or QApplication([])
     sent = []
 
     class _Msp:
         def send(self, cmd, payload=b"", **k):
-            sent.append(payload)
+            sent.append([int.from_bytes(payload[i:i + 2], "little") for i in range(0, 2 * motor_count, 2)])
 
     m = mtm.MotorTestManager()
-    m._msp, m._motor_count = _Msp(), 2
+    m._msp, m._motor_count = _Msp(), motor_count
     m._read_disarmed_state = lambda: (True, "")
+    return m, sent, mtm
+
+
+def test_manual_drive_slews_up_and_holds_where_the_fader_is_left():
+    m, sent, mtm = _manual_manager()
     m.manual_set_target(1, 1500)
     m._on_manual_tick()
-    first = [int.from_bytes(sent[-1][i:i + 2], "little") for i in (0, 2)]
-    assert first == [mtm.MSP_MIN, mtm.MSP_MIN + mtm.MANUAL_STEP]  # only motor 2, one slew step
-    m.manual_set_target(1, mtm.MSP_MIN)  # slider released
-    for _ in range(5):
+    assert sent[-1] == [mtm.MSP_MIN, mtm.MSP_MIN + mtm.MANUAL_STEP]  # only motor 2, one slew step
+    for _ in range(40):
         m._on_manual_tick()
-    assert m._manual_index is None  # spun down gradually, then idle
-    m.manual_set_target(0, 1500)
+    assert sent[-1] == [mtm.MSP_MIN, 1500]
+    for _ in range(100):  # the fader is released and nothing else happens: the motor keeps spinning, forever
+        m._on_manual_tick()
+    assert sent[-1] == [mtm.MSP_MIN, 1500] and m._manual_timer.isActive()
+
+
+def test_manual_drive_goes_down_along_the_curve_not_in_one_jump():
+    m, sent, mtm = _manual_manager()
+    m.set_ramp_mode("bezier")
+    m.manual_set_target(0, 1800)
+    for _ in range(60):
+        m._on_manual_tick()
+    assert sent[-1][0] == 1800
+    m.manual_set_target(0, 1200)
+    seen = []
+    for _ in range(200):
+        m._on_manual_tick()
+        seen.append(sent[-1][0])
+    steps = [a - b for a, b in zip(seen, seen[1:])]
+    assert max(steps) <= mtm.MAX_SLEW_PER_S * mtm.MANUAL_TICK_MS / 1000  # never an abrupt drop
+    assert seen[0] > 1700 and seen[-1] == 1200 and seen == sorted(seen, reverse=True)  # eased, ends on the target
+
+
+def test_manual_motors_are_independent_and_stop_spins_all_down_to_idle():
+    m, sent, mtm = _manual_manager()
+    m.manual_set_target(0, 1400)
+    m.manual_set_target(1, 1600)
+    for _ in range(60):
+        m._on_manual_tick()
+    assert sent[-1] == [1400, 1600]
+    m.stop_sweep()  # the Стоп button / panic key while idle
+    for _ in range(400):
+        m._on_manual_tick()
+    assert sent[-1] == [mtm.MSP_MIN, mtm.MSP_MIN] and not m._man_value and not m._manual_timer.isActive()
+
+
+def test_manual_drive_refused_on_an_armed_fc():
+    m, sent, mtm = _manual_manager()
     m._read_disarmed_state = lambda: (False, "ARMED")
-    m._manual_index = None
     m.manual_set_target(0, 1500)
-    assert m._manual_index is None  # armed FC: refused
+    assert not m._man_value and not sent
 
 
 # ---- pre-solved leg table + slew guard --------------------------------------------------------------------------

@@ -76,6 +76,7 @@ DEFAULT_MIN_BOUND = 0
 DEFAULT_MAX_BOUND = 100
 _MAX_DURATION_S = 60.0
 _DURATION_STEP_S = 0.1
+FADER_FLUSH_MS = 30  # how often the faders' newest values are handed to the motor thread
 _SLIDER_HEIGHT = 70
 _SLIDER_WIDTH = 22
 _RAMP_MODE_LABELS = {RAMP_LINEAR: "Лінійна", RAMP_BEZIER: "Безе"}
@@ -261,6 +262,14 @@ class MotorTestPage(QWidget):
         # then, not a fixed 8 with unused ones just greyed out.
         self._motor_sliders: list[QSlider] = []
         self._motor_labels: list[QLabel] = []
+        # Faders never talk to the manager directly: they drop their newest value into a mailbox that is flushed
+        # every FADER_FLUSH_MS, so a mouse firing hundreds of moves per second cannot flood the motor thread's queue.
+        self._fader_pending: dict[int, int] = {}
+        self._syncing_faders = False
+        self._fader_timer = QTimer(self)
+        self._fader_timer.setSingleShot(True)
+        self._fader_timer.setInterval(FADER_FLUSH_MS)
+        self._fader_timer.timeout.connect(self._flush_faders)
         self._motor_row = QHBoxLayout()
         self._motor_row.setSpacing(10)
         root.addLayout(self._motor_row)
@@ -452,8 +461,9 @@ class MotorTestPage(QWidget):
             slider.setValue(MSP_MIN)
             slider.setEnabled(self._connected and self._sweep_idle)
             slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            slider.sliderMoved.connect(lambda v, i=len(self._motor_sliders): self._manual_target_requested.emit(i, v))
-            slider.sliderReleased.connect(lambda i=len(self._motor_sliders): self._manual_target_requested.emit(i, MSP_MIN))
+            # valueChanged (not sliderMoved): also catches a click on the track. Releasing does NOT stop the motor -
+            # it keeps spinning where the fader was left; pull it down to slow it along the down curve.
+            slider.valueChanged.connect(lambda v, i=len(self._motor_sliders): self._on_fader_changed(i, v))
             slider.setFixedHeight(_SLIDER_HEIGHT)
             slider.setFixedWidth(_SLIDER_WIDTH)
             col_layout.addWidget(slider, alignment=Qt.AlignmentFlag.AlignHCenter)
@@ -464,6 +474,28 @@ class MotorTestPage(QWidget):
             self._motor_sliders.append(slider)
             self._motor_labels.append(value_label)
         self._motor_row.addStretch(1)
+
+    def _on_fader_changed(self, index: int, value: int) -> None:
+        if self._syncing_faders:
+            return
+        self._fader_pending[index] = value
+        if not self._fader_timer.isActive():
+            self._fader_timer.start()
+
+    def _flush_faders(self) -> None:
+        pending, self._fader_pending = self._fader_pending, {}
+        for index, value in pending.items():
+            self._manual_target_requested.emit(index, value)
+
+    def _zero_faders(self) -> None:
+        """Стоп / panic key: the manager spins the fader-driven motors down itself, the handles follow them to 0."""
+        self._syncing_faders = True
+        try:
+            for slider in self._motor_sliders:
+                slider.setValue(MSP_MIN)
+        finally:
+            self._syncing_faders = False
+        self._fader_pending.clear()
 
     def _wire_signals(self) -> None:
         self._connect_requested.connect(self.manager.connect)
@@ -818,6 +850,8 @@ class MotorTestPage(QWidget):
                 self._disconnect_requested.emit()
 
     def _on_stop_clicked(self) -> None:
+        if self._sweep_idle:
+            self._zero_faders()
         self._stop_sweep_requested.emit()
 
     # ---- motor protocol ------------------------------------------------
@@ -865,6 +899,8 @@ class MotorTestPage(QWidget):
         # so this only fires while the operator is actually looking at this
         # tab, matching the "app-focused, no OS-global-hotkey" panic stop.
         if event.type() == QEvent.Type.KeyPress and self._connected and self.isVisible():
+            if self._sweep_idle:
+                self._zero_faders()
             self._stop_sweep_requested.emit()
             return True
         return super().eventFilter(obj, event)
@@ -914,10 +950,14 @@ class MotorTestPage(QWidget):
         self._master_progress.setValue(round(pct))
         self._master_pct_label.setText(f"{pct:.1f}%")
         self._ramp_chart.set_current_value(top)
-        for slider, label, v in zip(self._motor_sliders, self._motor_labels, values):
-            if not slider.isSliderDown():
-                slider.setValue(v)
-            label.setText(f"{msp_to_percent(v):.1f}%")
+        self._syncing_faders = True
+        try:
+            for slider, label, v in zip(self._motor_sliders, self._motor_labels, values):
+                if not self._sweep_idle and not slider.isSliderDown():
+                    slider.setValue(v)  # an automatic run drives the handles; in manual mode they are the controls
+                label.setText(f"{msp_to_percent(v):.1f}%")
+        finally:
+            self._syncing_faders = False
         if self._sweep_idle:  # a motor driven by its slider can be stopped with the button too
             self._stop_btn.setEnabled(top > MSP_MIN)
 
